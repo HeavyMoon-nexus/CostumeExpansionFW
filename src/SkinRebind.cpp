@@ -111,7 +111,7 @@ namespace CostumeFW
                     parent->DetachChild(node);
                     ++removed;
                 }
-                SKSE::log::info("  DetachNodes[{}] '{}' removed {}", a_tag, nodeName, removed);
+                SKSE::log::debug("  DetachNodes[{}] '{}' removed {}", a_tag, nodeName, removed);
             };
             detachFrom(player->Get3D(false), "3p");
             detachFrom(player->Get3D(true), "1p");
@@ -187,7 +187,7 @@ namespace CostumeFW
             // the entire rebind. THIS was the bug. skee uses skinData bone count.
             const std::uint32_t n = a_skin->skinData->bones;
             const char* rttiName = a_skin->GetRTTI() ? a_skin->GetRTTI()->name : "<null>";
-            SKSE::log::info("  skin rtti='{}' boneCount={} numMatrices={} worldXf={}",
+            SKSE::log::debug("  skin rtti='{}' boneCount={} numMatrices={} worldXf={}",
                 rttiName, n, a_skin->numMatrices, a_skin->boneWorldTransforms != nullptr);
             if (n == 0) {
                 return true;
@@ -258,7 +258,7 @@ namespace CostumeFW
                     rd.partitions[i].startNetBoneSet = (i == 0);
                     rd.partitions[i].slot = 61;  // unused biped slot - claims nothing
                 }
-                SKSE::log::info("  neutralized {} dismember partition(s)", rd.numPartitions);
+                SKSE::log::debug("  neutralized {} dismember partition(s)", rd.numPartitions);
             }
             return true;
         }
@@ -300,7 +300,7 @@ namespace CostumeFW
                         const auto& alt = a_swap->alternateTextures[i];
                         if (alt.textureSet && a_geom->name == alt.name3D) {
                             if (ApplyTextureSet(a_geom, alt.textureSet)) {
-                                SKSE::log::info("  applied TXST to shape '{}'", a_geom->name.c_str());
+                                SKSE::log::debug("  applied TXST to shape '{}'", a_geom->name.c_str());
                             }
                         }
                     }
@@ -317,7 +317,7 @@ namespace CostumeFW
             }
             // Idempotency: already present on this skeleton?
             if (a_root3D->GetObjectByName(a_nodeName)) {
-                SKSE::log::info("  already attached: {}", a_nodeName);
+                SKSE::log::debug("  already attached: {}", a_nodeName);
                 return true;
             }
 
@@ -342,7 +342,7 @@ namespace CostumeFW
                 SKSE::log::error("  no attach root node");
                 return false;
             }
-            SKSE::log::info("  root3D='{}' attachRoot='{}'",
+            SKSE::log::debug("  root3D='{}' attachRoot='{}'",
                 a_root3D->name.c_str(), attachRoot->name.c_str());
 
             // Collect the skinned geometry and rebind each to the live skeleton.
@@ -402,7 +402,7 @@ namespace CostumeFW
             // clips through a 3BA/CBBE body. No-op if skee is absent.
             BodyMorph::ApplyToNode(RE::PlayerCharacter::GetSingleton(), holder);
 
-            SKSE::log::info("  attached {} ({} skinned shape(s))", a_nodeName, geoms.size());
+            SKSE::log::debug("  attached {} ({} skinned shape(s))", a_nodeName, geoms.size());
             return true;
         }
 
@@ -415,7 +415,7 @@ namespace CostumeFW
                 return false;
             }
             const std::string nodeName = NodeName(a_id);
-            SKSE::log::info("InjectInternal id='{}' 3p='{}' 1p='{}'",
+            SKSE::log::debug("InjectInternal id='{}' 3p='{}' 1p='{}'",
                 a_id, a_m3p.nifPath, a_m1p.nifPath);
 
             bool any = false;
@@ -529,7 +529,7 @@ namespace CostumeFW
                     show = (player->GetWornArmor(it.tokenForm) != nullptr);
                 }
             }
-            SKSE::log::info("  item '{}' tokenForm={:08X} show={}", it.id, it.tokenForm, show);
+            SKSE::log::debug("  item '{}' tokenForm={:08X} show={}", it.id, it.tokenForm, show);
             if (show) {
                 InjectInternal(it.id, it.m3p, it.m1p);
             } else {
@@ -715,7 +715,7 @@ namespace CostumeFW
     {
         Unregister(a_id);
         DetachNodes(a_id);
-        SKSE::log::info("  detached {}", a_id);
+        SKSE::log::debug("  detached {}", a_id);
     }
 
     void InjectTestFromFile()

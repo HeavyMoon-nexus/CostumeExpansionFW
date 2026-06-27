@@ -281,7 +281,7 @@ namespace CostumeFW
         }
         eqm->UnequipObject(player, obj);
         eqm->EquipObject(player, obj);
-        SKSE::log::info("boxes: re-equipped worn token '{}' (keyword refresh)", a_token);
+        SKSE::log::debug("boxes: re-equipped worn token '{}' (keyword refresh)", a_token);
     }
 
     void ReapplyBoxes()
@@ -559,7 +559,7 @@ namespace CostumeFW
                 AddEffect(spell, e->baseEffect, e->effectItem.magnitude);
             }
 
-            SKSE::log::info("boxes: synth enchant ability for '{}' ({} effect(s))",
+            SKSE::log::debug("boxes: synth enchant ability for '{}' ({} effect(s))",
                 a_box.token, enchEffects.size());
             return spell;
         }
@@ -645,7 +645,7 @@ namespace CostumeFW
                     }
                 }
             }
-            SKSE::log::info("boxes: token '{}' passthrough keywords +{}", a_box.token, mine.size());
+            SKSE::log::debug("boxes: token '{}' passthrough keywords +{}", a_box.token, mine.size());
         }
 
         // Write a box's contents' armor + weight DIRECTLY onto its token ARMO's
@@ -682,7 +682,7 @@ namespace CostumeFW
             }
             token->bipedModelData.armorType = type;
 
-            SKSE::log::info("boxes: token '{}' stats armor={} weight={} type={}",
+            SKSE::log::debug("boxes: token '{}' stats armor={} weight={} type={}",
                 a_box.token, armorSum, weightSum, a_box.armorType);
 
             SetTokenKeywords(a_box);  // aggregate contents' keywords onto the token
