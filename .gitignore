@@ -1,0 +1,29 @@
+# IDE / editor
+.idea
+.vs
+.vscode/
+*.user
+
+# Claude Code / AI session artifacts
+.claude/
+
+# Build output
+out
+build
+install
+cmake-build*
+*.dll
+*.pdb
+
+# vcpkg
+vcpkg_installed
+
+# Logs
+*.log
+
+# Skyrim archives
+*.bsa
+
+# Internal dev docs (not for public release)
+HANDOFF.md
+FSMP_API_PROPOSAL.md
