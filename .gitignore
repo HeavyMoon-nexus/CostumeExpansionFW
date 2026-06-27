@@ -27,3 +27,4 @@ vcpkg_installed
 # Internal dev docs (not for public release)
 HANDOFF.md
 FSMP_API_PROPOSAL.md
+NEXUS_DESCRIPTION.txt
