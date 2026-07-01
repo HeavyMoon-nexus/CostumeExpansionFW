@@ -34,6 +34,42 @@ namespace CostumeFW
     bool AddPersistContent(const std::string& a_content);     // def + json (dedup)
     bool RemovePersistContent(const std::string& a_content);  // def + json
 
+    // Persist preset (§ persist-preset): the persist class can adopt a CEFP preset
+    // exactly like a box - same CEFP_*.json format, same exclusivity pool (a preset
+    // assigned to persist cannot also be on a box, and vice versa). Assigning
+    // REPLACES the persist contents with the preset's. "persist" is the sentinel
+    // PresetAssignedTo() returns when persist holds a preset.
+    std::string PersistPreset();  // applied preset name ("" if manual)
+    bool AssignPresetToPersist(const std::string& a_presetName,
+        const std::vector<std::string>& a_contents);  // def + json (exclusivity)
+    bool ClearPersistPreset();  // back to manual (keeps current contents); def + json
+
+    // --- Hide-when-worn rules (§8.10) ----------------------------------------
+    // A content id (box content OR persist) is hidden while ANY of its listed
+    // vanilla biped slots (30-61) is occupied by NON-CEF real equipment, and is
+    // auto-reshown when that slot frees. Lets the user selectively reclaim the
+    // vanilla "hide -> unequip restores" ARMA mask CEF bypasses (e.g. hide foot
+    // nails under boots/slot 37, hide a wig under an auto-helmet/slot 30,31,42).
+    // GLOBAL config (CEF_settings.json), keyed by content id so persist and box
+    // items are covered uniformly. Empty list = clear the rule.
+    std::vector<int> HideSlotsFor(const std::string& a_id);
+    bool SetHideSlots(const std::string& a_id, const std::vector<int>& a_slots);  // def + json
+
+    // --- Forced-gender NIF mode (per content) --------------------------------
+    // Which body's ARMA model a content injects: 0 = follow the player's sex
+    // (default), 1 = force Male, 2 = force Female. Lets a costume captured on one
+    // body show the other body's mesh on demand. GLOBAL config (CEF_settings.json),
+    // keyed by content id (box + persist alike). 0 = clear the entry.
+    int GenderModeFor(const std::string& a_id);
+    bool SetGenderMode(const std::string& a_id, int a_mode);  // def + json
+
+    // --- LoreBox tooltip integration (soft dependency) -----------------------
+    // The comma-joined in-game names of the contents of the box on biped slot
+    // a_slot ("" if there is no box on that slot, or it is empty). Fed to the
+    // BSScaleformTranslator hook so the LoreBox mod (if installed) can show a
+    // token's packed contents when the token is hovered in the inventory.
+    std::string LoreBoxContentsForSlot(int a_slot);
+
     // --- Presets (assignment; def + json only, exclusivity-checked) ----------
     // The token of the box currently using a_presetName, "" if none (exclusivity).
     std::string PresetAssignedTo(const std::string& a_presetName);
@@ -123,10 +159,24 @@ namespace CostumeFW
     // Set/clear a box's ability (def + json only; caller applies on main thread).
     bool SetBoxAbility(const std::string& a_token, const std::string& a_ability);
 
+    // Snapshot a content's EFFECTIVE worn enchantment (base OR player/instance
+    // enchantment) into the store, keyed by content id, so the synthesized ability
+    // can reproduce it later (the base ARMO alone misses instance enchantments).
+    // Reads the currently-WORN player item matching the content's base form, so it
+    // must be called while that item is still equipped (at capture time). Stores
+    // the effect list (MGEF colon-id + magnitude); def + json. Returns true if an
+    // enchantment was found and stored. Main/VM thread (inventory read only).
+    bool CaptureEnchant(const std::string& a_content);
+
     // Sync every box's abilities to the player: token worn -> AddSpell, else
     // RemoveSpell. Applies the AUTO-synthesized stat ability (contents' enchant +
-    // armor + weight) plus any optional manual ability. Idempotent. Main thread.
+    // armor + weight) plus any optional manual ability, AND the persist class's
+    // aggregate enchant ability (granted while CEF is enabled). Idempotent. Main thread.
     void ApplyBoxAbilities();
+
+    // Drop + forget the persist class's synthesized enchant ability so the next
+    // ApplyBoxAbilities rebuilds it (call after persist contents change). Main thread.
+    void RebuildPersistAbility();
 
     // Drop + forget a box's synthesized stat ability so the next ApplyBoxAbilities
     // rebuilds it (call after its contents change). Main thread.

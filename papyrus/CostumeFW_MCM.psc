@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 10 autoReadonly
+int property CURRENT_VERSION = 13 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -20,11 +20,17 @@ int _optUninstall
 ; --- Persist page state ---
 int      _optAddPersist
 int      _optRemoveAllPersist
+int      _persistPresetOpt   ; persist "Preset" menu (assign/clear)
+int      _persistExportOpt   ; persist "Export as preset" input
 int[]    _persistRemoveOpts
+int[]    _persistHideOpts
 string[] _persistRemoveContents
 string[] _persistWornIdsCache
 
 ; --- Boxes page state ---
+; Each box now has its OWN page (scroll-limit fix); "Boxes" is a short overview.
+int      _curBoxIndex       ; the box rendered on the current single-box page
+string[] _boxPageNames      ; page name per box (index == box index), for OnPageReset
 int _optNewBox
 int[]    _equipOpts
 int[]    _equipBoxIdx
@@ -33,6 +39,7 @@ int[]    _addWornBoxIdx
 int[]    _deleteOpts
 string[] _deleteTokens
 int[]    _removeOpts
+int[]    _hideOpts
 string[] _removeTokens
 string[] _removeContents
 int[]    _distribOpts
@@ -71,14 +78,15 @@ endEvent
 
 function SetupConfig()
     ModName = "Costume Expansion FW"
-    Pages = new string[4]
-    Pages[0] = "Main"
-    Pages[1] = "Persist"
-    Pages[2] = "Boxes"
-    Pages[3] = "Presets"
+    _curBoxIndex = 0
+    _boxPageNames = new string[1]
+    BuildPages()  ; Main, Persist, Boxes (overview), one page per box, Presets
 
     ; Init every option-map array so a Find() before a page is built is safe.
+    _persistPresetOpt = -1
+    _persistExportOpt = -1
     _persistRemoveOpts     = new int[1]
+    _persistHideOpts       = new int[1]
     _persistRemoveContents = new string[1]
     _persistWornIdsCache   = new string[1]
     _equipOpts     = new int[1]
@@ -88,6 +96,7 @@ function SetupConfig()
     _deleteOpts    = new int[1]
     _deleteTokens  = new string[1]
     _removeOpts     = new int[1]
+    _hideOpts       = new int[1]
     _removeTokens   = new string[1]
     _removeContents = new string[1]
     _distribOpts    = new int[1]
@@ -110,15 +119,49 @@ int function GetVersion()
     return CURRENT_VERSION
 endFunction
 
+; Rebuild the page list to one page per box (avoids SkyUI's per-page option/scroll
+; limit). Called on config init/version-update AND each time the menu opens, so the
+; left-hand page list reflects the current boxes (a box added this session appears
+; after closing + reopening the MCM).
+function BuildPages()
+    int n = CFW_Native.GetBoxCount()
+    string[] p = Utility.CreateStringArray(n + 4, "")
+    p[0] = "Main"
+    p[1] = "Persist"
+    p[2] = "Boxes"
+    _boxPageNames = Utility.CreateStringArray(n + 1, "")  ; +1 so size is never 0
+    int i = 0
+    while i < n
+        int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
+        string pname = "Box " + slot + ": " + SlotName(slot)
+        p[3 + i] = pname
+        _boxPageNames[i] = pname
+        i += 1
+    endWhile
+    p[3 + n] = "Presets"
+    Pages = p
+endFunction
+
+event OnConfigOpen()
+    BuildPages()
+endEvent
+
 event OnPageReset(string a_page)
     if a_page == "Boxes"
-        ResetBoxesPage()
+        ResetBoxesOverviewPage()
     elseIf a_page == "Persist"
         ResetPersistPage()
     elseIf a_page == "Presets"
         ResetPresetsPage()
-    else
+    elseIf a_page == "Main" || a_page == ""
         ResetMainPage()
+    else
+        int idx = _boxPageNames.Find(a_page)
+        if idx >= 0 && idx < CFW_Native.GetBoxCount()
+            ResetSingleBoxPage(idx)
+        else
+            ResetMainPage()  ; stale page (box removed) - reopen MCM to refresh
+        endIf
     endIf
 endEvent
 
@@ -166,6 +209,51 @@ string Function SlotName(int a_slot)
     return "slot " + a_slot
 endFunction
 
+; Comma-joined in-game names of a box's packed contents (for the info panel).
+string Function BoxContentsSummary(int a_boxIndex)
+    string[] contents = CFW_Native.GetBoxContents(a_boxIndex)
+    if contents.Length == 0
+        return "(empty)"
+    endIf
+    string out = ""
+    int ci = 0
+    while ci < contents.Length
+        if ci > 0
+            out += ", "
+        endIf
+        out += CFW_Native.GetItemName(contents[ci])
+        ci += 1
+    endWhile
+    return out
+endFunction
+
+; Ask which body's NIF to load for a captured item: 0 = player gender, 1 = Male,
+; 2 = Female. Uses a UIExtensions list popup (soft dependency). If UIExtensions is
+; absent or the popup is cancelled, defaults to 0 (follow the player).
+int Function AskGenderNIF()
+    UIListMenu menu = UIExtensions.GetMenu("UIListMenu") as UIListMenu
+    if !menu
+        return 0  ; UIExtensions not installed -> follow player
+    endif
+    menu.AddEntryItem("Use player's gender")
+    menu.AddEntryItem("Force Male")
+    menu.AddEntryItem("Force Female")
+    menu.OpenMenu()
+    int idx = menu.GetResultInt()
+    if idx < 0 || idx > 2
+        return 0  ; cancelled / invalid -> follow player
+    endif
+    return idx
+endFunction
+
+; If the captured item has attached scripts, warn that its script-driven behavior
+; won't run under CEF (the mesh is injected but the item is stored, not worn).
+function WarnIfScripted(string contentId)
+    if CFW_Native.ContentHasScript(contentId)
+        Debug.MessageBox("CostumeFW: '" + CFW_Native.GetItemName(contentId) + "' has attached scripts. Its equip- or possession-driven behavior may not work when captured (CEF injects the mesh, but the item is stored - not worn). Enchantment effects and keywords are still applied.")
+    endIf
+endFunction
+
 ; -----------------------------------------------------------------------------
 ; Main page
 ; -----------------------------------------------------------------------------
@@ -203,18 +291,28 @@ function ResetPersistPage()
 
     _optAddPersist = AddMenuOption("+ Add worn item", "")
 
+    string ppreset = CFW_Native.GetPersistPreset()
+    if ppreset == ""
+        ppreset = "(manual)"
+    endIf
+    _persistPresetOpt = AddMenuOption("Preset", ppreset)
+    _persistExportOpt = AddInputOption("Export as preset", "")
+
     string[] contents = CFW_Native.GetPersistContents()
     AddHeaderOption("Persist (" + contents.Length + ")")
     if contents.Length == 0
         AddTextOption("(none - use + Add worn item)", "", OPTION_FLAG_DISABLED)
         _persistRemoveOpts     = new int[1]
+        _persistHideOpts       = new int[1]
         _persistRemoveContents = new string[1]
     else
         _persistRemoveOpts     = Utility.CreateIntArray(contents.Length, -1)
+        _persistHideOpts       = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveContents = Utility.CreateStringArray(contents.Length, "")
         int i = 0
         while i < contents.Length
             _persistRemoveOpts[i] = AddTextOption(CFW_Native.GetItemName(contents[i]), "[remove]")
+            _persistHideOpts[i] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[i]))
             _persistRemoveContents[i] = contents[i]
             i += 1
         endWhile
@@ -226,7 +324,10 @@ endFunction
 ; -----------------------------------------------------------------------------
 ; Boxes page
 ; -----------------------------------------------------------------------------
-function ResetBoxesPage()
+; "Boxes" overview: + New box and a short read-only summary line per box. The
+; full per-box controls live on each box's own page (left list) to stay under
+; SkyUI's per-page option/scroll limit.
+function ResetBoxesOverviewPage()
     SetCursorFillMode(TOP_TO_BOTTOM)
 
     int n = CFW_Native.GetBoxCount()
@@ -235,90 +336,78 @@ function ResetBoxesPage()
 
     if n == 0
         AddTextOption("(none yet - use + New box)", "", OPTION_FLAG_DISABLED)
-        _equipOpts     = new int[1]
-        _equipBoxIdx   = new int[1]
-        _addWornOpts   = new int[1]
-        _addWornBoxIdx = new int[1]
-        _distribOpts   = new int[1]
-        _distribTokens = new string[1]
-        _armorTypeOpts   = new int[1]
-        _armorTypeTokens = new string[1]
-        _assignOpts    = new int[1]
-        _assignTokens  = new string[1]
-        _exportOpts    = new int[1]
-        _exportTokens  = new string[1]
-        _deleteOpts    = new int[1]
-        _deleteTokens  = new string[1]
-        _removeOpts     = new int[1]
-        _removeTokens   = new string[1]
-        _removeContents = new string[1]
         return
     endIf
-
-    int total = 0
+    AddTextOption("(each box has its own page in the list on the left)", "", OPTION_FLAG_DISABLED)
     int i = 0
     while i < n
-        total += CFW_Native.GetBoxContents(i).Length
+        int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
+        int cnt = CFW_Native.GetBoxContents(i).Length
+        string worn = "off"
+        if CFW_Native.IsBoxWorn(i)
+            worn = "WORN"
+        endIf
+        AddTextOption("Box " + slot + ": " + SlotName(slot) + " (" + cnt + " items)", worn, OPTION_FLAG_DISABLED)
         i += 1
     endWhile
-    if total == 0
-        total = 1
+endFunction
+
+; Full controls for ONE box (its own page). The box index is tracked in
+; _curBoxIndex; every per-box control array holds a single entry (index 0), and
+; handlers that need the box index use _curBoxIndex.
+function ResetSingleBoxPage(int a_idx)
+    SetCursorFillMode(TOP_TO_BOTTOM)
+    _curBoxIndex = a_idx
+
+    string token = CFW_Native.GetBoxToken(a_idx)
+    int slot = CFW_Native.GetTokenSlot(token)
+    string[] contents = CFW_Native.GetBoxContents(a_idx)
+    int cn = contents.Length
+    if cn == 0
+        cn = 1
     endIf
 
-    _equipOpts     = Utility.CreateIntArray(n, -1)
-    _equipBoxIdx   = Utility.CreateIntArray(n, -1)
-    _addWornOpts   = Utility.CreateIntArray(n, -1)
-    _addWornBoxIdx = Utility.CreateIntArray(n, -1)
-    _distribOpts   = Utility.CreateIntArray(n, -1)
-    _distribTokens = Utility.CreateStringArray(n, "")
-    _armorTypeOpts   = Utility.CreateIntArray(n, -1)
-    _armorTypeTokens = Utility.CreateStringArray(n, "")
-    _assignOpts    = Utility.CreateIntArray(n, -1)
-    _assignTokens  = Utility.CreateStringArray(n, "")
-    _exportOpts    = Utility.CreateIntArray(n, -1)
-    _exportTokens  = Utility.CreateStringArray(n, "")
-    _deleteOpts    = Utility.CreateIntArray(n, -1)
-    _deleteTokens  = Utility.CreateStringArray(n, "")
-    _removeOpts     = Utility.CreateIntArray(total, -1)
-    _removeTokens   = Utility.CreateStringArray(total, "")
-    _removeContents = Utility.CreateStringArray(total, "")
+    _equipOpts     = Utility.CreateIntArray(1, -1)
+    _equipBoxIdx   = Utility.CreateIntArray(1, a_idx)
+    _addWornOpts   = Utility.CreateIntArray(1, -1)
+    _addWornBoxIdx = Utility.CreateIntArray(1, a_idx)
+    _distribOpts   = Utility.CreateIntArray(1, -1)
+    _distribTokens = Utility.CreateStringArray(1, token)
+    _armorTypeOpts   = Utility.CreateIntArray(1, -1)
+    _armorTypeTokens = Utility.CreateStringArray(1, token)
+    _assignOpts    = Utility.CreateIntArray(1, -1)
+    _assignTokens  = Utility.CreateStringArray(1, token)
+    _exportOpts    = Utility.CreateIntArray(1, -1)
+    _exportTokens  = Utility.CreateStringArray(1, token)
+    _deleteOpts    = Utility.CreateIntArray(1, -1)
+    _deleteTokens  = Utility.CreateStringArray(1, token)
+    _removeOpts     = Utility.CreateIntArray(cn, -1)
+    _hideOpts       = Utility.CreateIntArray(cn, -1)
+    _removeTokens   = Utility.CreateStringArray(cn, "")
+    _removeContents = Utility.CreateStringArray(cn, "")
 
-    int ri = 0
-    i = 0
-    while i < n
-        string token = CFW_Native.GetBoxToken(i)
-        int slot = CFW_Native.GetTokenSlot(token)
-        AddHeaderOption(CFW_Native.GetItemName(token) + ": " + SlotName(slot))
-        _distribOpts[i] = AddToggleOption("Distribute token", CFW_Native.GetBoxEnabled(i))
-        _distribTokens[i] = token
-        _equipOpts[i] = AddToggleOption("Wear (show contents)", CFW_Native.IsBoxWorn(i))
-        _equipBoxIdx[i] = i
-        _addWornOpts[i] = AddMenuOption("+ Add worn item", "")
-        _addWornBoxIdx[i] = i
-        _armorTypeOpts[i] = AddMenuOption("Armor type", ArmorTypeName(CFW_Native.GetBoxArmorType(i)))
-        _armorTypeTokens[i] = token
-        string presetName = CFW_Native.GetBoxPreset(token)
-        if presetName == ""
-            presetName = "(manual)"
-        endIf
-        _assignOpts[i] = AddMenuOption("Preset", presetName)
-        _assignTokens[i] = token
-        _exportOpts[i] = AddInputOption("Export as preset", "")
-        _exportTokens[i] = token
-        AddTextOption("Stats", CFW_Native.GetBoxStats(i), OPTION_FLAG_DISABLED)
-        _deleteOpts[i] = AddTextOption("Delete box", "")
-        _deleteTokens[i] = token
+    AddHeaderOption(CFW_Native.GetItemName(token) + ": " + SlotName(slot))
+    _distribOpts[0] = AddToggleOption("Distribute token", CFW_Native.GetBoxEnabled(a_idx))
+    _equipOpts[0] = AddToggleOption("Wear (show contents)", CFW_Native.IsBoxWorn(a_idx))
+    _addWornOpts[0] = AddMenuOption("+ Add worn item", "")
+    _armorTypeOpts[0] = AddMenuOption("Armor type", ArmorTypeName(CFW_Native.GetBoxArmorType(a_idx)))
+    string presetName = CFW_Native.GetBoxPreset(token)
+    if presetName == ""
+        presetName = "(manual)"
+    endIf
+    _assignOpts[0] = AddMenuOption("Preset", presetName)
+    _exportOpts[0] = AddInputOption("Export as preset", "")
+    AddTextOption("Stats", CFW_Native.GetBoxStats(a_idx), OPTION_FLAG_DISABLED)
+    _deleteOpts[0] = AddTextOption("Delete box", "")
 
-        string[] contents = CFW_Native.GetBoxContents(i)
-        int ci = 0
-        while ci < contents.Length
-            _removeOpts[ri] = AddTextOption("  " + CFW_Native.GetItemName(contents[ci]), "[remove]")
-            _removeTokens[ri] = token
-            _removeContents[ri] = contents[ci]
-            ri += 1
-            ci += 1
-        endWhile
-        i += 1
+    AddHeaderOption("Contents (" + contents.Length + ")")
+    int ci = 0
+    while ci < contents.Length
+        _removeOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[ci]), "[remove]")
+        _hideOpts[ci] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[ci]))
+        _removeTokens[ci] = token
+        _removeContents[ci] = contents[ci]
+        ci += 1
     endWhile
 endFunction
 
@@ -393,10 +482,10 @@ event OnOptionSelect(int a_option)
         return
     endIf
 
-    ; --- Boxes ---
+    ; --- Boxes (single-box page: box index is _curBoxIndex) ---
     int k = _distribOpts.Find(a_option)
     if k >= 0
-        ToggleDistribute(a_option, k)
+        ToggleDistribute(a_option, _curBoxIndex)
         return
     endIf
 
@@ -408,18 +497,18 @@ event OnOptionSelect(int a_option)
 
     k = _deleteOpts.Find(a_option)
     if k >= 0
-        string[] cont = CFW_Native.GetBoxContents(k)
+        string[] cont = CFW_Native.GetBoxContents(_curBoxIndex)
         int ci = 0
         while ci < cont.Length
             ReturnItem(CFW_Native.ResolveForm(cont[ci]))
             ci += 1
         endWhile
-        Form tkn = CFW_Native.GetBoxTokenForm(k)
+        Form tkn = CFW_Native.GetBoxTokenForm(_curBoxIndex)
         if tkn
             Game.GetPlayer().UnequipItem(tkn, false, true)
         endIf
         CFW_Native.RemoveBox(_deleteTokens[k])
-        Debug.Notification("CostumeFW: box removed (items returned)")
+        Debug.Notification("CostumeFW: box removed - reopen MCM to refresh the page list")
         ForcePageReset()
         return
     endIf
@@ -563,8 +652,8 @@ event OnOptionMenuOpen(int a_option)
         return
     endIf
 
-    ; Box "Preset" menu: "(manual)" + preset names; files cached parallel ([0]="").
-    if _assignOpts.Find(a_option) >= 0
+    ; Box / persist "Preset" menu: "(manual)" + preset names; files cached parallel ([0]="").
+    if _assignOpts.Find(a_option) >= 0 || a_option == _persistPresetOpt
         string[] names = CFW_Native.GetPresetNames()
         _presetFilesCache = Utility.CreateStringArray(names.Length + 1, "")
         string[] files = CFW_Native.GetPresetFiles()
@@ -603,7 +692,8 @@ event OnOptionMenuAccept(int a_option, int a_index)
         if a_index >= 0 && a_index < _freeTokenIds.Length
             string newToken = _freeTokenIds[a_index]
             CFW_Native.AddBox(CFW_Native.GetItemName(newToken), newToken, "")
-            Debug.Notification("CostumeFW: box created for " + SlotName(CFW_Native.GetTokenSlot(newToken)))
+            BuildPages()  ; include the new box's page (visible after reopening the MCM)
+            Debug.Notification("CostumeFW: box created for " + SlotName(CFW_Native.GetTokenSlot(newToken)) + " - reopen MCM to open its page")
             ForcePageReset()
         endIf
         return
@@ -615,12 +705,15 @@ event OnOptionMenuAccept(int a_option, int a_index)
             return
         endIf
         string contentId = _wornIdsCache[a_index]
+        CFW_Native.SetContentGender(contentId, AskGenderNIF())  ; ask NIF gender first
+        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
         Form contentForm = CFW_Native.ResolveForm(contentId)
         if contentForm
             Game.GetPlayer().RemoveItem(contentForm, 1, true, GetStore())
         endIf
         CFW_Native.AddPersist(contentId)
         Debug.Notification("CostumeFW: persist added " + CFW_Native.GetItemName(contentId))
+        WarnIfScripted(contentId)
         ForcePageReset()
         return
     endIf
@@ -635,6 +728,8 @@ event OnOptionMenuAccept(int a_option, int a_index)
         string token = CFW_Native.GetBoxToken(boxIdx)
         string contentId = _wornIdsCache[a_index]
 
+        CFW_Native.SetContentGender(contentId, AskGenderNIF())  ; ask NIF gender first
+        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
         CFW_Native.AddBox("", token, contentId)
         Form contentForm = CFW_Native.ResolveForm(contentId)
         Actor player = Game.GetPlayer()
@@ -649,6 +744,7 @@ event OnOptionMenuAccept(int a_option, int a_index)
             player.EquipItem(tokenForm, false, true)
         endIf
         Debug.Notification("CostumeFW: captured " + CFW_Native.GetItemName(contentId))
+        WarnIfScripted(contentId)
         ForcePageReset()
         return
     endIf
@@ -658,14 +754,27 @@ event OnOptionMenuAccept(int a_option, int a_index)
     if k >= 0
         if a_index >= 0 && a_index <= 2
             CFW_Native.SetBoxArmorType(_armorTypeTokens[k], a_index)
-            Form tf = CFW_Native.GetBoxTokenForm(k)
-            if tf && CFW_Native.IsBoxWorn(k)
+            Form tf = CFW_Native.GetBoxTokenForm(_curBoxIndex)
+            if tf && CFW_Native.IsBoxWorn(_curBoxIndex)
                 Actor pl = Game.GetPlayer()
                 pl.UnequipItem(tf, false, true)
                 pl.EquipItem(tf, false, true)
             endIf
             ForcePageReset()
         endIf
+        return
+    endIf
+
+    ; --- Persist "Preset" assign menu (0 = manual/clear) ---
+    if a_option == _persistPresetOpt
+        if a_index <= 0
+            CFW_Native.ClearPersistPreset()
+        else
+            if !CFW_Native.AssignPersistPreset(_presetFilesCache[a_index])
+                Debug.Notification("CostumeFW: preset already assigned to a box")
+            endIf
+        endIf
+        ForcePageReset()
         return
     endIf
 
@@ -707,6 +816,27 @@ event OnOptionInputOpen(int a_option)
             cur = CFW_Native.GetItemName(_exportTokens[k])
         endIf
         SetInputDialogStartText(cur)
+        return
+    endIf
+
+    k = _hideOpts.Find(a_option)
+    if k >= 0
+        SetInputDialogStartText(CFW_Native.GetHideSlots(_removeContents[k]))
+        return
+    endIf
+
+    k = _persistHideOpts.Find(a_option)
+    if k >= 0
+        SetInputDialogStartText(CFW_Native.GetHideSlots(_persistRemoveContents[k]))
+        return
+    endIf
+
+    if a_option == _persistExportOpt
+        string cur = CFW_Native.GetPersistPreset()
+        if cur == ""
+            cur = "Persist"
+        endIf
+        SetInputDialogStartText(cur)
     endIf
 endEvent
 
@@ -717,6 +847,31 @@ event OnOptionInputAccept(int a_option, string a_input)
             string file = CFW_Native.ExportPreset(_exportTokens[k], a_input)
             if file != ""
                 Debug.Notification("CostumeFW: exported preset " + file)
+            endIf
+        endIf
+        ForcePageReset()
+        return
+    endIf
+
+    k = _hideOpts.Find(a_option)
+    if k >= 0
+        CFW_Native.SetHideSlots(_removeContents[k], a_input)
+        ForcePageReset()
+        return
+    endIf
+
+    k = _persistHideOpts.Find(a_option)
+    if k >= 0
+        CFW_Native.SetHideSlots(_persistRemoveContents[k], a_input)
+        ForcePageReset()
+        return
+    endIf
+
+    if a_option == _persistExportOpt
+        if a_input != ""
+            string file = CFW_Native.ExportPersist(a_input)
+            if file != ""
+                Debug.Notification("CostumeFW: exported persist preset " + file)
             endIf
         endIf
         ForcePageReset()
@@ -731,13 +886,18 @@ event OnOptionHighlight(int a_option)
     elseIf a_option == _optUninstall
         SetInfoText("Return all captured items, remove all box tokens, detach everything. Do this before removing the mod.")
     elseIf a_option == _optAddPersist
-        SetInfoText("Capture a worn accessory as an always-on persist item (frees its slot).")
+        SetInfoText("Capture a worn accessory as an always-on persist item (frees its slot). Asks which gender NIF to load (needs UIExtensions).")
+    elseIf a_option == _persistPresetOpt
+        SetInfoText("Assign a preset's contents to the persist set (same presets as boxes; one preset per box/persist).")
+    elseIf a_option == _persistExportOpt
+        SetInfoText("Save the current persist items as a shareable CEFP_*.json preset.")
     elseIf a_option == _optNewBox
         SetInfoText("Create a new box on a free Costume Box slot.")
     elseIf _equipOpts.Find(a_option) >= 0
-        SetInfoText("Wear/remove the box token. Worn = its captured contents show.")
+        int bi = _equipBoxIdx[_equipOpts.Find(a_option)]
+        SetInfoText("Wear/remove the box token (worn = contents show). Contains: " + BoxContentsSummary(bi))
     elseIf _addWornOpts.Find(a_option) >= 0
-        SetInfoText("Capture a currently-worn armor into this box (frees its slot).")
+        SetInfoText("Capture a currently-worn armor into this box (frees its slot). Asks which gender NIF to load (needs UIExtensions).")
     elseIf _assignOpts.Find(a_option) >= 0
         SetInfoText("Assign a preset's contents to this box (one preset per box).")
     elseIf _exportOpts.Find(a_option) >= 0
@@ -748,6 +908,8 @@ event OnOptionHighlight(int a_option)
         SetInfoText("Remove this item from the box (returned to you).")
     elseIf _persistRemoveOpts.Find(a_option) >= 0
         SetInfoText("Remove this persist item (returned to you).")
+    elseIf _hideOpts.Find(a_option) >= 0 || _persistHideOpts.Find(a_option) >= 0
+        SetInfoText("Hide this item while a real item holds a slot. Enter slot numbers (e.g. 37 = feet/boots, or 30 31 42 = helmet/hair/circlet). Blank = never hide.")
     elseIf _presetAssignOpts.Find(a_option) >= 0
         SetInfoText("Assign this preset to one of your boxes.")
     endIf

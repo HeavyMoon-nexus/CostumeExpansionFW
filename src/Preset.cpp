@@ -55,6 +55,27 @@ namespace CostumeFW::Preset
                     p.contents.push_back(c.get<std::string>());
                 }
             }
+            const auto rules = a_doc.value("hideRules", nlohmann::json::object());
+            for (auto it = rules.begin(); it != rules.end(); ++it) {
+                std::vector<int> slots;
+                for (const auto& s : it.value()) {
+                    if (s.is_number_integer()) {
+                        slots.push_back(s.get<int>());
+                    }
+                }
+                if (!slots.empty()) {
+                    p.hideRules[it.key()] = std::move(slots);
+                }
+            }
+            const auto genders = a_doc.value("genderModes", nlohmann::json::object());
+            for (auto it = genders.begin(); it != genders.end(); ++it) {
+                if (it.value().is_number_integer()) {
+                    const int m = it.value().get<int>();
+                    if (m >= 1 && m <= 2) {
+                        p.genderModes[it.key()] = m;
+                    }
+                }
+            }
             p.valid = true;
             return p;
         }
@@ -115,6 +136,8 @@ namespace CostumeFW::Preset
     }
 
     std::string Export(const std::string& a_name, const std::vector<std::string>& a_contents,
+        const std::unordered_map<std::string, std::vector<int>>& a_hideRules,
+        const std::unordered_map<std::string, int>& a_genderModes,
         const std::string& a_author, const std::string& a_description)
     {
         std::string base = Sanitize(a_name);
@@ -156,6 +179,22 @@ namespace CostumeFW::Preset
         }
         doc["requiredPlugins"] = plugins;
         doc["contents"] = a_contents;
+        // Carry the per-content hide-when-worn rules (§8.10) so the hide behavior
+        // travels with the distributed preset. Only contents that have a rule.
+        auto rules = nlohmann::json::object();
+        for (const auto& [id, slots] : a_hideRules) {
+            if (!slots.empty()) {
+                rules[id] = slots;
+            }
+        }
+        doc["hideRules"] = std::move(rules);
+        auto genders = nlohmann::json::object();
+        for (const auto& [id, mode] : a_genderModes) {
+            if (mode != 0) {
+                genders[id] = mode;
+            }
+        }
+        doc["genderModes"] = std::move(genders);
 
         std::ofstream out(dir / file, std::ios::trunc);
         if (!out) {

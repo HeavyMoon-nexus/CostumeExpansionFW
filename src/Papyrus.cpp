@@ -4,11 +4,18 @@
 #include "Preset.h"
 #include "SkinRebind.h"
 
+#include "RE/B/BSAtomic.h"
+#include "RE/I/IObjectHandlePolicy.h"
+#include "RE/S/SkyrimVM.h"
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESForm.h"
+#include "RE/V/VirtualMachine.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace CostumeFW
@@ -384,11 +391,48 @@ namespace CostumeFW
 
         // Export a box's current contents as a new preset file (file I/O only,
         // no scene). Returns the written file name ("" on failure).
+        // Gather the per-content hide rules + gender modes for a content list, to
+        // carry into an exported preset (§8.10/8.11 + gender).
+        void CollectPresetMaps(const std::vector<std::string>& a_contents,
+            std::unordered_map<std::string, std::vector<int>>& a_hide,
+            std::unordered_map<std::string, int>& a_gender)
+        {
+            for (const auto& c : a_contents) {
+                auto slots = HideSlotsFor(c);
+                if (!slots.empty()) {
+                    a_hide[c] = std::move(slots);
+                }
+                if (const int g = GenderModeFor(c); g != 0) {
+                    a_gender[c] = g;
+                }
+            }
+        }
+
+        // Restore a preset's hide rules + gender modes for its resolvable contents
+        // (after assigning it to a box or persist).
+        void RestorePresetMaps(const Preset::PresetInfo& a_preset,
+            const std::vector<std::string>& a_ok)
+        {
+            for (const auto& [cid, slots] : a_preset.hideRules) {
+                if (std::find(a_ok.begin(), a_ok.end(), cid) != a_ok.end()) {
+                    SetHideSlots(cid, slots);
+                }
+            }
+            for (const auto& [cid, mode] : a_preset.genderModes) {
+                if (std::find(a_ok.begin(), a_ok.end(), cid) != a_ok.end()) {
+                    SetGenderMode(cid, mode);
+                }
+            }
+        }
+
         RE::BSFixedString ExportPresetNative(RE::StaticFunctionTag*, RE::BSFixedString a_token,
             RE::BSFixedString a_name)
         {
             const auto contents = BoxContents(a_token.c_str());
-            return Preset::Export(a_name.c_str(), contents);
+            std::unordered_map<std::string, std::vector<int>> hideRules;
+            std::unordered_map<std::string, int> genderModes;
+            CollectPresetMaps(contents, hideRules, genderModes);
+            return Preset::Export(a_name.c_str(), contents, hideRules, genderModes);
         }
 
         // Assign a preset (by file) to a box: read + validate (skip missing), set the
@@ -411,6 +455,9 @@ namespace CostumeFW
             if (!AssignPreset(token, preset.name, ok)) {  // sync def + json (exclusivity)
                 return false;
             }
+            // Restore the preset's hide rules + gender modes for its resolvable
+            // contents so a distributed costume keeps its hide/gender behavior.
+            RestorePresetMaps(preset, ok);
             SKSE::GetTaskInterface()->AddTask([token, oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);
@@ -464,6 +511,8 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([content] {
                 RegisterBoxById(content, {});  // token-less -> always shown
                 Reconcile();
+                RebuildPersistAbility();  // contents changed -> re-synth persist enchant
+                ApplyBoxAbilities();
             });
             return true;
         }
@@ -477,8 +526,159 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([content] {
                 DetachSkinned(content);
                 Reconcile();
+                RebuildPersistAbility();
+                ApplyBoxAbilities();
             });
             return true;
+        }
+
+        // --- Hide-when-worn (§8.10) -------------------------------------------
+        // Slots are a space-separated list of vanilla biped slot numbers (e.g.
+        // "30 31 42"); the content is hidden while one of those slots is held by
+        // non-CEF gear. Works for box contents and persist items (keyed by id).
+
+        RE::BSFixedString GetHideSlots(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            std::string out;
+            for (const int s : HideSlotsFor(a_id.c_str())) {
+                if (!out.empty()) {
+                    out += ' ';
+                }
+                out += std::to_string(s);
+            }
+            return out;
+        }
+
+        bool SetHideSlotsNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, RE::BSFixedString a_slots)
+        {
+            const std::string id = a_id.c_str();
+            if (id.empty()) {
+                return false;
+            }
+            std::vector<int> slots;
+            std::istringstream ss(a_slots.c_str());
+            int v;
+            while (ss >> v) {
+                slots.push_back(v);
+            }
+            if (!SetHideSlots(id, slots)) {  // sync def + json
+                return false;
+            }
+            SKSE::GetTaskInterface()->AddTask([] { Reconcile(); });  // apply now
+            return true;
+        }
+
+        // --- Forced-gender NIF mode (per content) -----------------------------
+        // 0 = follow player, 1 = force Male, 2 = force Female. The MCM asks at
+        // capture time (UIExtensions popup); can also be re-set later.
+
+        std::int32_t GetContentGender(RE::StaticFunctionTag*, RE::BSFixedString a_content)
+        {
+            return GenderModeFor(a_content.c_str());
+        }
+
+        bool SetContentGenderNative(RE::StaticFunctionTag*, RE::BSFixedString a_content,
+            std::int32_t a_mode)
+        {
+            const std::string content = a_content.c_str();
+            if (!SetGenderMode(content, a_mode)) {  // sync def + json
+                return false;
+            }
+            // Re-resolve + re-inject this content for the new effective sex. If it
+            // isn't registered yet (set just before AddBox/AddPersist), this is a
+            // no-op and the subsequent register picks up the new gender.
+            SKSE::GetTaskInterface()->AddTask([content] { RefreshGender(content); });
+            return true;
+        }
+
+        // --- Persist preset (mirror of the box preset flow) -------------------
+
+        RE::BSFixedString GetPersistPresetNative(RE::StaticFunctionTag*)
+        {
+            return PersistPreset();
+        }
+
+        RE::BSFixedString ExportPersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_name)
+        {
+            const auto contents = PersistContents();
+            std::unordered_map<std::string, std::vector<int>> hideRules;
+            std::unordered_map<std::string, int> genderModes;
+            CollectPresetMaps(contents, hideRules, genderModes);
+            return Preset::Export(a_name.c_str(), contents, hideRules, genderModes);
+        }
+
+        bool AssignPersistPresetNative(RE::StaticFunctionTag*, RE::BSFixedString a_file)
+        {
+            auto preset = Preset::Read(a_file.c_str());
+            if (!preset.valid) {
+                return false;
+            }
+            std::vector<std::string> ok, missing;
+            Preset::Validate(preset.contents, ok, missing);
+            if (!missing.empty()) {
+                SKSE::log::warn("preset: '{}' has {} unresolved content (skipped)",
+                    preset.name, missing.size());
+            }
+            const auto oldContents = PersistContents();  // before reassign
+            if (!AssignPresetToPersist(preset.name, ok)) {  // sync def + json (exclusivity)
+                return false;
+            }
+            RestorePresetMaps(preset, ok);
+            SKSE::GetTaskInterface()->AddTask([oldContents, ok] {
+                for (const auto& c : oldContents) {
+                    DetachSkinned(c);  // unregister old persist contents
+                }
+                for (const auto& c : ok) {
+                    RegisterBoxById(c, {});  // token-less -> always shown
+                }
+                Reconcile();
+                RebuildPersistAbility();  // new contents -> re-synth persist enchant
+                ApplyBoxAbilities();
+            });
+            return true;
+        }
+
+        // Snapshot the currently-worn item's effective enchantment (base OR
+        // player/instance) for a content, so the synthesized box/persist ability
+        // includes it. Must be called while the item is still equipped (the .psc
+        // calls it at capture time, before moving the item to the store).
+        bool CaptureContentEnchantNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
+        {
+            return CaptureEnchant(a_content.c_str());  // sync def + json (inventory read)
+        }
+
+        // True if the content's base form has any Papyrus script attached (VMAD).
+        // Used to warn at capture: CEF injects the mesh but never actually equips
+        // the item (and removes it from the inventory), so equip-/possession-driven
+        // scripts won't run. Best-effort (base-form scripts; a plain heads-up).
+        bool ContentHasScriptNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
+        {
+            const std::uint32_t formId = ResolveFormId(a_content.c_str());
+            auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+            if (!form) {
+                return false;
+            }
+            auto* svm = RE::SkyrimVM::GetSingleton();
+            auto* ivm = svm ? svm->impl.get() : nullptr;
+            if (!ivm) {
+                return false;
+            }
+            auto* vm = static_cast<RE::BSScript::Internal::VirtualMachine*>(ivm);
+            auto* policy = vm->GetObjectHandlePolicy1();
+            if (!policy) {
+                return false;
+            }
+            const RE::VMHandle handle = policy->GetHandleForObject(form->GetFormType(), form);
+            if (handle == policy->EmptyHandle()) {
+                return false;
+            }
+            RE::BSSpinLockGuard lock(vm->attachedScriptsLock);
+            return vm->attachedScripts.find(handle) != vm->attachedScripts.end();
+        }
+
+        bool ClearPersistPresetNative(RE::StaticFunctionTag*)
+        {
+            return ClearPersistPreset();  // contents remain (manual)
         }
     }
 
@@ -535,6 +735,19 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetPersistContents", kClass, GetPersistContents);
         a_vm->RegisterFunction("AddPersist", kClass, AddPersistNative);
         a_vm->RegisterFunction("RemovePersist", kClass, RemovePersistNative);
+
+        a_vm->RegisterFunction("GetHideSlots", kClass, GetHideSlots);
+        a_vm->RegisterFunction("SetHideSlots", kClass, SetHideSlotsNative);
+
+        a_vm->RegisterFunction("GetContentGender", kClass, GetContentGender);
+        a_vm->RegisterFunction("SetContentGender", kClass, SetContentGenderNative);
+
+        a_vm->RegisterFunction("GetPersistPreset", kClass, GetPersistPresetNative);
+        a_vm->RegisterFunction("ExportPersist", kClass, ExportPersistNative);
+        a_vm->RegisterFunction("AssignPersistPreset", kClass, AssignPersistPresetNative);
+        a_vm->RegisterFunction("ClearPersistPreset", kClass, ClearPersistPresetNative);
+        a_vm->RegisterFunction("CaptureContentEnchant", kClass, CaptureContentEnchantNative);
+        a_vm->RegisterFunction("ContentHasScript", kClass, ContentHasScriptNative);
 
         SKSE::log::info("Papyrus natives registered ({})", kClass);
         return true;

@@ -145,3 +145,40 @@ String Function GetPresetAssignedTo(String name) Global Native
 String[] Function GetPersistContents() Global Native
 Bool Function AddPersist(String content) Global Native
 Bool Function RemovePersist(String content) Global Native
+
+; --- Hide-when-worn (§8.10) --------------------------------------------------
+; A content id is hidden while one of the given vanilla biped slots (space-
+; separated numbers, e.g. "30 31 42") is occupied by non-CEF real equipment,
+; and is auto-reshown when freed. Works for box contents and persist items.
+; GetHideSlots returns the current list as a string ("" = no rule). SetHideSlots
+; replaces it; an empty/blank string clears the rule.
+String Function GetHideSlots(String id) Global Native
+Bool Function SetHideSlots(String id, String slots) Global Native
+
+; --- Forced-gender NIF mode (per content) ------------------------------------
+; Which body's mesh a content injects: 0 = follow the player's sex, 1 = force
+; Male, 2 = force Female. SetContentGender re-resolves + re-injects on the main
+; thread. Asked at capture time via a UIExtensions popup (soft dependency).
+Int Function GetContentGender(String content) Global Native
+Bool Function SetContentGender(String content, Int mode) Global Native
+
+; --- Persist preset (same CEFP_*.json format as box presets) ------------------
+; The persist class can adopt a preset like a box; shared exclusivity pool (a
+; preset on persist cannot also be on a box). Assign REPLACES persist contents.
+String Function GetPersistPreset() Global Native
+String Function ExportPersist(String name) Global Native
+Bool Function AssignPersistPreset(String file) Global Native
+Bool Function ClearPersistPreset() Global Native
+
+; --- Enchantment capture -----------------------------------------------------
+; Snapshot the currently-WORN item's effective enchantment (base OR player/
+; instance enchantment) for a content, so the token's/persist's synthesized
+; ability reproduces it. Call at capture time while the item is still equipped
+; (before moving it to the store). Returns True if an enchantment was found.
+Bool Function CaptureContentEnchant(String content) Global Native
+
+; True if the content's base form has any Papyrus script attached (VMAD). CEF
+; injects the mesh but never actually equips the item (and removes it from the
+; inventory), so equip-/possession-driven scripts won't run - used to warn at
+; capture. Best-effort (base-form scripts).
+Bool Function ContentHasScript(String content) Global Native

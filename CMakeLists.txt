@@ -26,6 +26,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/BoxStore.cpp
     src/BodyMorph.cpp
     src/Preset.cpp
+    src/LoreBox.cpp
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)

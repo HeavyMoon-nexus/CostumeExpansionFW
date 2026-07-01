@@ -8,6 +8,7 @@
 #include "BoxStore.h"
 #include "Commands.h"
 #include "Cosave.h"
+#include "LoreBox.h"
 #include "Papyrus.h"
 #include "SkinRebind.h"
 
@@ -42,6 +43,11 @@ namespace
 
     // Box mechanism: when the player equips/unequips a tracked box token, the
     // box contents must show/hide. Reconcile re-evaluates the worn predicate.
+    // §8.10 hide-when-worn also needs a reconcile when the player equips/unequips
+    // ANY real armor (boots/helmet that gate an injected item), not just our own
+    // tokens - so we reconcile on every player equip change. Reconcile is cheap
+    // (it just walks g_active and queries worn slots), so the extra fires are
+    // negligible; ApplyBoxAbilities is idempotent.
     class EquipSink : public RE::BSTEventSink<RE::TESEquipEvent>
     {
     public:
@@ -56,9 +62,7 @@ namespace
             RE::BSTEventSource<RE::TESEquipEvent>*) override
         {
             if (a_event && a_event->actor &&
-                a_event->actor.get() == RE::PlayerCharacter::GetSingleton() &&
-                (CostumeFW::IsTrackedToken(a_event->baseObject) ||
-                    CostumeFW::IsBoxToken(a_event->baseObject))) {
+                a_event->actor.get() == RE::PlayerCharacter::GetSingleton()) {
                 SKSE::GetTaskInterface()->AddTask([] {
                     CostumeFW::Reconcile();
                     CostumeFW::ApplyBoxAbilities();
@@ -114,6 +118,7 @@ namespace
             break;
         case SKSE::MessagingInterface::kDataLoaded:
             Load3DHook::Install();
+            CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration
             CostumeFW::InstallConsoleHook();
             if (auto* holder = RE::ScriptEventSourceHolder::GetSingleton()) {
                 holder->AddEventSink(EquipSink::GetSingleton());

@@ -52,6 +52,29 @@ namespace CostumeFW
         // rework (the capture flow mirrors a box but with no token gate).
         std::vector<std::string> g_persist;
 
+        // Hide-when-worn rules (§8.10): content colon-id -> vanilla biped slots
+        // (30-61) that, while occupied by non-CEF gear, hide that content. GLOBAL
+        // config; keyed by content id so persist + box are covered uniformly.
+        std::unordered_map<std::string, std::vector<int>> g_hideRules;
+
+        // Forced-gender NIF mode: content colon-id -> 0 player / 1 male / 2 female.
+        // Absent entry = 0 (follow player). GLOBAL config, content-keyed.
+        std::unordered_map<std::string, int> g_genderModes;
+
+        // Captured worn enchantment per content: content colon-id -> effect list
+        // (MGEF colon-id + magnitude). Snapshots the EFFECTIVE enchantment at
+        // capture (base OR player/instance), since the base ARMO alone misses
+        // instance enchantments. GLOBAL config, content-keyed.
+        struct EnchEffect
+        {
+            std::string mgef;  // MGEF colon-id
+            float magnitude{ 0.0f };
+        };
+        std::unordered_map<std::string, std::vector<EnchEffect>> g_contentEnchants;
+
+        // Persist class's applied preset name ("" = manual). Mirrors a box's preset.
+        std::string g_persistPreset;
+
         int FindBox(const std::string& a_token)
         {
             for (std::size_t i = 0; i < g_boxes.size(); ++i) {
@@ -83,6 +106,29 @@ namespace CostumeFW
             }
             doc["boxes"] = std::move(arr);
             doc["persist"]["contents"] = g_persist;
+            doc["persist"]["preset"] = g_persistPreset;
+
+            auto rules = nlohmann::json::object();
+            for (const auto& [id, slots] : g_hideRules) {
+                rules[id] = slots;
+            }
+            doc["hideRules"] = std::move(rules);
+
+            auto genders = nlohmann::json::object();
+            for (const auto& [id, mode] : g_genderModes) {
+                genders[id] = mode;
+            }
+            doc["genderModes"] = std::move(genders);
+
+            auto enchants = nlohmann::json::object();
+            for (const auto& [id, effs] : g_contentEnchants) {
+                auto arr2 = nlohmann::json::array();
+                for (const auto& e : effs) {
+                    arr2.push_back({ { "mgef", e.mgef }, { "mag", e.magnitude } });
+                }
+                enchants[id] = std::move(arr2);
+            }
+            doc["enchants"] = std::move(enchants);
 
             std::ofstream f(kSettingsPath, std::ios::trunc);
             if (!f) {
@@ -132,6 +178,10 @@ namespace CostumeFW
     {
         g_boxes.clear();
         g_persist.clear();
+        g_hideRules.clear();
+        g_genderModes.clear();
+        g_contentEnchants.clear();
+        g_persistPreset.clear();
         g_cefEnabled = true;
 
         // Read CEF_settings.json; fall back to the legacy costume_boxes.json once
@@ -182,6 +232,41 @@ namespace CostumeFW
         for (const auto& c : persist.value("contents", nlohmann::json::array())) {
             if (c.is_string()) {
                 g_persist.push_back(c.get<std::string>());
+            }
+        }
+        g_persistPreset = persist.value("preset", std::string{});
+        const auto rules = doc.value("hideRules", nlohmann::json::object());
+        for (auto it = rules.begin(); it != rules.end(); ++it) {
+            std::vector<int> slots;
+            for (const auto& s : it.value()) {
+                if (s.is_number_integer()) {
+                    slots.push_back(s.get<int>());
+                }
+            }
+            if (!slots.empty()) {
+                g_hideRules[it.key()] = std::move(slots);
+            }
+        }
+        const auto genders = doc.value("genderModes", nlohmann::json::object());
+        for (auto it = genders.begin(); it != genders.end(); ++it) {
+            if (it.value().is_number_integer()) {
+                const int m = it.value().get<int>();
+                if (m >= 1 && m <= 2) {
+                    g_genderModes[it.key()] = m;
+                }
+            }
+        }
+        const auto enchants = doc.value("enchants", nlohmann::json::object());
+        for (auto it = enchants.begin(); it != enchants.end(); ++it) {
+            std::vector<EnchEffect> effs;
+            for (const auto& e : it.value()) {
+                const std::string mgef = e.value("mgef", std::string{});
+                if (!mgef.empty()) {
+                    effs.push_back({ mgef, e.value("mag", 0.0f) });
+                }
+            }
+            if (!effs.empty()) {
+                g_contentEnchants[it.key()] = std::move(effs);
             }
         }
         if (migrated) {
@@ -321,6 +406,57 @@ namespace CostumeFW
             return false;
         }
         g_persist.erase(it);
+        g_hideRules.erase(a_content);       // drop any hide rule for the removed content
+        g_genderModes.erase(a_content);     // and its gender override
+        g_contentEnchants.erase(a_content);  // and its captured enchantment
+        WriteJson();
+        return true;
+    }
+
+    std::vector<int> HideSlotsFor(const std::string& a_id)
+    {
+        const auto it = g_hideRules.find(a_id);
+        return it == g_hideRules.end() ? std::vector<int>{} : it->second;
+    }
+
+    bool SetHideSlots(const std::string& a_id, const std::vector<int>& a_slots)
+    {
+        if (a_id.empty()) {
+            return false;
+        }
+        // Keep only valid vanilla biped slots (30-61), de-duplicated.
+        std::vector<int> clean;
+        for (const int s : a_slots) {
+            if (s >= 30 && s <= 61 &&
+                std::find(clean.begin(), clean.end(), s) == clean.end()) {
+                clean.push_back(s);
+            }
+        }
+        if (clean.empty()) {
+            g_hideRules.erase(a_id);  // empty list = clear the rule
+        } else {
+            g_hideRules[a_id] = std::move(clean);
+        }
+        WriteJson();
+        return true;
+    }
+
+    int GenderModeFor(const std::string& a_id)
+    {
+        const auto it = g_genderModes.find(a_id);
+        return it == g_genderModes.end() ? 0 : it->second;
+    }
+
+    bool SetGenderMode(const std::string& a_id, int a_mode)
+    {
+        if (a_id.empty()) {
+            return false;
+        }
+        if (a_mode == 1 || a_mode == 2) {
+            g_genderModes[a_id] = a_mode;
+        } else {
+            g_genderModes.erase(a_id);  // 0 (or invalid) = follow player
+        }
         WriteJson();
         return true;
     }
@@ -406,6 +542,24 @@ namespace CostumeFW
     int TokenSlot(const std::string& a_token)
     {
         return SlotNumberOf(ResolveArmo(a_token));
+    }
+
+    std::string LoreBoxContentsForSlot(int a_slot)
+    {
+        for (const auto& b : g_boxes) {
+            if (SlotNumberOf(ResolveArmo(b.token)) != a_slot) {
+                continue;
+            }
+            std::string out;
+            for (const auto& c : b.contents) {
+                if (!out.empty()) {
+                    out += ", ";
+                }
+                out += ItemDisplayName(c);
+            }
+            return out;  // "" if this box is empty
+        }
+        return {};  // no box on this slot
     }
 
     bool BoxEnabled(const std::string& a_token)
@@ -501,6 +655,10 @@ namespace CostumeFW
         // token -> synthesized enchant ability (nullptr = built but none). Process-
         // global; cleared on game load (ClearBoxSpellCache).
         std::unordered_map<std::string, RE::SpellItem*> g_boxSpells;
+        // The persist class's aggregate enchant ability (persist has no token, so
+        // it's kept separately and granted while CEF is enabled).
+        RE::SpellItem* g_persistSpell = nullptr;
+        bool g_persistSpellBuilt = false;
 
         void AddEffect(RE::SpellItem* a_spell, RE::EffectSetting* a_mgef, float a_magnitude)
         {
@@ -522,27 +680,39 @@ namespace CostumeFW
             return form ? form->As<RE::TESObjectARMO>() : nullptr;
         }
 
-        // Build the aggregate ENCHANT ability for a box (its contents' enchantment
-        // effects). Returns nullptr if no content is enchanted. Armor + weight are
-        // handled separately on the token's own fields (SetTokenStats).
-        RE::SpellItem* BuildBoxAbility(const BoxDefInfo& a_box)
+        RE::EffectSetting* ResolveMgef(const std::string& a_colonId)
         {
-            std::vector<RE::Effect*> enchEffects;
-            for (const auto& c : a_box.contents) {
-                auto* armo = ResolveArmo(c);
-                if (!armo || !armo->formEnchanting) {
-                    continue;
-                }
-                for (auto* e : armo->formEnchanting->effects) {
-                    if (e && e->baseEffect) {
-                        enchEffects.push_back(e);  // copied below
+            const std::uint32_t formId = ResolveFormId(a_colonId);
+            auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+            return form ? form->As<RE::EffectSetting>() : nullptr;
+        }
+
+        // Build a constant-effect self ability from a content list's enchantments.
+        // Per content, uses the CAPTURED snapshot (covers player/instance
+        // enchantments) if present, else the base ARMO's own enchantment. Returns
+        // nullptr if none of the contents contributes an effect.
+        RE::SpellItem* BuildEnchantSpell(const std::vector<std::string>& a_contents, const char* a_name)
+        {
+            std::vector<std::pair<RE::EffectSetting*, float>> effs;
+            for (const auto& c : a_contents) {
+                const auto snap = g_contentEnchants.find(c);
+                if (snap != g_contentEnchants.end()) {
+                    for (const auto& e : snap->second) {
+                        if (auto* mgef = ResolveMgef(e.mgef)) {
+                            effs.emplace_back(mgef, e.magnitude);
+                        }
+                    }
+                } else if (auto* armo = ResolveArmo(c); armo && armo->formEnchanting) {
+                    for (auto* e : armo->formEnchanting->effects) {
+                        if (e && e->baseEffect) {
+                            effs.emplace_back(e->baseEffect, e->effectItem.magnitude);
+                        }
                     }
                 }
             }
-            if (enchEffects.empty()) {
+            if (effs.empty()) {
                 return nullptr;
             }
-
             auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
             auto* spell = factory ? factory->Create() : nullptr;
             if (!spell) {
@@ -553,15 +723,19 @@ namespace CostumeFW
             spell->data.castingType = RE::MagicSystem::CastingType::kConstantEffect;
             spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
             spell->data.costOverride = 0;
-            spell->fullName = "Costume Stats";
-
-            for (auto* e : enchEffects) {
-                AddEffect(spell, e->baseEffect, e->effectItem.magnitude);
+            spell->fullName = a_name;
+            for (auto& [mgef, mag] : effs) {
+                AddEffect(spell, mgef, mag);
             }
-
-            SKSE::log::debug("boxes: synth enchant ability for '{}' ({} effect(s))",
-                a_box.token, enchEffects.size());
+            SKSE::log::debug("boxes: synth enchant ability '{}' ({} effect(s))", a_name, effs.size());
             return spell;
+        }
+
+        // Build the aggregate ENCHANT ability for a box. Armor + weight are handled
+        // separately on the token's own fields (SetTokenStats).
+        RE::SpellItem* BuildBoxAbility(const BoxDefInfo& a_box)
+        {
+            return BuildEnchantSpell(a_box.contents, "Costume Stats");
         }
 
         // --- Keyword passthrough -------------------------------------------------
@@ -766,6 +940,50 @@ namespace CostumeFW
         }
     }
 
+    bool CaptureEnchant(const std::string& a_content)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t baseId = ResolveFormId(a_content);
+        if (!player || baseId == 0) {
+            return false;
+        }
+        // Find the currently-worn player item matching this content's base form and
+        // read its EFFECTIVE enchantment (instance/player enchantment if present,
+        // else the base enchantment). Must run while the item is still equipped.
+        RE::EnchantmentItem* ench = nullptr;
+        auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
+            return a_obj.Is(RE::FormType::Armor);
+        });
+        for (auto& [obj, data] : inv) {
+            if (!obj || obj->GetFormID() != baseId) {
+                continue;
+            }
+            const auto& [count, entry] = data;
+            if (count <= 0 || !entry || !entry->IsWorn()) {
+                continue;
+            }
+            ench = entry->GetEnchantment();
+            break;
+        }
+        std::vector<EnchEffect> effs;
+        if (ench) {
+            for (auto* e : ench->effects) {
+                if (e && e->baseEffect) {
+                    effs.push_back({ MakeColonId(e->baseEffect), e->effectItem.magnitude });
+                }
+            }
+        }
+        const bool has = !effs.empty();
+        if (has) {
+            SKSE::log::info("boxes: captured {} enchant effect(s) for '{}'", effs.size(), a_content);
+            g_contentEnchants[a_content] = std::move(effs);
+        } else {
+            g_contentEnchants.erase(a_content);
+        }
+        WriteJson();
+        return has;
+    }
+
     namespace
     {
         void SyncSpell(RE::Actor* a_player, RE::SpellItem* a_spell, bool a_worn)
@@ -779,6 +997,16 @@ namespace CostumeFW
             } else if (!a_worn && has) {
                 a_player->RemoveSpell(a_spell);
             }
+        }
+
+        // Get (build + cache) the persist class's aggregate enchant ability.
+        RE::SpellItem* PersistAbilityFor()
+        {
+            if (!g_persistSpellBuilt) {
+                g_persistSpell = BuildEnchantSpell(g_persist, "Costume Stats (Persist)");
+                g_persistSpellBuilt = true;
+            }
+            return g_persistSpell;
         }
     }
 
@@ -797,6 +1025,9 @@ namespace CostumeFW
                 SyncSpell(player, ResolveSpell(b.ability), worn);
             }
         }
+        // Persist class: no token, always shown while CEF is enabled -> grant its
+        // aggregate enchant ability whenever CEF is on.
+        SyncSpell(player, PersistAbilityFor(), CefEnabled());
     }
 
     void RebuildBoxAbility(const std::string& a_token)
@@ -812,11 +1043,23 @@ namespace CostumeFW
         g_boxSpells.erase(it);  // next ApplyBoxAbilities rebuilds + reapplies
     }
 
+    void RebuildPersistAbility()
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (g_persistSpell && player && player->HasSpell(g_persistSpell)) {
+            player->RemoveSpell(g_persistSpell);
+        }
+        g_persistSpell = nullptr;
+        g_persistSpellBuilt = false;  // next ApplyBoxAbilities rebuilds + reapplies
+    }
+
     void ClearBoxSpellCache()
     {
         // Dynamic ability forms aren't serialized; a save/load drops them from the
         // actor. Just forget our cache so the next apply rebuilds from scratch.
         g_boxSpells.clear();
+        g_persistSpell = nullptr;
+        g_persistSpellBuilt = false;
     }
 
     std::string BoxStatsSummary(int a_index)
@@ -941,6 +1184,9 @@ namespace CostumeFW
             return false;
         }
         box.contents.erase(it);  // caller detaches the node
+        g_hideRules.erase(a_content);       // drop any hide rule for the removed content
+        g_genderModes.erase(a_content);     // and its gender override
+        g_contentEnchants.erase(a_content);  // and its captured enchantment
         WriteJson();
         SetTokenStats(box);  // recompute token armor/weight
         return true;
@@ -979,7 +1225,42 @@ namespace CostumeFW
                 return b.token;
             }
         }
+        if (g_persistPreset == a_presetName) {
+            return "persist";  // sentinel: held by the persist class
+        }
         return {};
+    }
+
+    std::string PersistPreset()
+    {
+        return g_persistPreset;
+    }
+
+    bool AssignPresetToPersist(const std::string& a_presetName,
+        const std::vector<std::string>& a_contents)
+    {
+        if (a_presetName.empty()) {
+            return false;
+        }
+        // Shared exclusivity pool with boxes: reject if a box already holds it.
+        const std::string holder = PresetAssignedTo(a_presetName);
+        if (!holder.empty() && holder != "persist") {
+            SKSE::log::warn("preset: '{}' already assigned to box {}", a_presetName, holder);
+            return false;
+        }
+        g_persist = a_contents;  // persist mirrors the preset's contents
+        g_persistPreset = a_presetName;
+        WriteJson();
+        SKSE::log::info("preset: assigned '{}' to persist ({} content)",
+            a_presetName, a_contents.size());
+        return true;
+    }
+
+    bool ClearPersistPreset()
+    {
+        g_persistPreset.clear();  // contents remain (now manual)
+        WriteJson();
+        return true;
     }
 
     std::string BoxPreset(const std::string& a_token)

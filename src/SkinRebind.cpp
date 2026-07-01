@@ -3,6 +3,7 @@
 #include "BoxStore.h"
 #include "Offsets.h"
 
+#include "RE/B/BGSBipedObjectForm.h"
 #include "RE/B/BGSTextureSet.h"
 #include "RE/B/BSGeometry.h"
 #include "RE/B/BSLightingShaderMaterialBase.h"
@@ -16,8 +17,11 @@
 #include "RE/N/NiNode.h"
 #include "RE/N/NiSkinData.h"
 #include "RE/N/NiSkinInstance.h"
+#include "RE/P/PlayerCharacter.h"
+#include "RE/S/Sexes.h"
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESModelTextureSwap.h"
+#include "RE/T/TESNPC.h"
 #include "RE/T/TESObjectARMA.h"
 #include "RE/T/TESObjectARMO.h"
 
@@ -64,15 +68,17 @@ namespace CostumeFW
         struct ActiveItem
         {
             std::string id;
-            ModelRef m3p;               // 3rd-person worn model (bipedModels[female])
-            ModelRef m1p;               // 1st-person model (bipedModel1stPersons[female])
+            ModelRef m3p;               // 3rd-person worn model (bipedModels[sex])
+            ModelRef m1p;               // 1st-person model (bipedModel1stPersons[sex])
             std::string tokenId;        // box token colon-form id; empty = persist class
             RE::FormID tokenForm{ 0 };  // resolved token FormID (0 if persist)
+            RE::SEX resolvedSex{ RE::SEXES::kFemale };  // sex m3p/m1p were resolved for
         };
         std::vector<ActiveItem> g_active;
 
         void Register(const std::string& a_id, const ModelRef& a_m3p, const ModelRef& a_m1p,
-            const std::string& a_tokenId = {}, RE::FormID a_tokenForm = 0)
+            const std::string& a_tokenId = {}, RE::FormID a_tokenForm = 0,
+            RE::SEX a_sex = RE::SEXES::kFemale)
         {
             for (auto& it : g_active) {
                 if (it.id == a_id) {
@@ -80,10 +86,11 @@ namespace CostumeFW
                     it.m1p = a_m1p;
                     it.tokenId = a_tokenId;
                     it.tokenForm = a_tokenForm;
+                    it.resolvedSex = a_sex;
                     return;
                 }
             }
-            g_active.push_back({ a_id, a_m3p, a_m1p, a_tokenId, a_tokenForm });
+            g_active.push_back({ a_id, a_m3p, a_m1p, a_tokenId, a_tokenForm, a_sex });
         }
 
         // Remove the CostumeFW_<id> nodes from both skeletons WITHOUT touching the
@@ -448,9 +455,53 @@ namespace CostumeFW
             return line;
         }
 
-        // Resolve an ARMA (or ARMO -> first ARMA) to its female 3P + 1P models
-        // (NIF path + alternate-texture swap). Returns false if not found.
-        bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin,
+        // The player's body sex (kMale/kFemale), used to pick which ARMA model to
+        // inject. kNone (no actor base) falls back to female (v1's assumption).
+        RE::SEX PlayerSex()
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* base = player ? player->GetActorBase() : nullptr;
+            const RE::SEX sex = base ? base->GetSex() : RE::SEXES::kFemale;
+            return (sex == RE::SEXES::kMale) ? RE::SEXES::kMale : RE::SEXES::kFemale;
+        }
+
+        // The body sex to inject a_id's model for: a forced gender mode (1=male,
+        // 2=female) overrides the player's sex; mode 0 follows the player.
+        RE::SEX EffectiveSex(const std::string& a_id)
+        {
+            switch (GenderModeFor(a_id)) {
+            case 1:
+                return RE::SEXES::kMale;
+            case 2:
+                return RE::SEXES::kFemale;
+            default:
+                return PlayerSex();
+            }
+        }
+
+        // Parse a colon-form id "XXXXXX:Plugin.esp" into local FormID + plugin.
+        // False if it isn't a colon-form (e.g. the raw-NIF "test" id).
+        bool ParseColonId(const std::string& a_id, std::uint32_t& a_localID, std::string& a_plugin)
+        {
+            const auto colon = a_id.find(':');
+            if (colon == std::string::npos) {
+                return false;
+            }
+            try {
+                a_localID = static_cast<std::uint32_t>(std::stoul(a_id.substr(0, colon), nullptr, 16));
+            } catch (...) {
+                return false;
+            }
+            a_plugin = a_id.substr(colon + 1);
+            return true;
+        }
+
+        // Resolve an ARMA (or ARMO -> first ARMA) to the 3P + 1P models (NIF path +
+        // alternate-texture swap) for the requested body sex. If that sex has no
+        // model, falls back to the other sex so a single-sex-authored accessory
+        // still shows (e.g. a female-only nail mesh on a male PC). False if neither
+        // sex has a 3P model / the form isn't ARMA/ARMO.
+        bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
             ModelRef& a_out3p, ModelRef& a_out1p)
         {
             auto* dh = RE::TESDataHandler::GetSingleton();
@@ -469,16 +520,33 @@ namespace CostumeFW
                 SKSE::log::error("ResolveArma: {:X}:{} is not ARMA/ARMO", a_localID, a_plugin);
                 return false;
             }
-            RE::TESModelTextureSwap& fem3p = arma->bipedModels[RE::SEXES::kFemale];
-            RE::TESModelTextureSwap& fem1p = arma->bipedModel1stPersons[RE::SEXES::kFemale];
-            const char* nif3p = fem3p.model.c_str();
+            const auto sexName = [](RE::SEX s) { return s == RE::SEXES::kMale ? "male" : "female"; };
+
+            RE::SEX sex = a_sex;
+            RE::TESModelTextureSwap* m3 = &arma->bipedModels[sex];
+            RE::TESModelTextureSwap* m1 = &arma->bipedModel1stPersons[sex];
+            const char* nif3p = m3->model.c_str();
             if (!nif3p || !*nif3p) {
-                SKSE::log::error("ResolveArma: ARMA {:X}:{} has no female 3P model", a_localID, a_plugin);
-                return false;
+                // Requested sex has no 3P model - fall back to the other sex.
+                const RE::SEX other = (sex == RE::SEXES::kMale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
+                RE::TESModelTextureSwap* o3 = &arma->bipedModels[other];
+                const char* on = o3->model.c_str();
+                if (on && *on) {
+                    SKSE::log::warn("ResolveArma: {:X}:{} has no {} 3P model, using {} model",
+                        a_localID, a_plugin, sexName(sex), sexName(other));
+                    sex = other;
+                    m3 = o3;
+                    m1 = &arma->bipedModel1stPersons[other];
+                    nif3p = m3->model.c_str();
+                } else {
+                    SKSE::log::error("ResolveArma: {:X}:{} has no 3P model for either sex",
+                        a_localID, a_plugin);
+                    return false;
+                }
             }
-            a_out3p = ModelRef{ nif3p, &fem3p };
-            const char* nif1p = fem1p.model.c_str();
-            a_out1p = (nif1p && *nif1p) ? ModelRef{ nif1p, &fem1p } : a_out3p;
+            a_out3p = ModelRef{ nif3p, m3 };
+            const char* nif1p = m1->model.c_str();
+            a_out1p = (nif1p && *nif1p) ? ModelRef{ nif1p, m1 } : a_out3p;
             return true;
         }
 
@@ -529,6 +597,40 @@ namespace CostumeFW
                     show = (player->GetWornArmor(it.tokenForm) != nullptr);
                 }
             }
+            // §8.10 hide-when-worn: hide this content while any of its configured
+            // vanilla slots is occupied by NON-CEF real equipment (boots over foot
+            // nails, helmet over a wig, ...). Auto-reshows when the slot frees.
+            if (show && player) {
+                for (const int slot : HideSlotsFor(it.id)) {
+                    if (slot < 30 || slot > 61) {
+                        continue;
+                    }
+                    auto* worn = player->GetWornArmor(
+                        static_cast<RE::BGSBipedObjectForm::BipedObjectSlot>(1u << (slot - 30)));
+                    if (worn && !IsBoxToken(worn->GetFormID())) {
+                        show = false;  // a real (non-token) item holds the slot
+                        break;
+                    }
+                }
+            }
+            // Sex-aware models: if the player's body sex changed since this item
+            // was resolved (e.g. ShowRaceMenu), re-resolve the ARMA models for the
+            // current sex before injecting. The 3D rebuild that follows a sex change
+            // already dropped the old nodes, so this re-injects the right mesh.
+            if (show && player) {
+                const RE::SEX sex = EffectiveSex(it.id);
+                if (it.resolvedSex != sex) {
+                    std::uint32_t lid = 0;
+                    std::string plg;
+                    ModelRef m3p, m1p;
+                    if (ParseColonId(it.id, lid, plg) &&
+                        ResolveArmaModels(lid, plg, sex, m3p, m1p)) {
+                        it.m3p = m3p;
+                        it.m1p = m1p;
+                    }
+                    it.resolvedSex = sex;  // mark resolved (raw-NIF items: nothing to redo)
+                }
+            }
             SKSE::log::debug("  item '{}' tokenForm={:08X} show={}", it.id, it.tokenForm, show);
             if (show) {
                 InjectInternal(it.id, it.m3p, it.m1p);
@@ -568,12 +670,13 @@ namespace CostumeFW
         } catch (...) {
             return false;
         }
+        const RE::SEX sex = EffectiveSex(a_contentId);
         ModelRef m3p, m1p;
-        if (!ResolveArmaModels(localID, a_contentId.substr(colon + 1), m3p, m1p)) {
+        if (!ResolveArmaModels(localID, a_contentId.substr(colon + 1), sex, m3p, m1p)) {
             return false;
         }
         const RE::FormID tokenForm = ResolveFormID(a_tokenId);
-        Register(a_contentId, m3p, m1p, a_tokenId, tokenForm);
+        Register(a_contentId, m3p, m1p, a_tokenId, tokenForm, sex);
         return true;
     }
 
@@ -646,13 +749,14 @@ namespace CostumeFW
 
     bool InjectArma(std::uint32_t a_localID, const std::string& a_plugin, const std::string& a_id)
     {
+        const RE::SEX sex = EffectiveSex(a_id);
         ModelRef m3p, m1p;
-        if (!ResolveArmaModels(a_localID, a_plugin, m3p, m1p)) {
+        if (!ResolveArmaModels(a_localID, a_plugin, sex, m3p, m1p)) {
             return false;
         }
         SKSE::log::info("InjectArma {:X}:{} 3p='{}' 1p='{}'",
             a_localID, a_plugin, m3p.nifPath, m1p.nifPath);
-        Register(a_id, m3p, m1p);
+        Register(a_id, m3p, m1p, {}, 0, sex);
         return InjectInternal(a_id, m3p, m1p);
     }
 
@@ -671,11 +775,12 @@ namespace CostumeFW
             return false;
         }
         const std::string plugin = a_id.substr(colon + 1);
+        const RE::SEX sex = PlayerSex();
         ModelRef m3p, m1p;
-        if (!ResolveArmaModels(localID, plugin, m3p, m1p)) {
+        if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
             return false;
         }
-        Register(a_id, m3p, m1p);
+        Register(a_id, m3p, m1p, {}, 0, sex);
         return true;
     }
 
@@ -716,6 +821,18 @@ namespace CostumeFW
         Unregister(a_id);
         DetachNodes(a_id);
         SKSE::log::debug("  detached {}", a_id);
+    }
+
+    void RefreshGender(const std::string& a_id)
+    {
+        for (auto& it : g_active) {
+            if (it.id == a_id) {
+                DetachNodes(a_id);                  // drop old-sex node, keep registered
+                it.resolvedSex = RE::SEXES::kNone;  // force Reconcile to re-resolve
+                break;
+            }
+        }
+        Reconcile();  // re-resolves on the sex mismatch and re-attaches
     }
 
     void InjectTestFromFile()

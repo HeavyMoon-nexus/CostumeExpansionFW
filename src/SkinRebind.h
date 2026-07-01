@@ -58,6 +58,12 @@ namespace CostumeFW
     // skeleton(s). Main thread only.
     void DetachSkinned(const std::string& a_id);
 
+    // Force one active item's injected model to re-resolve for its current
+    // effective sex (after its forced-gender mode changed) and re-inject: detaches
+    // the existing node (keeping the registration) so Reconcile re-attaches the
+    // right-sex mesh. No-op if the id isn't registered. Main thread only.
+    void RefreshGender(const std::string& a_id);
+
     // Reconcile every active item with the current player 3D: persist items are
     // (re)injected; box items are injected only while their token is worn, else
     // hidden. Called from the Load3D hook, kPostLoadGame, equip events, co-save
