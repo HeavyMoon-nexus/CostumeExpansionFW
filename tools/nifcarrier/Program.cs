@@ -258,6 +258,22 @@ class Program
         return (a != null && underAnchor > 0) ? 0 : 2;
     }
 
+    // T0 sanity: pure load -> save round-trip (no edits). Use the output in-game to
+    // confirm the engine reads NiflySharp's writer at all, before trusting carriers.
+    static int Passthrough(string inPath, string outPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[passthrough] FAILED to load {inPath}"); return 1; }
+        Report(nif, "IN");
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[passthrough] FAILED to save {outPath}"); return 1; }
+        var chk = new NifFile(); chk.Load(outPath, new NifFileLoadOptions());
+        Report(chk, "OUT");
+        Console.WriteLine("[passthrough] round-tripped. In-game test: does the engine render this NiflySharp output?");
+        return 0;
+    }
+
     static int Main(string[] args)
     {
         if (args.Length == 0)
@@ -267,6 +283,7 @@ class Program
             Console.WriteLine("       nifcarrier verifytree <src> <carrier>");
             Console.WriteLine("       nifcarrier merge      <out.nif> <base.nif> <add.nif> [add2.nif ...]");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
+            Console.WriteLine("       nifcarrier passthrough <in.nif> <out.nif>   (T0 sanity: load->save round-trip)");
             return 1;
         }
         try
@@ -278,6 +295,7 @@ class Program
                 case "verifytree": return VerifyTree(args[1], args[2]);
                 case "merge": return Merge(args[1], args.Skip(2).ToArray());
                 case "anchor": return Anchor(args[1], args[2], args[3]);
+                case "passthrough": return Passthrough(args[1], args[2]);
                 default: Console.WriteLine($"unknown command '{args[0]}'"); return 1;
             }
         }
