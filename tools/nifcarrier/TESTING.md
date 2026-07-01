@@ -46,11 +46,16 @@ geometry 付きの無変更 round-trip で確認する。ここが赤なら carr
 
 ## T1. レベル2 不可視 carrier（方策B・box クラス）
 
-**狙い**: geometry を持たない carrier がトークン装備で FSMP に物理を作らせ、二重表示なしに
-CEF 注入メッシュが揺れる（B §10-1）。レベル1（丸ごと流用）は B §9-9 で成立済み＝**差分は
-「不可視化しても発火するか」**。
+**狙い**: geometry を最小化した carrier がトークン装備で FSMP に物理を作らせ、二重表示（ほぼ）なしに
+CEF 注入メッシュが揺れる（B §10-1）。レベル1（丸ごと流用）は B §9-9 で成立済み。
 
-1. `nifcarrier carrier <content>.nif <carrier>.nif`（`VERDICT shapes=0 hdtExtra=True` を確認）。
+> **⚠️ 実機確定（2026-07-02）**: `carrier`（全 geometry 除去、shapes=0）は**①不発火**。skinned shape の
+> 無い armor はエンジンの biped attach が `attachedNode` を返さず、FSMP の `onEvent` ゲートで棄却される
+> （`ActorManager.cpp:125`）。→ **`keep1`（最小 skinned shape を1つ残す）を使うこと**。`carrier` の出力は
+> 頭部経路（T3）等での再利用素材・ボーン和集合のベースとしては有効。
+
+1. `nifcarrier keep1 <content>.nif <carrier>.nif`（`VERDICT shapes=1 skinned=True hdtExtra=True` を確認）。
+   残役 shape の分だけ部分的二重表示が出る（発火検証段階では想定内）。
 2. carrier を配置し、トークン ARMA の `WorldModel` を carrier パスへ（houseCARL）。
 3. その content を box の content に add（**同一 content NIF＝ボーン名一致**）。CEF 無効中に行う。
 4. ゲーム起動 → トークン装備 → `cef headdiag`。

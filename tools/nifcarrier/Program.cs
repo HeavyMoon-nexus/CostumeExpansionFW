@@ -258,6 +258,54 @@ class Program
         return (a != null && underAnchor > 0) ? 0 : 2;
     }
 
+    // Step-1 carrier: keep exactly ONE (smallest, skinned) geometry shape as the
+    // engine attach trigger, remove the rest. Rationale: a zero-geometry carrier does
+    // NOT fire FSMP — Skyrim's biped attach returns no attachedNode, so FSMP's
+    // onEvent(ArmorAttachEvent) gate (skeleton && hasAttached && attachedNode &&
+    // armorModel) rejects it and scanBBP/doSkeletonMerge never run (verified in-game
+    // 2026-07-02; FSMP ActorManager.cpp:125). C §9-10 (b)'s "tiny skinned geometry"
+    // requirement applies to the ①armor path too.
+    static int MakeCarrierKeep1(string inPath, string outPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[keep1] FAILED to load {inPath}"); return 1; }
+        Report(nif, "BEFORE");
+
+        var shapes = nif.GetShapes().ToList();
+        // Prefer plain skinned BSTriShape with the fewest vertices (smallest visible
+        // footprint); BSDynamicTriShape (morph/facegen geometry) only as a last resort.
+        var keep = shapes
+            .Where(s => s.HasSkinInstance)
+            .OrderBy(s => s.GetType().Name == "BSDynamicTriShape" ? 1 : 0)
+            .ThenBy(s => (int)s.VertexCount)
+            .FirstOrDefault();
+        if (keep == null)
+        { Console.WriteLine("[keep1] FAILED: no skinned shape in source"); return 1; }
+        Console.WriteLine($"[keep1] retaining {keep.GetType().Name} '{NameOf(keep)}' verts={keep.VertexCount} as attach trigger");
+
+        int removed = 0;
+        foreach (var s in shapes)
+            if (!ReferenceEquals(s, keep)) { nif.RemoveBlock((NiObject)s); removed++; }
+        nif.RemoveUnreferencedBlocks();
+        Console.WriteLine($"[keep1] removed {removed} shape(s), kept 1");
+        Report(nif, "AFTER");
+
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[keep1] FAILED to save {outPath}"); return 1; }
+        Console.WriteLine($"[keep1] wrote {outPath}");
+
+        var chk = new NifFile();
+        chk.Load(outPath, new NifFileLoadOptions());
+        Report(chk, "RELOAD");
+        int shp = chk.GetShapes()?.Count() ?? 0;
+        bool skinned = chk.GetShapes()?.Any(s => s.HasSkinInstance) ?? false;
+        bool hdt = chk.Blocks.Any(b => b.GetType().Name == "NiStringExtraData" && NameOf(b) == HDT_EXTRA);
+        int bones = chk.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
+        Console.WriteLine($"[keep1] VERDICT shapes={shp} (want 1)  skinned={skinned} (want True)  hdtExtra={hdt} (want True)  bones={bones} (want >0)");
+        return (shp == 1 && skinned && hdt && bones > 0) ? 0 : 2;
+    }
+
     // T0 sanity: pure load -> save round-trip (no edits). Use the output in-game to
     // confirm the engine reads NiflySharp's writer at all, before trusting carriers.
     static int Passthrough(string inPath, string outPath)
@@ -280,6 +328,7 @@ class Program
         {
             Console.WriteLine("usage: nifcarrier dump       <nif>");
             Console.WriteLine("       nifcarrier carrier    <in.nif> <out.nif>");
+            Console.WriteLine("       nifcarrier keep1      <in.nif> <out.nif>   (carrier keeping 1 skinned shape as attach trigger)");
             Console.WriteLine("       nifcarrier verifytree <src> <carrier>");
             Console.WriteLine("       nifcarrier merge      <out.nif> <base.nif> <add.nif> [add2.nif ...]");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
@@ -292,6 +341,7 @@ class Program
             {
                 case "dump": return Dump(args[1]);
                 case "carrier": return MakeCarrier(args[1], args[2]);
+                case "keep1": return MakeCarrierKeep1(args[1], args[2]);
                 case "verifytree": return VerifyTree(args[1], args[2]);
                 case "merge": return Merge(args[1], args.Skip(2).ToArray());
                 case "anchor": return Anchor(args[1], args[2], args[3]);
