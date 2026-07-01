@@ -18,6 +18,10 @@ cmake-build*
 # vcpkg
 vcpkg_installed
 
+# .NET build-tool output (tools/*)
+tools/**/bin/
+tools/**/obj/
+
 # Logs
 *.log
 
