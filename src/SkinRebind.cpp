@@ -4,6 +4,7 @@
 #include "Offsets.h"
 
 #include "RE/B/BGSBipedObjectForm.h"
+#include "RE/B/BGSHeadPart.h"
 #include "RE/B/BGSTextureSet.h"
 #include "RE/B/BSGeometry.h"
 #include "RE/B/BSLightingShaderMaterialBase.h"
@@ -28,6 +29,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -177,6 +179,66 @@ namespace CostumeFW
             return out;
         }
 
+        // FSMP merges the physics bones it builds into the LIVE skeleton under a
+        // renamed node: "hdtSSEPhysics_AutoRename_Armor_<8hex> <origName>" (equip
+        // armor-attach path) or "hdtSSEPhysics_AutoRename_Head_<8hex> <origName>"
+        // (facegen head path). The <8hex> id is a per-skeleton SEQUENTIAL counter
+        // (confirmed in hdtSMP64 ActorManager.cpp:856 - it is NOT a formID), so we
+        // can't construct the name up-front. Search the skeleton for a node whose
+        // name is exactly <known-prefix><8 hex><space><bone>. Returns first BFS
+        // match, or null. If found, the injected mesh can bind to the SIMULATED
+        // bone and get real SMP sway (instead of the static ancestor remap).
+        RE::NiAVObject* FindFsmpRenamedBone(RE::NiAVObject* a_root, const char* a_bone)
+        {
+            if (!a_root || !a_bone || !*a_bone) {
+                return nullptr;
+            }
+            static constexpr std::string_view kPrefixes[] = {
+                "hdtSSEPhysics_AutoRename_Armor_",
+                "hdtSSEPhysics_AutoRename_Head_",
+            };
+            const std::string_view bone{ a_bone };
+            auto matches = [&](std::string_view nm) {
+                for (const auto pfx : kPrefixes) {
+                    if (nm.size() != pfx.size() + 8 + 1 + bone.size()) {
+                        continue;
+                    }
+                    if (nm.substr(0, pfx.size()) != pfx) {
+                        continue;
+                    }
+                    const std::string_view hex = nm.substr(pfx.size(), 8);
+                    if (!std::all_of(hex.begin(), hex.end(),
+                            [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+                        continue;
+                    }
+                    if (nm[pfx.size() + 8] != ' ') {
+                        continue;
+                    }
+                    if (nm.substr(pfx.size() + 8 + 1) == bone) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            std::vector<RE::NiAVObject*> stack{ a_root };
+            while (!stack.empty()) {
+                auto* obj = stack.back();
+                stack.pop_back();
+                if (!obj) {
+                    continue;
+                }
+                if (matches(std::string_view(obj->name.c_str()))) {
+                    return obj;
+                }
+                if (auto* node = obj->AsNode()) {
+                    for (auto& child : node->GetChildren()) {
+                        stack.push_back(child.get());
+                    }
+                }
+            }
+            return nullptr;
+        }
+
         // Resolve every bone of one geometry's skin against the live skeleton.
         // Two-pass gate: resolve ALL first; only commit if every bone resolved
         // (avoids the "missing skeleton root node" fatal / partial rebind).
@@ -202,6 +264,8 @@ namespace CostumeFW
 
             std::uint32_t remapCount = 0;
             std::string firstRemap;
+            std::uint32_t fsmpCount = 0;
+            std::string firstFsmp;
             std::vector<RE::NiAVObject*> resolved(n, nullptr);
             for (std::uint32_t i = 0; i < n; ++i) {
                 RE::NiAVObject* src = a_skin->bones[i];
@@ -210,6 +274,21 @@ namespace CostumeFW
                     return false;
                 }
                 RE::NiAVObject* tgt = a_root->GetObjectByName(src->name);
+                if (!tgt) {
+                    // FSMP physics-driven bone: if this outfit's custom SMP bone was
+                    // built by FSMP (via a physics carrier / box token / head part),
+                    // it lives in the skeleton under a renamed node
+                    // "hdtSSEPhysics_AutoRename_(Armor|Head)_<id> <bone>". Bind THERE
+                    // so the injected mesh follows the simulated bone = real SMP sway,
+                    // instead of falling through to the static ancestor remap below.
+                    tgt = FindFsmpRenamedBone(a_root, src->name.c_str());
+                    if (tgt) {
+                        ++fsmpCount;
+                        if (firstFsmp.empty()) {
+                            firstFsmp = std::string(src->name.c_str()) + "->" + tgt->name.c_str();
+                        }
+                    }
+                }
                 if (!tgt) {
                     // Ancestor remap: a bone the live skeleton lacks - typically an
                     // outfit-specific SMP/physics bone (e.g. 'SeraPantyL_A 1') that
@@ -234,6 +313,10 @@ namespace CostumeFW
                     }
                 }
                 resolved[i] = tgt;
+            }
+            if (fsmpCount) {
+                SKSE::log::info("  bound {} bone(s) to FSMP physics-driven node(s) "
+                                "(SMP sway; e.g. {})", fsmpCount, firstFsmp);
             }
             if (remapCount) {
                 SKSE::log::warn("  remapped {} unresolved bone(s) to nearest ancestor "
@@ -744,6 +827,113 @@ namespace CostumeFW
             if (auto* c = RE::ConsoleLog::GetSingleton()) {
                 c->Print(it.id.c_str());
             }
+        }
+    }
+
+    bool ChangeHeadPartPoC(const std::string& a_id)
+    {
+        // FSMP approach-C active PoC (stage 1): drive a head-part change from CEF
+        // code (NOT RaceMenu UI) and force a facegen head rebuild, to test whether
+        // FSMP's facegen path (2) enumerates a CODE-changed head part - i.e. does
+        // skee's GetBaseOverlays() (which FSMP iterates on AE when HasOverlays())
+        // include our vanilla TESNPC::ChangeHeadPart? Pass a known SMP-hair HDPT
+        // FormID; then run `cef headdiag` to see if its "_Head_" bones appear.
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!player || !dh) {
+            return false;
+        }
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_id, localID, plugin)) {
+            SKSE::log::error("hair PoC: bad id '{}' (want XXXXXX:Plugin.esp)", a_id);
+            return false;
+        }
+        auto* hdpt = dh->LookupForm<RE::BGSHeadPart>(localID, plugin);
+        if (!hdpt) {
+            SKSE::log::error("hair PoC: {:X}:{} is not a HeadPart (HDPT)", localID, plugin);
+            return false;
+        }
+        auto* base = player->GetActorBase();
+        if (!base) {
+            SKSE::log::error("hair PoC: player has no actor base");
+            return false;
+        }
+        SKSE::log::info("hair PoC: ChangeHeadPart -> editorID='{}' type={} model='{}'",
+            hdpt->GetFormEditorID(), static_cast<int>(hdpt->type.get()),
+            hdpt->model.c_str());
+        base->ChangeHeadPart(hdpt);
+        player->DoReset3D(false);  // rebuilds actor 3D incl. facegen head -> fires (2)
+        SKSE::log::info("hair PoC: DoReset3D issued - now run 'cef headdiag'");
+        return true;
+    }
+
+    void HeadDiag()
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            return;
+        }
+        auto* console = RE::ConsoleLog::GetSingleton();
+        const auto say = [&](const std::string& s) {
+            SKSE::log::info("{}", s);
+            if (console) {
+                console->Print(s.c_str());
+            }
+        };
+
+        static constexpr std::string_view kMarker = "hdtSSEPhysics_AutoRename_";
+
+        // Walk one skeleton root: enumerate every FSMP-renamed physics bone,
+        // grouped by its "<prefix>_<8hex>" merge id. Full per-bone list -> log;
+        // summary -> console. Returns {armorBones, headBones}.
+        const auto diagRoot = [&](RE::NiAVObject* a_root, const char* a_tag) {
+            if (!a_root) {
+                say(std::string("[CEF] headdiag ") + a_tag + ": no 3D");
+                return std::pair<std::uint32_t, std::uint32_t>{ 0, 0 };
+            }
+            std::map<std::string, std::uint32_t> groups;  // "<prefix>_<8hex>" -> bone count
+            std::uint32_t armorTotal = 0, headTotal = 0;
+            std::vector<RE::NiAVObject*> stack{ a_root };
+            while (!stack.empty()) {
+                auto* obj = stack.back();
+                stack.pop_back();
+                if (!obj) {
+                    continue;
+                }
+                const std::string_view nm{ obj->name.c_str() };
+                if (nm.starts_with(kMarker)) {
+                    const auto sp = nm.find(' ');
+                    const std::string group{ sp == std::string_view::npos ? nm : nm.substr(0, sp) };
+                    ++groups[group];
+                    if (group.find("_Head_") != std::string::npos) {
+                        ++headTotal;
+                    } else {
+                        ++armorTotal;
+                    }
+                    const char* parent = obj->parent ? obj->parent->name.c_str() : "<null>";
+                    SKSE::log::info("  headdiag[{}] {} (parent '{}')", a_tag, nm, parent);
+                }
+                if (auto* node = obj->AsNode()) {
+                    for (auto& child : node->GetChildren()) {
+                        stack.push_back(child.get());
+                    }
+                }
+            }
+            say("[CEF] headdiag " + std::string(a_tag) + ": " + std::to_string(armorTotal) +
+                " Armor + " + std::to_string(headTotal) + " Head physics bone(s), " +
+                std::to_string(groups.size()) + " merge group(s)");
+            for (const auto& [g, cnt] : groups) {
+                say("  " + g + " : " + std::to_string(cnt) + " bone(s)");
+            }
+            return std::pair<std::uint32_t, std::uint32_t>{ armorTotal, headTotal };
+        };
+
+        const auto [a3, h3] = diagRoot(player->Get3D(false), "3p");
+        const auto [a1, h1] = diagRoot(player->Get3D(true), "1p");
+        if (h3 == 0 && h1 == 0) {
+            say("[CEF] headdiag: NO _Head_ bones found - facegen head path (2) not "
+                "firing here (apply an SMP hair/head part and retry)");
         }
     }
 

@@ -158,8 +158,26 @@ namespace CostumeFW
             });
         } else if (sub == "list") {
             SKSE::GetTaskInterface()->AddTask([] { ListActive(); });
+        } else if (sub == "headdiag") {
+            // FSMP approach-C passive PoC: enumerate FSMP-renamed physics bones on
+            // the live skeleton(s). Apply an SMP hair first to see "_Head_" bones.
+            SKSE::GetTaskInterface()->AddTask([] { HeadDiag(); });
+        } else if (sub == "hair") {
+            // FSMP approach-C active PoC (stage 1): ChangeHeadPart(<SMP hair HDPT>)
+            // + DoReset3D from CEF code, then `cef headdiag` to see if (2) fired.
+            if (rest.find(':') == std::string::npos) {
+                Print("[CEF] usage: cef hair <HeadPart FormID:Plugin.esp>");
+                return;
+            }
+            SKSE::GetTaskInterface()->AddTask([rest] {
+                const bool ok = ChangeHeadPartPoC(rest);
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print(ok ? "[CEF] head part changed + reset 3D; run 'cef headdiag'"
+                                : "[CEF] hair PoC FAILED (see log)");
+                }
+            });
         } else {
-            Print("[CEF] inject | box | detach | clear | list");
+            Print("[CEF] inject | box | detach | clear | list | headdiag | hair");
         }
     }
 }

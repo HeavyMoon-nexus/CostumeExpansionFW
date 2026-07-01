@@ -88,4 +88,21 @@ namespace CostumeFW
     // and injects it with id "test". Logs every step.
     void InjectTestFromFile();
     void DetachTest();
+
+    // FSMP approach-C active PoC (stage 1, `cef hair <FormID:Plugin.esp>`): drive
+    // a head-part change from CEF code (TESNPC::ChangeHeadPart) + force a facegen
+    // rebuild (DoReset3D) to test whether FSMP's facegen path (2) enumerates a
+    // code-changed head part. Pass a known SMP-hair HDPT, then `cef headdiag`.
+    // NOTE: ChangeHeadPart is save-persistent (like RaceMenu) - reversible by
+    // re-applying the original hair or reloading. Main thread only.
+    bool ChangeHeadPartPoC(const std::string& a_id);
+
+    // FSMP approach-C passive PoC (`cef headdiag`): walk BOTH player skeletons
+    // and enumerate every FSMP-renamed physics bone
+    // ("hdtSSEPhysics_AutoRename_(Armor|Head)_<8hex> <bone>"), grouped by the
+    // <prefix>_<id> the bone was merged under. Confirms whether the facegen head
+    // path (SkinAllGeometry -> SkinSingleHeadGeometryEvent) fired and produced
+    // "_Head_" bones (e.g. from an equipped SMP hair) that the injection rebind
+    // can then target. Console-prints a summary + logs the full list. Main thread.
+    void HeadDiag();
 }
