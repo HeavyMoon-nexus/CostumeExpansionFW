@@ -273,6 +273,12 @@ namespace CostumeFW
             return TokenSlot(a_token.c_str());
         }
 
+        // The box index on biped slot a_slot, or -1 (slot-keyed page resolution).
+        std::int32_t GetBoxBySlot(RE::StaticFunctionTag*, std::int32_t a_slot)
+        {
+            return BoxIndexForSlot(a_slot);
+        }
+
         // Box "distribute" flag (whether the token is given to the player).
         bool GetBoxEnabled(RE::StaticFunctionTag*, std::int32_t a_index)
         {
@@ -710,6 +716,7 @@ namespace CostumeFW
 
         a_vm->RegisterFunction("GetFreeTokenIds", kClass, GetFreeTokenIds);
         a_vm->RegisterFunction("GetTokenSlot", kClass, GetTokenSlot);
+        a_vm->RegisterFunction("GetBoxBySlot", kClass, GetBoxBySlot);
         a_vm->RegisterFunction("GetBoxEnabled", kClass, GetBoxEnabled);
         a_vm->RegisterFunction("SetBoxEnabled", kClass, SetBoxEnabledNative);
         a_vm->RegisterFunction("GetBoxArmorType", kClass, GetBoxArmorType);

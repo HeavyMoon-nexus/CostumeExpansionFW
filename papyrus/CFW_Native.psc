@@ -99,6 +99,10 @@ String[] Function GetFreeTokenIds() Global Native
 ; The biped slot number (30-61) a token's ARMO occupies (0 if none).
 Int Function GetTokenSlot(String token) Global Native
 
+; The box index on biped slot `slot`, or -1 if none. Lets the per-box MCM pages
+; (named by slot) resolve to their box even after a deletion shifts box indices.
+Int Function GetBoxBySlot(Int slot) Global Native
+
 ; Box "distribute" flag: whether the token is given to / kept on the player.
 Bool Function GetBoxEnabled(Int index) Global Native
 

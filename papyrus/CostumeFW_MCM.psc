@@ -30,7 +30,8 @@ string[] _persistWornIdsCache
 ; --- Boxes page state ---
 ; Each box now has its OWN page (scroll-limit fix); "Boxes" is a short overview.
 int      _curBoxIndex       ; the box rendered on the current single-box page
-string[] _boxPageNames      ; page name per box (index == box index), for OnPageReset
+string[] _boxPageNames      ; page name per box page, for OnPageReset lookup
+int[]    _boxPageSlots      ; the biped slot each box page maps to (parallel)
 int _optNewBox
 int[]    _equipOpts
 int[]    _equipBoxIdx
@@ -51,6 +52,7 @@ string[] _assignTokens
 int[]    _exportOpts        ; per-box "Export as preset" input
 string[] _exportTokens
 string[] _wornIdsCache      ; ids parallel to the open "add worn item" menu
+int[]    _wornGenderCache   ; gender mode (0/1/2) parallel to _wornIdsCache
 string[] _freeTokenIds      ; ids parallel to the open "new box" slot menu
 string[] _presetFilesCache  ; files parallel to the open "assign preset" menu
 
@@ -80,6 +82,7 @@ function SetupConfig()
     ModName = "Costume Expansion FW"
     _curBoxIndex = 0
     _boxPageNames = new string[1]
+    _boxPageSlots = new int[1]
     BuildPages()  ; Main, Persist, Boxes (overview), one page per box, Presets
 
     ; Init every option-map array so a Find() before a page is built is safe.
@@ -108,6 +111,7 @@ function SetupConfig()
     _exportOpts    = new int[1]
     _exportTokens  = new string[1]
     _wornIdsCache    = new string[1]
+    _wornGenderCache = new int[1]
     _freeTokenIds    = new string[1]
     _presetFilesCache = new string[1]
     _presetAssignOpts = new int[1]
@@ -130,12 +134,14 @@ function BuildPages()
     p[1] = "Persist"
     p[2] = "Boxes"
     _boxPageNames = Utility.CreateStringArray(n + 1, "")  ; +1 so size is never 0
+    _boxPageSlots = Utility.CreateIntArray(n + 1, 0)
     int i = 0
     while i < n
         int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
         string pname = "Box " + slot + ": " + SlotName(slot)
         p[3 + i] = pname
         _boxPageNames[i] = pname
+        _boxPageSlots[i] = slot
         i += 1
     endWhile
     p[3 + n] = "Presets"
@@ -156,11 +162,18 @@ event OnPageReset(string a_page)
     elseIf a_page == "Main" || a_page == ""
         ResetMainPage()
     else
-        int idx = _boxPageNames.Find(a_page)
-        if idx >= 0 && idx < CFW_Native.GetBoxCount()
-            ResetSingleBoxPage(idx)
+        ; Box page: resolve by SLOT (stable) not by page position, so a deletion
+        ; that shifts box indices still maps each page to the right box.
+        int pi = _boxPageNames.Find(a_page)
+        if pi < 0
+            ResetMainPage()
+            return
+        endIf
+        int boxIdx = CFW_Native.GetBoxBySlot(_boxPageSlots[pi])
+        if boxIdx >= 0
+            ResetSingleBoxPage(boxIdx)
         else
-            ResetMainPage()  ; stale page (box removed) - reopen MCM to refresh
+            ResetDeletedBoxPage()  ; box was deleted this session
         endIf
     endIf
 endEvent
@@ -225,25 +238,6 @@ string Function BoxContentsSummary(int a_boxIndex)
         ci += 1
     endWhile
     return out
-endFunction
-
-; Ask which body's NIF to load for a captured item: 0 = player gender, 1 = Male,
-; 2 = Female. Uses a UIExtensions list popup (soft dependency). If UIExtensions is
-; absent or the popup is cancelled, defaults to 0 (follow the player).
-int Function AskGenderNIF()
-    UIListMenu menu = UIExtensions.GetMenu("UIListMenu") as UIListMenu
-    if !menu
-        return 0  ; UIExtensions not installed -> follow player
-    endif
-    menu.AddEntryItem("Use player's gender")
-    menu.AddEntryItem("Force Male")
-    menu.AddEntryItem("Force Female")
-    menu.OpenMenu()
-    int idx = menu.GetResultInt()
-    if idx < 0 || idx > 2
-        return 0  ; cancelled / invalid -> follow player
-    endif
-    return idx
 endFunction
 
 ; If the captured item has attached scripts, warn that its script-driven behavior
@@ -350,6 +344,14 @@ function ResetBoxesOverviewPage()
         AddTextOption("Box " + slot + ": " + SlotName(slot) + " (" + cnt + " items)", worn, OPTION_FLAG_DISABLED)
         i += 1
     endWhile
+endFunction
+
+; Shown when a box page's box was deleted this session (the page list only
+; refreshes on reopen). Avoids rendering a shifted, wrong box on that page.
+function ResetDeletedBoxPage()
+    SetCursorFillMode(TOP_TO_BOTTOM)
+    AddHeaderOption("(box deleted)")
+    AddTextOption("This box was deleted. Reopen the MCM to refresh the page list.", "", OPTION_FLAG_DISABLED)
 endFunction
 
 ; Full controls for ONE box (its own page). The box index is tracked in
@@ -636,8 +638,28 @@ event OnOptionMenuOpen(int a_option)
     endIf
 
     if a_option == _optAddPersist || _addWornOpts.Find(a_option) >= 0
-        _wornIdsCache = CFW_Native.GetWornItemIds()
-        SetMenuDialogOptions(CFW_Native.GetWornItemNames())
+        ; One in-MCM SkyUI dialog that asks item AND gender NIF in a single pick:
+        ; each worn item is listed three times (player / Male / Female).
+        string[] names = CFW_Native.GetWornItemNames()
+        string[] ids = CFW_Native.GetWornItemIds()
+        int n = names.Length
+        _wornIdsCache    = Utility.CreateStringArray(n * 3, "")
+        _wornGenderCache = Utility.CreateIntArray(n * 3, 0)
+        string[] menu = Utility.CreateStringArray(n * 3, "")
+        int i = 0
+        while i < n
+            menu[i * 3]     = names[i] + "  (player gender NIF)"
+            menu[i * 3 + 1] = names[i] + "  (force Male NIF)"
+            menu[i * 3 + 2] = names[i] + "  (force Female NIF)"
+            _wornIdsCache[i * 3]     = ids[i]
+            _wornIdsCache[i * 3 + 1] = ids[i]
+            _wornIdsCache[i * 3 + 2] = ids[i]
+            _wornGenderCache[i * 3]     = 0
+            _wornGenderCache[i * 3 + 1] = 1
+            _wornGenderCache[i * 3 + 2] = 2
+            i += 1
+        endWhile
+        SetMenuDialogOptions(menu)
         return
     endIf
 
@@ -705,7 +727,7 @@ event OnOptionMenuAccept(int a_option, int a_index)
             return
         endIf
         string contentId = _wornIdsCache[a_index]
-        CFW_Native.SetContentGender(contentId, AskGenderNIF())  ; ask NIF gender first
+        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
         CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
         Form contentForm = CFW_Native.ResolveForm(contentId)
         if contentForm
@@ -728,7 +750,7 @@ event OnOptionMenuAccept(int a_option, int a_index)
         string token = CFW_Native.GetBoxToken(boxIdx)
         string contentId = _wornIdsCache[a_index]
 
-        CFW_Native.SetContentGender(contentId, AskGenderNIF())  ; ask NIF gender first
+        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
         CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
         CFW_Native.AddBox("", token, contentId)
         Form contentForm = CFW_Native.ResolveForm(contentId)
@@ -886,7 +908,7 @@ event OnOptionHighlight(int a_option)
     elseIf a_option == _optUninstall
         SetInfoText("Return all captured items, remove all box tokens, detach everything. Do this before removing the mod.")
     elseIf a_option == _optAddPersist
-        SetInfoText("Capture a worn accessory as an always-on persist item (frees its slot). Asks which gender NIF to load (needs UIExtensions).")
+        SetInfoText("Capture a worn accessory as an always-on persist item (frees its slot). Asks which gender NIF to load.")
     elseIf a_option == _persistPresetOpt
         SetInfoText("Assign a preset's contents to the persist set (same presets as boxes; one preset per box/persist).")
     elseIf a_option == _persistExportOpt
@@ -897,7 +919,7 @@ event OnOptionHighlight(int a_option)
         int bi = _equipBoxIdx[_equipOpts.Find(a_option)]
         SetInfoText("Wear/remove the box token (worn = contents show). Contains: " + BoxContentsSummary(bi))
     elseIf _addWornOpts.Find(a_option) >= 0
-        SetInfoText("Capture a currently-worn armor into this box (frees its slot). Asks which gender NIF to load (needs UIExtensions).")
+        SetInfoText("Capture a currently-worn armor into this box (frees its slot). Asks which gender NIF to load.")
     elseIf _assignOpts.Find(a_option) >= 0
         SetInfoText("Assign a preset's contents to this box (one preset per box).")
     elseIf _exportOpts.Find(a_option) >= 0

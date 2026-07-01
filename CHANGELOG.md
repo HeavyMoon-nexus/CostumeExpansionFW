@@ -11,9 +11,9 @@
   your inventory shows its packed item names. Updates live as you add/remove
   contents. *Optional — requires "LoreBox - Item and Spell Tooltips" + KID.*
 - **Forced-gender NIF mode:** when capturing a worn item you are asked which body
-  mesh to inject — *Use player's gender / Force Male / Force Female*. Lets a
-  costume captured on one body show the other body's mesh. *The popup requires
-  UIExtensions; without it, captures default to the player's gender.*
+  mesh to inject — *Use player's gender / Force Male / Force Female* (a simple
+  message box; no extra dependency). Lets a costume captured on one body show the
+  other body's mesh.
 - **Presets for the Persist class:** the always-on Persist set can now adopt a
   preset just like a box, using the same `CEFP_*.json` files. A preset can only be
   assigned to one box or to Persist at a time (shared exclusivity). Includes
@@ -37,7 +37,7 @@
 ### Dependencies
 - **Required:** SKSE64, Address Library, SkyUI, RaceMenu (skee).
 - **Optional (feature add-ons):** Keyword Item Distributor (KID) + LoreBox
-  (inventory tooltips), UIExtensions (gender-choice popup).
+  (inventory tooltips).
 
 ---
 

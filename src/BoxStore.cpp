@@ -544,6 +544,16 @@ namespace CostumeFW
         return SlotNumberOf(ResolveArmo(a_token));
     }
 
+    int BoxIndexForSlot(int a_slot)
+    {
+        for (std::size_t i = 0; i < g_boxes.size(); ++i) {
+            if (SlotNumberOf(ResolveArmo(g_boxes[i].token)) == a_slot) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
     std::string LoreBoxContentsForSlot(int a_slot)
     {
         for (const auto& b : g_boxes) {

@@ -131,6 +131,11 @@ namespace CostumeFW
     // The biped slot number (30-61) a token ARMO occupies, 0 if none/unresolved.
     int TokenSlot(const std::string& a_token);
 
+    // The box index whose token occupies biped slot a_slot, or -1 if none. Lets
+    // the MCM's per-box pages (named by slot) resolve to their box even after a
+    // deletion shifts box indices.
+    int BoxIndexForSlot(int a_slot);
+
     // Per-box "distribute" flag: whether the token is given to / kept on the
     // player. Off removes it (escape hatch for a slot that conflicts in the LO).
     bool BoxEnabled(const std::string& a_token);
