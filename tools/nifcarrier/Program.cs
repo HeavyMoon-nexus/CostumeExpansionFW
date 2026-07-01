@@ -20,6 +20,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using NiflySharp;
+using NiflySharp.Blocks;
 
 class Program
 {
@@ -150,13 +151,122 @@ class Program
         return (missing == 0 && mismatch == 0) ? 0 : 2;
     }
 
+    // Equivalent of NiflySharp's internal CloneNodesRec (public-API only): merge
+    // srcNode's bone branch into dst, reusing an existing same-named bone or cloning
+    // it under the name-matched parent (else dst root), then recursing children.
+    // Same algorithm FSMP's doSkeletonMerge uses, so the union stays FSMP-consistent.
+    static void MergeBranch(NifFile dst, NiNode srcNode, NiNode dstRoot, NifFile srcNif)
+    {
+        string boneName = srcNode.Name?.String;
+        if (boneName == null) return;
+
+        NiNode nodeParent = dstRoot;
+        var srcParent = srcNif.GetParentNode(srcNode);
+        if (srcParent?.Name?.String is string pn)
+        {
+            var p = dst.FindBlockByName<NiNode>(pn);
+            if (p != null) nodeParent = p;
+        }
+
+        var existing = dst.FindBlockByName<NiNode>(boneName);
+        if (!dst.GetBlockIndex(existing, out int boneID))
+        {
+            boneID = dst.CloneNamedNode(boneName, srcNif);
+            nodeParent.Children.AddBlockRef(boneID);
+        }
+
+        foreach (var childRef in srcNode.Children.References.ToList())
+        {
+            var childNode = srcNif.GetBlock<NiNode>(childRef);
+            if (childNode != null) MergeBranch(dst, childNode, dstRoot, srcNif);
+        }
+    }
+
+    // Level-3 merge carrier: union the bone branches of many contents into one NIF.
+    static int Merge(string outPath, string[] inputs)
+    {
+        if (inputs.Length < 2) { Console.WriteLine("[merge] need a base NIF + at least one more"); return 1; }
+        var dst = new NifFile();
+        if (dst.Load(inputs[0], new NifFileLoadOptions()) != 0 || !dst.Valid)
+        { Console.WriteLine($"[merge] FAILED to load base {inputs[0]}"); return 1; }
+        Report(dst, "BASE " + inputs[0]);
+        var dstRoot = dst.GetRootNode();
+
+        for (int i = 1; i < inputs.Length; i++)
+        {
+            var src = new NifFile();
+            if (src.Load(inputs[i], new NifFileLoadOptions()) != 0 || !src.Valid)
+            { Console.WriteLine($"[merge] FAILED to load {inputs[i]}"); return 1; }
+            var srcRoot = src.GetRootNode();
+            int before = dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
+            foreach (var childRef in srcRoot.Children.References.ToList())
+            {
+                var childNode = src.GetBlock<NiNode>(childRef);
+                if (childNode != null) MergeBranch(dst, childNode, dstRoot, src);
+            }
+            int after = dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
+            Console.WriteLine($"[merge] {inputs[i]}: +{after - before} new bone(s) (shared bones reused)");
+        }
+
+        if (dst.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[merge] FAILED to save {outPath}"); return 1; }
+        var chk = new NifFile(); chk.Load(outPath, new NifFileLoadOptions());
+        Report(chk, "MERGED " + outPath);
+        bool hdt = chk.Blocks.Any(b => b.GetType().Name == "NiStringExtraData" && NameOf(b) == HDT_EXTRA);
+        Console.WriteLine($"[merge] NOTE root extra data is inherited from base ('{inputs[0]}'); hdtExtra={hdt}.");
+        Console.WriteLine("[merge]      The merged XML must union all contents' physics (see README / test doc).");
+        return 0;
+    }
+
+    // Re-route: nest every root-level bone branch under a new anchor node named
+    // e.g. "NPC Pelvis [Pelv]" so the physics chain grows from the body bone, not
+    // the head, when driven via the facegen head path (C §9-10).
+    static int Anchor(string inPath, string outPath, string anchorName)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[anchor] FAILED to load {inPath}"); return 1; }
+        Report(nif, "BEFORE");
+        var root = nif.GetRootNode();
+
+        var anchor = new NiNode { Name = new NiStringRef(anchorName) };
+        int anchorId = nif.AddBlock(anchor);
+
+        int moved = 0;
+        foreach (var r in root.Children.References.ToList())
+        {
+            var n = nif.GetBlock<NiNode>(r);
+            if (n != null && !ReferenceEquals(n, anchor))
+            {
+                anchor.Children.AddBlockRef(r.Index);
+                r.Clear();
+                moved++;
+            }
+        }
+        root.Children.AddBlockRef(anchorId);
+        Console.WriteLine($"[anchor] moved {moved} branch top(s) under new anchor '{anchorName}'");
+
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[anchor] FAILED to save {outPath}"); return 1; }
+        var chk = new NifFile(); chk.Load(outPath, new NifFileLoadOptions());
+        Report(chk, "RELOAD");
+        var a = chk.FindBlockByName<NiNode>(anchorName);
+        int underAnchor = a?.Children.References.Count(r => chk.GetBlock<NiNode>(r) != null) ?? 0;
+        Console.WriteLine($"[anchor] VERDICT anchor='{anchorName}' present={a != null} bonesUnderAnchor={underAnchor}");
+        Console.WriteLine("[anchor] NOTE FMD path also needs a tiny skinned geometry on root (C §9-10 (b));");
+        Console.WriteLine("[anchor]      not added here — anchor re-route only. See test doc.");
+        return (a != null && underAnchor > 0) ? 0 : 2;
+    }
+
     static int Main(string[] args)
     {
         if (args.Length == 0)
         {
-            Console.WriteLine("usage: nifcarrier dump <nif>");
-            Console.WriteLine("       nifcarrier carrier <in.nif> <out.nif>");
+            Console.WriteLine("usage: nifcarrier dump       <nif>");
+            Console.WriteLine("       nifcarrier carrier    <in.nif> <out.nif>");
             Console.WriteLine("       nifcarrier verifytree <src> <carrier>");
+            Console.WriteLine("       nifcarrier merge      <out.nif> <base.nif> <add.nif> [add2.nif ...]");
+            Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
             return 1;
         }
         try
@@ -166,6 +276,8 @@ class Program
                 case "dump": return Dump(args[1]);
                 case "carrier": return MakeCarrier(args[1], args[2]);
                 case "verifytree": return VerifyTree(args[1], args[2]);
+                case "merge": return Merge(args[1], args.Skip(2).ToArray());
+                case "anchor": return Anchor(args[1], args[2], args[3]);
                 default: Console.WriteLine($"unknown command '{args[0]}'"); return 1;
             }
         }

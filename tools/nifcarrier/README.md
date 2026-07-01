@@ -31,6 +31,8 @@ dotnet run -c Release -- <command> <args>
 | `dump <nif>` | List block-type tally, named `NiNode`s (bones), and HDT extra data. |
 | `carrier <in.nif> <out.nif>` | **Level-2 invisible carrier**: strip every geometry shape (`BSTriShape`/`BSDynamicTriShape`/…) and sweep now-unreferenced skin/shader/texture/geomdata blocks, keeping only the bone `NiNode` hierarchy + root `HDT ...` extra data. Reloads and self-verifies. |
 | `verifytree <src> <carrier>` | Assert the bone parent hierarchy is byte-for-byte identical between source and carrier. |
+| `merge <out.nif> <base.nif> <add.nif> [add2 …]` | **Level-3 merge carrier** (1 token = many contents): union the bone branches of every `add` NIF into `base` (same algorithm as FSMP's `doSkeletonMerge` — shared bones reused, unique bones cloned). Root extra data inherited from `base`. Reloads and self-verifies. |
+| `anchor <in.nif> <out.nif> <anchorBoneName>` | **C body-anchor re-route**: nest all root-level bone branches under a new node (e.g. `NPC Pelvis [Pelv]`) so the physics chain grows from that body bone instead of the head, when driven via the facegen head path (C §9-10). |
 
 ## What a level-2 carrier is for
 
@@ -50,6 +52,8 @@ BEFORE : blocks=146 shapes=4  bones=120 hdtExtra=True
 AFTER  : blocks=121 shapes=0  bones=120 hdtExtra=True   (13 KB)
 RELOAD : shapes=0 hdtExtra=True bones=120
 verifytree: IDENTICAL HIERARCHY (missing=0 parentMismatch=0)
+merge  (VeilA carrier + Bunny_tail carrier): 120 -> 124 bones (+4 unique, shared reused), shapes=0
+anchor (VeilA carrier, "NPC Pelvis [Pelv]"): anchor node created, branch re-parented, reload preserves name+hierarchy
 ```
 
 XML path (`meshes\Caenarvon\Cosplay\XML\CPBVeil.xml`) and NIF header
@@ -59,14 +63,21 @@ XML path (`meshes\Caenarvon\Cosplay\XML\CPBVeil.xml`) and NIF header
 > live engine / FSMP is confirmable only on real hardware (B §9-4). Header, extra
 > data, bone count and hierarchy all match the source, so confidence is high.
 
-## Roadmap (built on this base)
+## Status / remaining work
 
-- **Level-3 merge carrier** (1 token = many contents): union the bone branches of a
-  box's contents into one NIF + one concatenated XML (B §4-2 / §10-2). `AddBlock` /
-  `CloneNamedNode` cover the branch grafting.
-- **C body-anchor re-route**: nest a content's physics bone chain under a
-  `NPC Pelvis` anchor node so the chain grows from the pelvis, not the head
-  (C §9-10) — a hierarchy-rewrite on top of the same load/save path.
+- ✅ **Level-2 invisible carrier** — `carrier` command (verified above).
+- ✅ **Level-3 merge carrier** — `merge` unions bone branches (verified above).
+  Remaining: the **physics XML union is NOT done by this tool** — `merge` inherits the
+  base NIF's root extra data, so you must supply one XML that unions every content's
+  bones/constraints (B §4-2: for uniquely-named bones this is effectively concatenation).
+- ✅ **Body-anchor re-route** — `anchor` command (verified above). Two caveats:
+  - Run it on a **pure physics-bone carrier** (custom bones only). On a carrier that
+    still holds the full standard skeleton tree (`NPC`, `NPC COM`, …) it nests that whole
+    tree under the anchor — not intended. Reduce to custom bones first.
+  - The FMD facegen path (C §9-10 (b)) also needs a **tiny skinned geometry** on the root
+    so `processGeometry` doesn't skip it; `anchor` does not add that yet.
+- ⏳ **In-game load** — the single unverified point for all of the above (see
+  [TESTING.md](TESTING.md)).
 
 ## License
 
