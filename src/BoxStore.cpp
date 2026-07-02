@@ -12,19 +12,23 @@
 #include "RE/I/InventoryEntryData.h"
 #include "RE/M/MagicSystem.h"
 #include "RE/P/PlayerCharacter.h"
+#include "RE/S/Sexes.h"
 #include "RE/S/SpellItem.h"
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESFile.h"
 #include "RE/T/TESForm.h"
 #include "RE/T/TESFullName.h"
+#include "RE/T/TESObjectARMA.h"
 #include "RE/T/TESObjectARMO.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <iterator>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -85,6 +89,8 @@ namespace CostumeFW
             return -1;
         }
 
+        void WriteCarrierManifest();  // fwd (defined below)
+
         void WriteJson()
         {
             nlohmann::json doc;
@@ -137,6 +143,7 @@ namespace CostumeFW
             }
             f << doc.dump(2);
             SKSE::log::info("settings: wrote {} box def(s) (enabled={})", g_boxes.size(), g_cefEnabled);
+            WriteCarrierManifest();
         }
 
         // Plugin that ships the box-token pool (Costume Box 1..N ARMOs).
@@ -172,6 +179,85 @@ namespace CostumeFW
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
+
+        // --- FSMP carrier manifest (approach B) --------------------------------
+        // Inputs for tools/nifcarrier `sync`: per box, the resolved worn-NIF path
+        // of every content. sync rebuilds Box<slot>_carrier.nif (+ merged physics
+        // XML when 2+ contents carry SMP) from this; the per-token ARMA points at
+        // that carrier, so equipping the token makes FSMP grow the physics bones
+        // CEF's rebind then binds the injected meshes to. Written on every box-def
+        // persist, skipped when nothing changed (keeps sync's hash-skip effective).
+        constexpr const char* kManifestPath = "Data\\SKSE\\Plugins\\CEF_carrier_manifest.json";
+
+        void WriteCarrierManifest()
+        {
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) {
+                return;
+            }
+            nlohmann::json doc;
+            doc["version"] = 1;
+            auto arr = nlohmann::json::array();
+            for (const auto& b : g_boxes) {
+                nlohmann::json jb;
+                jb["slot"] = SlotNumberOf(ResolveArmo(b.token));
+                jb["token"] = b.token;
+                auto contents = nlohmann::json::array();
+                for (const auto& id : b.contents) {
+                    const auto colon = id.find(':');
+                    if (colon == std::string::npos) {
+                        continue;
+                    }
+                    const auto lid = static_cast<std::uint32_t>(
+                        std::strtoul(id.substr(0, colon).c_str(), nullptr, 16));
+                    const std::string plugin = id.substr(colon + 1);
+                    auto* arma = dh->LookupForm<RE::TESObjectARMA>(lid, plugin);
+                    if (!arma) {
+                        if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin);
+                            armo && !armo->armorAddons.empty()) {
+                            arma = armo->armorAddons.front();
+                        }
+                    }
+                    if (!arma) {
+                        continue;
+                    }
+                    // Female 3P model first (CEF's dominant authoring case), male fallback
+                    // - mirrors ResolveArmaModels' sex fallback.
+                    const char* nif = arma->bipedModels[RE::SEXES::kFemale].model.c_str();
+                    if (!nif || !*nif) {
+                        nif = arma->bipedModels[RE::SEXES::kMale].model.c_str();
+                    }
+                    if (!nif || !*nif) {
+                        continue;
+                    }
+                    contents.push_back({ { "id", id }, { "nif", nif } });
+                }
+                jb["contents"] = std::move(contents);
+                arr.push_back(std::move(jb));
+            }
+            doc["boxes"] = std::move(arr);
+
+            const std::string out = doc.dump(1);
+            {
+                std::ifstream prev(kManifestPath);
+                if (prev) {
+                    const std::string cur((std::istreambuf_iterator<char>(prev)),
+                        std::istreambuf_iterator<char>());
+                    if (cur == out) {
+                        return;
+                    }
+                }
+            }
+            std::ofstream f(kManifestPath, std::ios::trunc);
+            if (!f) {
+                SKSE::log::error("carrier manifest: cannot write {}", kManifestPath);
+                return;
+            }
+            f << out;
+            SKSE::log::info(
+                "carrier manifest updated ({} box(es)) - run 'nifcarrier sync' then restart to rebuild FSMP carriers",
+                g_boxes.size());
+        }
     }
 
     void LoadBoxes()

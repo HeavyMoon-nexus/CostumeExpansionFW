@@ -554,6 +554,147 @@ class Program
         return back == xmlPath ? 0 : 2;
     }
 
+    // ---------------------------------------------------------------------------
+    // sync — production driver (approach B, merged carriers). Reads the manifest
+    // CEF writes alongside its settings and (re)builds, per box:
+    //   0 SMP contents  -> copy of the empty token NIF (keeps per-token ARMAs valid)
+    //   1 SMP content   -> zeroalpha carrier, content's own physics XML untouched
+    //   2+ SMP contents -> zeroalpha(base w/ per-shape collision) + merge bone
+    //                      branches + mergexml + setxml -> Box<slot>_physics.xml
+    // A content is "SMP" iff its resolved NIF carries the HDT extra data. Boxes
+    // whose inputs are unchanged (hash file) are skipped.
+    //
+    // Manifest (written by CEF, Data\SKSE\Plugins\CEF_carrier_manifest.json):
+    // { "version":1, "boxes":[ { "slot":44, "token":"000801:CostumeFW_Boxes.esp",
+    //     "contents":[ { "id":"000C5B:....esp", "nif":"Caenarvon\\...\\X.nif" } ] } ] }
+    // "nif" is the ARMA model path (meshes-relative), resolved against --data roots.
+    static string ResolveAgainstRoots(string rel, List<string> roots, bool meshesRel)
+    {
+        foreach (var r in roots)
+        {
+            var p1 = System.IO.Path.Combine(r, meshesRel ? "meshes" : "", rel.Replace('/', '\\'));
+            if (System.IO.File.Exists(p1)) return p1;
+            var p2 = System.IO.Path.Combine(r, rel.Replace('/', '\\'));
+            if (System.IO.File.Exists(p2)) return p2;
+        }
+        return null;
+    }
+
+    static string GetHdtXmlPath(string nifPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(nifPath, new NifFileLoadOptions()) != 0 || !nif.Valid) return null;
+        return nif.Blocks.OfType<NiStringExtraData>()
+            .FirstOrDefault(b => b.Name?.String == HDT_EXTRA)?.StringData?.String;
+    }
+
+    static int Sync(string[] args)
+    {
+        string manifestPath = null, outRoot = null, emptyNif = null;
+        var dataRoots = new List<string>();
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--data": dataRoots.Add(args[++i]); break;
+                case "--out": outRoot = args[++i]; break;
+                case "--empty": emptyNif = args[++i]; break;
+                default: manifestPath ??= args[i]; break;
+            }
+        }
+        if (manifestPath == null || outRoot == null || dataRoots.Count == 0)
+        { Console.WriteLine("[sync] usage: sync <manifest.json> --data <root> [--data <root>...] --out <cefModRoot> [--empty <emptyToken.nif>]"); return 1; }
+
+        var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(manifestPath));
+        string carrierDir = System.IO.Path.Combine(outRoot, "meshes", "CostumeFW");
+        string xmlDir = System.IO.Path.Combine(carrierDir, "XML");
+        string tmpDir = System.IO.Path.Combine(outRoot, ".cef_tmp");
+        System.IO.Directory.CreateDirectory(carrierDir);
+        System.IO.Directory.CreateDirectory(xmlDir);
+        System.IO.Directory.CreateDirectory(tmpDir);
+
+        int built = 0, skipped = 0, failed = 0;
+        foreach (var box in doc.RootElement.GetProperty("boxes").EnumerateArray())
+        {
+            int slot = box.GetProperty("slot").GetInt32();
+            string carrierPath = System.IO.Path.Combine(carrierDir, $"Box{slot}_carrier.nif");
+            string mergedXmlDisk = System.IO.Path.Combine(xmlDir, $"Box{slot}_physics.xml");
+            string mergedXmlRel = $"meshes\\CostumeFW\\XML\\Box{slot}_physics.xml";
+            string hashPath = System.IO.Path.Combine(carrierDir, $"Box{slot}_carrier.hash");
+
+            // Collect SMP contents: (resolved nif, resolved xml)
+            var smp = new List<(string nif, string xmlDisk, string xmlRel)>();
+            bool resolveError = false;
+            foreach (var c in box.GetProperty("contents").EnumerateArray())
+            {
+                string rel = c.GetProperty("nif").GetString();
+                string nifDisk = ResolveAgainstRoots(rel, dataRoots, meshesRel: true);
+                if (nifDisk == null)
+                { Console.WriteLine($"[sync] box{slot}: cannot resolve '{rel}' under data roots"); resolveError = true; continue; }
+                string xmlRel = GetHdtXmlPath(nifDisk);
+                if (xmlRel == null) continue; // not an SMP content
+                string xmlDisk2 = ResolveAgainstRoots(xmlRel, dataRoots, meshesRel: false);
+                if (xmlDisk2 == null)
+                { Console.WriteLine($"[sync] box{slot}: physics xml '{xmlRel}' not found under data roots"); resolveError = true; continue; }
+                smp.Add((nifDisk, xmlDisk2, xmlRel));
+            }
+            if (resolveError) { failed++; continue; }
+
+            // Hash inputs; skip when unchanged
+            var h = new System.Text.StringBuilder("v1|");
+            foreach (var s in smp.OrderBy(x => x.nif))
+            {
+                var fi = new System.IO.FileInfo(s.nif);
+                var xi = new System.IO.FileInfo(s.xmlDisk);
+                h.Append($"{s.nif}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}|{s.xmlDisk}|{xi.Length}|{xi.LastWriteTimeUtc.Ticks}|");
+            }
+            string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(h.ToString())));
+            if (System.IO.File.Exists(hashPath) && System.IO.File.Exists(carrierPath)
+                && System.IO.File.ReadAllText(hashPath) == hash)
+            { skipped++; continue; }
+
+            Console.WriteLine($"[sync] box{slot}: {smp.Count} SMP content(s)");
+            int rc;
+            if (smp.Count == 0)
+            {
+                if (emptyNif == null || !System.IO.File.Exists(emptyNif))
+                { Console.WriteLine($"[sync] box{slot}: no SMP contents and no --empty template — skipped"); failed++; continue; }
+                System.IO.File.Copy(emptyNif, carrierPath, overwrite: true);
+                rc = 0;
+            }
+            else if (smp.Count == 1)
+            {
+                rc = ZeroAlpha(smp[0].nif, carrierPath);
+            }
+            else
+            {
+                // base = the content whose XML declares collision shapes (warn on >1)
+                bool HasPerShape((string nif, string xmlDisk, string xmlRel) s) =>
+                    System.IO.File.ReadAllText(s.xmlDisk).Contains("per-vertex-shape")
+                    || System.IO.File.ReadAllText(s.xmlDisk).Contains("per-triangle-shape");
+                var withShapes = smp.Where(HasPerShape).ToList();
+                if (withShapes.Count > 1)
+                    Console.WriteLine($"[sync] box{slot}: WARNING {withShapes.Count} contents use per-*-shape collision; only the base's shapes survive (merge does not clone shapes yet)");
+                var baseC = withShapes.FirstOrDefault();
+                if (baseC.nif == null) baseC = smp[0];
+                var adds = smp.Where(s => s.nif != baseC.nif).ToList();
+
+                string t1 = System.IO.Path.Combine(tmpDir, $"box{slot}_za.nif");
+                string t2 = System.IO.Path.Combine(tmpDir, $"box{slot}_mg.nif");
+                rc = ZeroAlpha(baseC.nif, t1);
+                if (rc == 0) rc = Merge(t2, new[] { t1 }.Concat(adds.Select(a => a.nif)).ToArray());
+                if (rc == 0) rc = MergeXml(mergedXmlDisk, smp.Select(s => s.xmlDisk).ToArray());
+                if (rc == 0) rc = SetXml(t2, carrierPath, mergedXmlRel);
+            }
+            if (rc == 0) { System.IO.File.WriteAllText(hashPath, hash); built++; }
+            else { failed++; Console.WriteLine($"[sync] box{slot}: FAILED (rc={rc})"); }
+        }
+        try { System.IO.Directory.Delete(tmpDir, recursive: true); } catch { }
+        Console.WriteLine($"[sync] done: built={built} skipped(unchanged)={skipped} failed={failed}");
+        return failed == 0 ? 0 : 2;
+    }
+
     // T0 sanity: pure load -> save round-trip (no edits). Use the output in-game to
     // confirm the engine reads NiflySharp's writer at all, before trusting carriers.
     static int Passthrough(string inPath, string outPath)
@@ -583,6 +724,7 @@ class Program
             Console.WriteLine("       nifcarrier merge      <out.nif> <base.nif> <add.nif> [add2.nif ...]");
             Console.WriteLine("       nifcarrier mergexml   <out.xml> <in1.xml> <in2.xml> [...]   (unified SMP physics XML)");
             Console.WriteLine("       nifcarrier setxml     <in.nif> <out.nif> <xmlPath>   (re-point HDT extra data at an XML)");
+            Console.WriteLine("       nifcarrier sync       <manifest.json> --data <root> [--data ...] --out <cefModRoot> [--empty <token.nif>]");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
             Console.WriteLine("       nifcarrier passthrough <in.nif> <out.nif>   (T0 sanity: load->save round-trip)");
             return 1;
@@ -600,6 +742,7 @@ class Program
                 case "merge": return Merge(args[1], args.Skip(2).ToArray());
                 case "mergexml": return MergeXml(args[1], args.Skip(2).ToArray());
                 case "setxml": return SetXml(args[1], args[2], args[3]);
+                case "sync": return Sync(args.Skip(1).ToArray());
                 case "anchor": return Anchor(args[1], args[2], args[3]);
                 case "passthrough": return Passthrough(args[1], args[2]);
                 default: Console.WriteLine($"unknown command '{args[0]}'"); return 1;
