@@ -304,7 +304,33 @@ namespace CostumeFW
                 arma->bipedModels[RE::SEXES::kFemale].model = file.c_str();
                 SKSE::log::info("carrier override: slot {} token '{}' -> {}", key, b.token, file);
                 if (a_refreshChanged) {
-                    RefreshWornToken(b.token);  // re-equip -> engine loads the new path -> FSMP refires
+                    // Two-phase re-equip. An immediate unequip+equip (RefreshWornToken)
+                    // is coalesced by the engine - the 3D never rebuilds and the old
+                    // carrier stays (verified in-game 2026-07-03). Unequip now, equip
+                    // after a beat so the detach fully processes and the equip loads
+                    // the new (uncached) carrier path -> FSMP rebuilds -> the rebind
+                    // auto-retry binds the injected meshes.
+                    const std::uint32_t formId = ResolveFormId(b.token);
+                    auto* player = RE::PlayerCharacter::GetSingleton();
+                    auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+                    auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+                    if (player && obj && player->GetWornArmor(formId) != nullptr) {
+                        if (auto* eqm = RE::ActorEquipManager::GetSingleton()) {
+                            eqm->UnequipObject(player, obj);
+                            const std::string token = b.token;
+                            RunAfterDelayMs(500, [formId, token]() {
+                                auto* pl = RE::PlayerCharacter::GetSingleton();
+                                auto* f = RE::TESForm::LookupByID(formId);
+                                auto* o = f ? f->As<RE::TESBoundObject>() : nullptr;
+                                if (pl && o) {
+                                    if (auto* m = RE::ActorEquipManager::GetSingleton()) {
+                                        m->EquipObject(pl, o);
+                                        SKSE::log::info("carrier swap: re-equipped token '{}'", token);
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }

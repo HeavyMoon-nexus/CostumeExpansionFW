@@ -742,6 +742,12 @@ namespace CostumeFW
         return InjectInternal(a_id, m, m);
     }
 
+    void RunAfterDelayMs(int a_ms, std::function<void()> a_fn)
+    {
+        RunAfterDelay(std::chrono::steady_clock::now() + std::chrono::milliseconds(a_ms),
+            std::move(a_fn));
+    }
+
     void Reconcile()
     {
         if (g_active.empty()) {

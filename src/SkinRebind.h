@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,10 @@ namespace CostumeFW
     // Resolve a colon-form id "XXXXXX:Plugin.esp" to its full runtime FormID
     // (0 on failure). Shared by the box store (worn-token check / MCM equip).
     std::uint32_t ResolveFormId(const std::string& a_colonId);
+
+    // Run a_fn on the main thread after (at least) a_ms milliseconds, via the
+    // SKSE task queue (re-posts until the deadline; hop rate is NOT frame-locked).
+    void RunAfterDelayMs(int a_ms, std::function<void()> a_fn);
 
     // Snapshot of active items (id + tokenId), and a registry clear (co-save).
     std::vector<ActiveItemInfo> ActiveSnapshot();
