@@ -21,9 +21,10 @@
 - **トークン ARMA への割当（houseCARL）**: `CostumeFW_Boxes.esp` の対象トークン ARMA の
   `WorldModel[1].File` を carrier の相対パスへ差し替え。共有 ARMA `000800` を差し替えると
   全 15 トークンに乗る（PoC は 1 トークン装備で足りる）。本番は per-token ARMA を切る。
-- **タイミングの鉄則（B §9-9 実測）**: content 追加は **CEF 無効中**に行い、**トークン装備で
-  FSMP 改名ボーンが先に存在する状態**にしてから CEF 有効化 →`Reconcile`。注入が FSMP 改名より
-  先行すると static に落ちる競合を回避できる。
+- ~~タイミングの鉄則（B §9-9 実測）~~ → **不要になった（2026-07-02）**: CEF に rebind 自動リトライを
+  実装済み（3p rebind が static fallback に落ちた item を記録し、1秒後に detach→再注入。外部トリガ
+  ごとに最大2回）。注入と carrier attach の順序をユーザーが管理する必要はない。ログの並びは
+  `remapped →  rebind retry queued (+1000ms) → rebind retry: re-injecting → bound`。
 
 ---
 
