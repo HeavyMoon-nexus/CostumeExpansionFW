@@ -409,7 +409,13 @@ class Program
             // 1. shader alpha -> 0 (BSLightingShaderProperty keeps it in private _alpha)
             var shader = nif.GetShader(shape);
             if (shader == null)
-            { Console.WriteLine($"[zeroalpha] WARNING: shape '{NameOf(shape)}' has no shader, skipping"); continue; }
+            {
+                // No shader = the engine never renders it (collision-proxy shapes like
+                // 'VirtualHead'). Already invisible; nothing to do.
+                Console.WriteLine($"[zeroalpha] shape '{NameOf(shape)}': no shader (non-rendered collision proxy), left as-is");
+                done++;
+                continue;
+            }
             var alphaField = shader.GetType().GetField("_alpha", BindingFlags.NonPublic | BindingFlags.Instance);
             if (alphaField == null)
             { Console.WriteLine($"[zeroalpha] WARNING: shader {shader.GetType().Name} has no _alpha field, skipping"); continue; }
@@ -445,7 +451,8 @@ class Program
         foreach (var shape in chk.GetShapes())
         {
             var shader = chk.GetShader(shape);
-            var f = shader?.GetType().GetField("_alpha", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (shader == null) continue; // non-rendered collision proxy — invisible by construction
+            var f = shader.GetType().GetField("_alpha", BindingFlags.NonPublic | BindingFlags.Instance);
             if (f == null || (float)f.GetValue(shader) != 0f) allZero = false;
             var ap = shape.HasAlphaProperty ? chk.GetBlock<NiAlphaProperty>(shape.AlphaPropertyRef) : null;
             if (ap == null || ap.Flags.Value != ALPHA_BLEND_FLAGS) allBlend = false;
