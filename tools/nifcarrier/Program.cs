@@ -464,6 +464,96 @@ class Program
         return (allZero && allBlend && shp > 0 && skinned && hdt) ? 0 : 2;
     }
 
+    // Merge several HDT-SMP physics XMLs into one <system> document (T2 unified XML).
+    //
+    // FSMP parser semantics that shape this (hdtSkyrimSystem.cpp, verified on dev):
+    // - Anonymous <bone-default> overwrites the "" template used by every following
+    //   <bone> without a template= attribute — concatenation would leak doc1's last
+    //   default into doc2's bones.
+    // - getBoneTemplate(unknownName) falls back to the CURRENT "" template, so a
+    //   factory reset is expressed by snapshotting the pristine "" template at the top
+    //   (<bone-default name="cef_factory"/>) and re-storing it at each document
+    //   boundary (<bone-default extends="cef_factory"/>). Same for the three
+    //   constraint-default kinds.
+    // - Duplicate <bone name> entries are skipped by the parser ("already exists");
+    //   we drop them ourselves too so shared anchors (NPC Pelvis...) merge cleanly.
+    static readonly string[] DEFAULT_KINDS = {
+        "bone-default", "generic-constraint-default",
+        "stiffspring-constraint-default", "conetwist-constraint-default"
+    };
+
+    static int MergeXml(string outPath, string[] inputs)
+    {
+        if (inputs.Length < 2) { Console.WriteLine("[mergexml] need at least 2 input xml files"); return 1; }
+        var docs = inputs.Select(System.Xml.Linq.XDocument.Load).ToList();
+        foreach (var (d, i) in docs.Select((d, i) => (d, i)))
+            if (d.Root?.Name.LocalName != "system")
+            { Console.WriteLine($"[mergexml] FAILED: root of {inputs[i]} is not <system>"); return 1; }
+
+        var outRoot = new System.Xml.Linq.XElement(docs[0].Root.Name, docs[0].Root.Attributes());
+        foreach (var kind in DEFAULT_KINDS)
+            outRoot.Add(new System.Xml.Linq.XElement(kind, new System.Xml.Linq.XAttribute("name", "cef_factory")));
+
+        var seenBones = new HashSet<string>();
+        var seenShapes = new HashSet<string>();
+        int dupBones = 0;
+        for (int i = 0; i < docs.Count; i++)
+        {
+            if (i > 0)
+                foreach (var kind in DEFAULT_KINDS)
+                    outRoot.Add(new System.Xml.Linq.XElement(kind, new System.Xml.Linq.XAttribute("extends", "cef_factory")));
+            foreach (var el in docs[i].Root.Elements())
+            {
+                string tag = el.Name.LocalName;
+                string nm = el.Attribute("name")?.Value;
+                if (tag == "bone" && nm != null)
+                {
+                    if (!seenBones.Add(nm))
+                    {
+                        dupBones++;
+                        Console.WriteLine($"[mergexml] duplicate bone '{nm}' from {inputs[i]} skipped (first wins)");
+                        continue;
+                    }
+                }
+                if ((tag == "per-vertex-shape" || tag == "per-triangle-shape") && nm != null && !seenShapes.Add(nm))
+                    Console.WriteLine($"[mergexml] WARNING: duplicate collision shape '{nm}' from {inputs[i]} — NIF shape names must be unique across merged contents");
+                outRoot.Add(new System.Xml.Linq.XElement(el));
+            }
+            Console.WriteLine($"[mergexml] appended {inputs[i]}");
+        }
+
+        var outDoc = new System.Xml.Linq.XDocument(new System.Xml.Linq.XDeclaration("1.0", "UTF-8", null), outRoot);
+        outDoc.Save(outPath);
+        Console.WriteLine($"[mergexml] wrote {outPath}  (bones={seenBones.Count} dupSkipped={dupBones} shapes={seenShapes.Count})");
+        return 0;
+    }
+
+    // Re-point the carrier's root NiStringExtraData "HDT Skinned Mesh Physics Object"
+    // at a different physics XML (e.g. the merged one from mergexml).
+    static int SetXml(string inPath, string outPath, string xmlPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[setxml] FAILED to load {inPath}"); return 1; }
+
+        var extra = nif.Blocks.OfType<NiStringExtraData>()
+            .FirstOrDefault(b => b.Name?.String == HDT_EXTRA);
+        if (extra == null)
+        { Console.WriteLine($"[setxml] FAILED: no '{HDT_EXTRA}' NiStringExtraData in {inPath}"); return 1; }
+        string old = extra.StringData?.String;
+        extra.StringData = new NiStringRef(xmlPath);
+        Console.WriteLine($"[setxml] '{old}' -> '{xmlPath}'");
+
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[setxml] FAILED to save {outPath}"); return 1; }
+
+        var chk = new NifFile();
+        chk.Load(outPath, new NifFileLoadOptions());
+        var back = chk.Blocks.OfType<NiStringExtraData>().FirstOrDefault(b => b.Name?.String == HDT_EXTRA)?.StringData?.String;
+        Console.WriteLine($"[setxml] VERDICT readback='{back}' (want '{xmlPath}')");
+        return back == xmlPath ? 0 : 2;
+    }
+
     // T0 sanity: pure load -> save round-trip (no edits). Use the output in-game to
     // confirm the engine reads NiflySharp's writer at all, before trusting carriers.
     static int Passthrough(string inPath, string outPath)
@@ -491,6 +581,8 @@ class Program
             Console.WriteLine("       nifcarrier zeroalpha  <in.nif> <out.nif>   (shader alpha=0 + NiAlphaProperty blend -> invisible; 1st choice)");
             Console.WriteLine("       nifcarrier verifytree <src> <carrier>");
             Console.WriteLine("       nifcarrier merge      <out.nif> <base.nif> <add.nif> [add2.nif ...]");
+            Console.WriteLine("       nifcarrier mergexml   <out.xml> <in1.xml> <in2.xml> [...]   (unified SMP physics XML)");
+            Console.WriteLine("       nifcarrier setxml     <in.nif> <out.nif> <xmlPath>   (re-point HDT extra data at an XML)");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
             Console.WriteLine("       nifcarrier passthrough <in.nif> <out.nif>   (T0 sanity: load->save round-trip)");
             return 1;
@@ -506,6 +598,8 @@ class Program
                 case "zeroalpha": return ZeroAlpha(args[1], args[2]);
                 case "verifytree": return VerifyTree(args[1], args[2]);
                 case "merge": return Merge(args[1], args.Skip(2).ToArray());
+                case "mergexml": return MergeXml(args[1], args.Skip(2).ToArray());
+                case "setxml": return SetXml(args[1], args[2], args[3]);
                 case "anchor": return Anchor(args[1], args[2], args[3]);
                 case "passthrough": return Passthrough(args[1], args[2]);
                 default: Console.WriteLine($"unknown command '{args[0]}'"); return 1;
