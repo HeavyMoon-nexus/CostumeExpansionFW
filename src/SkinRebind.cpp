@@ -239,6 +239,59 @@ namespace CostumeFW
             return nullptr;
         }
 
+        // --- rebind retry (FSMP carrier attach race) ---------------------------
+        // An injection that runs in the same beat as a token (re)equip can rebind
+        // BEFORE the engine attaches the carrier and FSMP grows its renamed bones
+        // (heavier carriers widen the window; observed in-game 2026-07-02: a CEF
+        // re-enable raced the 1.9MB box44 carrier and every custom bone fell to
+        // the static ancestor remap). When a 3rd-person rebind leaves unresolved
+        // bones on the static fallback, Reconcile again a few frames later - by
+        // then the FSMP bones exist and the same suffix-match rebind promotes
+        // those meshes to real SMP sway. Budgeted per external trigger so contents
+        // whose custom bones genuinely have no carrier (persist items) can only
+        // cost kRebindRetryBudget extra passes, never a loop.
+        constexpr int kRebindRetryBudget = 2;
+        constexpr int kRebindRetryDelayFrames = 45;  // ~0.75s @60fps per attempt
+
+        std::atomic<int> g_rebindRetryBudget{ 0 };
+        std::atomic<bool> g_rebindRetryQueued{ false };
+        bool g_inRebindRetry = false;  // main-thread only (tasks + Reconcile)
+
+        void RunAfterFrames(int a_frames, std::function<void()> a_fn)
+        {
+            auto* tasks = SKSE::GetTaskInterface();
+            if (!tasks) {
+                return;
+            }
+            tasks->AddTask([a_frames, fn = std::move(a_fn)]() mutable {
+                if (a_frames <= 0) {
+                    fn();
+                } else {
+                    RunAfterFrames(a_frames - 1, std::move(fn));
+                }
+            });
+        }
+
+        void RequestRebindRetry()
+        {
+            if (g_rebindRetryQueued.load()) {
+                return;
+            }
+            if (g_rebindRetryBudget.fetch_sub(1) <= 0) {
+                g_rebindRetryBudget.fetch_add(1);  // keep at 0
+                return;
+            }
+            g_rebindRetryQueued = true;
+            SKSE::log::info("  rebind retry queued (+{} frames): FSMP carrier may still be attaching",
+                kRebindRetryDelayFrames);
+            RunAfterFrames(kRebindRetryDelayFrames, []() {
+                g_rebindRetryQueued = false;
+                g_inRebindRetry = true;
+                Reconcile();
+                g_inRebindRetry = false;
+            });
+        }
+
         // Resolve every bone of one geometry's skin against the live skeleton.
         // Two-pass gate: resolve ALL first; only commit if every bone resolved
         // (avoids the "missing skeleton root node" fatal / partial rebind).
@@ -321,6 +374,13 @@ namespace CostumeFW
             if (remapCount) {
                 SKSE::log::warn("  remapped {} unresolved bone(s) to nearest ancestor "
                                 "(static, no SMP sway; e.g. {})", remapCount, firstRemap);
+                // Only a 3rd-person static fallback can mean "carrier still
+                // attaching" - FSMP never builds physics on the 1st-person
+                // skeleton, so a 1p remap is permanent and no reason to retry.
+                auto* pc = RE::PlayerCharacter::GetSingleton();
+                if (pc && a_root != pc->Get3D(true)) {
+                    RequestRebindRetry();
+                }
             }
 
             const bool haveWorldXf = (a_skin->boneWorldTransforms != nullptr);
@@ -666,6 +726,12 @@ namespace CostumeFW
     {
         if (g_active.empty()) {
             return;
+        }
+        // Every externally-triggered pass re-arms the rebind-retry budget; the
+        // retry passes themselves must not, or persistently-static contents
+        // (custom bones with no carrier) would retry forever.
+        if (!g_inRebindRetry) {
+            g_rebindRetryBudget = kRebindRetryBudget;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
         const bool cefOn = CefEnabled();  // master off (Main page) -> hide everything
