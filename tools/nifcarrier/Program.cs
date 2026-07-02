@@ -634,6 +634,30 @@ class Program
         System.IO.Directory.CreateDirectory(xmlDir);
         System.IO.Directory.CreateDirectory(tmpDir);
 
+        // --- revision slots (restart-free carrier swaps) -----------------------
+        // MO2's usvfs does NOT see files an external process creates after game
+        // launch, but DOES see external rewrites of pre-existing files (verified
+        // in-game 2026-07-03). So each box gets a pre-created pool of slot files;
+        // a rebuild bumps the box's revision and rewrites slot r(rev % N). CEF
+        // reads carriers.json and repoints the token ARMA at the new slot path -
+        // a path the engine hasn't cached this session - then re-equips.
+        const int kSlots = 8;
+        string carriersJsonPath = System.IO.Path.Combine(carrierDir, "carriers.json");
+        var carriers = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, object>>();
+        if (System.IO.File.Exists(carriersJsonPath))
+        {
+            try
+            {
+                foreach (var p in System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(carriersJsonPath)).RootElement.EnumerateObject())
+                    carriers[p.Name] = new System.Collections.Generic.Dictionary<string, object> {
+                        ["rev"] = p.Value.GetProperty("rev").GetInt32(),
+                        ["file"] = p.Value.GetProperty("file").GetString()
+                    };
+            }
+            catch { Console.WriteLine("[sync] WARNING: carriers.json unreadable, starting fresh"); }
+        }
+        int poolCreated = 0;
+
         int built = 0, skipped = 0, failed = 0;
         foreach (var box in doc.RootElement.GetProperty("boxes").EnumerateArray())
         {
@@ -671,9 +695,28 @@ class Program
             }
             string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(h.ToString())));
+            // Slot-pool ensure runs on BOTH paths (skip included): placeholders must
+            // exist before the next launch for restart-free swaps to be possible.
+            void EnsurePool()
+            {
+                for (int i = 0; i < kSlots; i++)
+                {
+                    string sn = System.IO.Path.Combine(carrierDir, $"Box{slot}_carrier_r{i}.nif");
+                    string sx = System.IO.Path.Combine(xmlDir, $"Box{slot}_physics_r{i}.xml");
+                    string seed = System.IO.File.Exists(carrierPath) ? carrierPath : emptyNif;
+                    if (!System.IO.File.Exists(sn) && seed != null)
+                    { System.IO.File.Copy(seed, sn); poolCreated++; }
+                    if (!System.IO.File.Exists(sx))
+                    { System.IO.File.WriteAllText(sx, "<?xml version=\"1.0\"?>\n<system></system>\n"); poolCreated++; }
+                }
+                if (!carriers.ContainsKey(slot.ToString()))
+                    carriers[slot.ToString()] = new System.Collections.Generic.Dictionary<string, object>
+                    { ["rev"] = 0, ["file"] = $"CostumeFW/Box{slot}_carrier.nif" };
+            }
+
             if (System.IO.File.Exists(hashPath) && System.IO.File.Exists(carrierPath)
                 && System.IO.File.ReadAllText(hashPath) == hash)
-            { skipped++; continue; }
+            { EnsurePool(); skipped++; continue; }
 
             Console.WriteLine($"[sync] box{slot}: {smp.Count} SMP content(s)");
             int rc;
@@ -701,9 +744,49 @@ class Program
                 if (rc == 0) rc = SetXml(t2, carrierPath, mergedXmlRel);
             }
             if (rc == 0) { System.IO.File.WriteAllText(hashPath, hash); built++; }
-            else { failed++; Console.WriteLine($"[sync] box{slot}: FAILED (rc={rc})"); }
+            else { failed++; Console.WriteLine($"[sync] box{slot}: FAILED (rc={rc})"); continue; }
+
+            EnsurePool();
+
+            // Bump revision and rewrite this box's active slot with the new build.
+            int rev = carriers.TryGetValue(slot.ToString(), out var prev) ? (int)prev["rev"] + 1 : 1;
+            int slotIdx = rev % kSlots;
+            string slotNifDisk = System.IO.Path.Combine(carrierDir, $"Box{slot}_carrier_r{slotIdx}.nif");
+            string slotNifRel = $"CostumeFW/Box{slot}_carrier_r{slotIdx}.nif";
+            if (smp.Count >= 2)
+            {
+                // Slot carrier must reference the slot XML (the merged XML content
+                // changed too, and FSMP may cache XML by path).
+                string slotXmlDisk = System.IO.Path.Combine(xmlDir, $"Box{slot}_physics_r{slotIdx}.xml");
+                string slotXmlRel = $"meshes\\CostumeFW\\XML\\Box{slot}_physics_r{slotIdx}.xml";
+                System.IO.File.Copy(mergedXmlDisk, slotXmlDisk, overwrite: true);
+                if (SetXml(carrierPath, slotNifDisk, slotXmlRel) != 0)
+                { Console.WriteLine($"[sync] box{slot}: WARNING slot carrier setxml failed"); }
+            }
+            else
+            {
+                System.IO.File.Copy(carrierPath, slotNifDisk, overwrite: true);
+            }
+            carriers[slot.ToString()] = new System.Collections.Generic.Dictionary<string, object>
+            { ["rev"] = rev, ["file"] = slotNifRel };
+            Console.WriteLine($"[sync] box{slot}: rev={rev} -> {slotNifRel}");
         }
+
+        // carriers.json: always rewrite (pre-existing file = externally-visible swap signal)
+        var jsonOut = new System.Text.StringBuilder("{\n");
+        bool first = true;
+        foreach (var kv in carriers.OrderBy(k => k.Key))
+        {
+            if (!first) jsonOut.Append(",\n");
+            first = false;
+            jsonOut.Append($" \"{kv.Key}\": {{ \"rev\": {kv.Value["rev"]}, \"file\": \"{kv.Value["file"]}\" }}");
+        }
+        jsonOut.Append("\n}\n");
+        System.IO.File.WriteAllText(carriersJsonPath, jsonOut.ToString());
+
         try { System.IO.Directory.Delete(tmpDir, recursive: true); } catch { }
+        if (poolCreated > 0)
+            Console.WriteLine($"[sync] NOTE: created {poolCreated} slot placeholder file(s) - a running game cannot see NEW files; they register on the next launch");
         Console.WriteLine($"[sync] done: built={built} skipped(unchanged)={skipped} failed={failed}");
         return failed == 0 ? 0 : 2;
     }

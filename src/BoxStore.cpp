@@ -255,8 +255,58 @@ namespace CostumeFW
             }
             f << out;
             SKSE::log::info(
-                "carrier manifest updated ({} box(es)) - run 'nifcarrier sync' then restart to rebuild FSMP carriers",
+                "carrier manifest updated ({} box(es)) - run 'nifcarrier sync' then `cef carriers` to rebuild FSMP carriers",
                 g_boxes.size());
+        }
+
+        // --- carrier revision overrides (restart-free swaps) --------------------
+        // tools/nifcarrier `sync` rewrites a PRE-CREATED revision slot file and
+        // records it in carriers.json. usvfs shows external REWRITES of existing
+        // files but never externally-created NEW files (verified in-game
+        // 2026-07-03), which is exactly why the slots are pre-created. Repointing
+        // the token ARMA at the new slot path makes the next equip load a path the
+        // engine has not cached this session = the freshly built carrier. This is
+        // a volatile in-memory form edit - reapplied on every settings load.
+        constexpr const char* kCarriersJsonPath = "Data\\meshes\\CostumeFW\\carriers.json";
+
+        void ApplyCarrierOverridesImpl(bool a_refreshChanged)
+        {
+            std::ifstream f(kCarriersJsonPath);
+            if (!f) {
+                return;  // no carriers.json = nothing to override (ESP defaults apply)
+            }
+            nlohmann::json doc;
+            try {
+                f >> doc;
+            } catch (const std::exception& e) {
+                SKSE::log::warn("carriers.json parse failed: {}", e.what());
+                return;
+            }
+            for (const auto& b : g_boxes) {
+                auto* armo = ResolveArmo(b.token);
+                if (!armo || armo->armorAddons.empty()) {
+                    continue;
+                }
+                const auto key = std::to_string(SlotNumberOf(armo));
+                if (!doc.contains(key)) {
+                    continue;
+                }
+                const std::string file = doc[key].value("file", "");
+                if (file.empty()) {
+                    continue;
+                }
+                auto* arma = armo->armorAddons.front();
+                const char* cur = arma->bipedModels[RE::SEXES::kFemale].model.c_str();
+                if (cur && file == cur) {
+                    continue;  // already on this revision
+                }
+                arma->bipedModels[RE::SEXES::kMale].model = file.c_str();
+                arma->bipedModels[RE::SEXES::kFemale].model = file.c_str();
+                SKSE::log::info("carrier override: slot {} token '{}' -> {}", key, b.token, file);
+                if (a_refreshChanged) {
+                    RefreshWornToken(b.token);  // re-equip -> engine loads the new path -> FSMP refires
+                }
+            }
         }
     }
 
@@ -376,6 +426,14 @@ namespace CostumeFW
         }
         SKSE::log::info("settings: loaded {} box(es) ({} content), {} persist, enabled={}",
             g_boxes.size(), contentCount, g_persist.size(), g_cefEnabled);
+        // Point each token ARMA at its current carrier revision (carriers.json).
+        // No refresh here: tokens haven't equipped yet at load time.
+        ApplyCarrierOverridesImpl(false);
+    }
+
+    void ApplyCarrierOverrides(bool a_refreshChanged)
+    {
+        ApplyCarrierOverridesImpl(a_refreshChanged);
     }
 
     bool CefEnabled()

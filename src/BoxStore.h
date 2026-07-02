@@ -105,6 +105,14 @@ namespace CostumeFW
     // trigger. No-op if not worn. Main thread (touches the actor).
     void RefreshWornToken(const std::string& a_token);
 
+    // Repoint each box token's ARMA at its current carrier revision from
+    // carriers.json (restart-free FSMP carrier swaps; the revision slots are
+    // pre-created files that tools/nifcarrier `sync` rewrites in place).
+    // Volatile in-memory form edit, reapplied on every settings load. With
+    // a_refreshChanged, re-equips worn tokens whose revision changed so the
+    // engine loads the new (uncached) path and FSMP rebuilds. Main thread.
+    void ApplyCarrierOverrides(bool a_refreshChanged);
+
     // Re-register every box's contents into the active registry after a co-save
     // revert wiped it (the box store's own list survives revert). Does not touch
     // the json. Call on kPostLoadGame before Reconcile. Main thread.

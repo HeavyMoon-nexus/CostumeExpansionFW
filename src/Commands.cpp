@@ -1,4 +1,5 @@
 #include "Commands.h"
+#include "BoxStore.h"
 #include "SkinRebind.h"
 
 #include "RE/S/Script.h"
@@ -135,6 +136,12 @@ namespace CostumeFW
             }
             SKSE::GetTaskInterface()->AddTask([rest] { DetachSkinned(rest); });
             Print("[CEF] detaching");
+        } else if (sub == "carriers") {
+            // Re-read carriers.json (rewritten by nifcarrier sync while the game
+            // runs) and re-equip tokens whose carrier revision changed - the
+            // restart-free FSMP carrier swap.
+            SKSE::GetTaskInterface()->AddTask([] { ApplyCarrierOverrides(true); });
+            Print("[CEF] reloading carrier revisions (see log)");
         } else if (sub == "testnif") {
             // Inject the NIF path written in Data\SKSE\Plugins\CostumeExpansionFW_test.txt
             // (id "test"; remove with `cef detach test`). Reads the txt fresh each call —
