@@ -205,8 +205,29 @@ class Program
                 if (childNode != null) MergeBranch(dst, childNode, dstRoot, src);
             }
             int after = dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
-            Console.WriteLine($"[merge] {inputs[i]}: +{after - before} new bone(s) (shared bones reused)");
+
+            // Clone the add-NIF's shapes too: SMP XMLs reference collision meshes BY
+            // SHAPE NAME (per-vertex/-triangle-shape), so the carrier must physically
+            // contain every content's shapes. NiflySharp's CloneShape copies geometry
+            // + shader + skin cross-file and re-wires the skin's bone refs to same-
+            // named nodes in dst (clearing then re-adding by name), so it composes
+            // with the bone merge above. Shape names must stay as-authored (the XML
+            // matches on them) — collisions across contents are warned, not renamed.
+            int cloned = 0;
+            foreach (var srcShape in src.GetShapes().ToList())
+            {
+                string nm = NameOf(srcShape) ?? "";
+                if (dst.GetShapes().Any(s => NameOf(s) == nm))
+                {
+                    Console.WriteLine($"[merge] WARNING: duplicate shape name '{nm}' from {inputs[i]} — FSMP resolves collision shapes by name; first one wins");
+                    continue;
+                }
+                dst.CloneShape(srcShape, nm, src);
+                cloned++;
+            }
+            Console.WriteLine($"[merge] {inputs[i]}: +{after - before} new bone(s), +{cloned} shape(s) (shared bones reused)");
         }
+        dst.RemoveUnreferencedBlocks(); // sweep orphan clones from CloneShape's bone-list rewire
 
         if (dst.Save(outPath, new NifFileSaveOptions()) != 0)
         { Console.WriteLine($"[merge] FAILED to save {outPath}"); return 1; }
@@ -669,21 +690,13 @@ class Program
             }
             else
             {
-                // base = the content whose XML declares collision shapes (warn on >1)
-                bool HasPerShape((string nif, string xmlDisk, string xmlRel) s) =>
-                    System.IO.File.ReadAllText(s.xmlDisk).Contains("per-vertex-shape")
-                    || System.IO.File.ReadAllText(s.xmlDisk).Contains("per-triangle-shape");
-                var withShapes = smp.Where(HasPerShape).ToList();
-                if (withShapes.Count > 1)
-                    Console.WriteLine($"[sync] box{slot}: WARNING {withShapes.Count} contents use per-*-shape collision; only the base's shapes survive (merge does not clone shapes yet)");
-                var baseC = withShapes.FirstOrDefault();
-                if (baseC.nif == null) baseC = smp[0];
-                var adds = smp.Where(s => s.nif != baseC.nif).ToList();
-
-                string t1 = System.IO.Path.Combine(tmpDir, $"box{slot}_za.nif");
-                string t2 = System.IO.Path.Combine(tmpDir, $"box{slot}_mg.nif");
-                rc = ZeroAlpha(baseC.nif, t1);
-                if (rc == 0) rc = Merge(t2, new[] { t1 }.Concat(adds.Select(a => a.nif)).ToArray());
+                // merge FIRST (bone union + every content's shapes cloned in), then
+                // zero-alpha the whole merged NIF so cloned shapes go invisible too,
+                // then point the extra data at the unified XML.
+                string t1 = System.IO.Path.Combine(tmpDir, $"box{slot}_mg.nif");
+                string t2 = System.IO.Path.Combine(tmpDir, $"box{slot}_za.nif");
+                rc = Merge(t1, smp.Select(s => s.nif).ToArray());
+                if (rc == 0) rc = ZeroAlpha(t1, t2);
                 if (rc == 0) rc = MergeXml(mergedXmlDisk, smp.Select(s => s.xmlDisk).ToArray());
                 if (rc == 0) rc = SetXml(t2, carrierPath, mergedXmlRel);
             }

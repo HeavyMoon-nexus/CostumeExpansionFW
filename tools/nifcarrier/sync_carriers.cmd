@@ -16,6 +16,7 @@ dotnet "%DLL%" sync "K:\Mo2_SkyrimSE1170\overwrite\SKSE\plugins\CEF_carrier_mani
   --data "K:\Mo2_SkyrimSE1170\mods\BODYSLIDE MESH BUILD" ^
   --data "K:\Mo2_SkyrimSE1170\mods\Cosplay Basics - (CBBE 3BA)" ^
   --data "K:\Mo2_SkyrimSE1170\mods\Cosplay Pack - hdt SMP (CBBE 3BA)" ^
+  --data "K:\Mo2_SkyrimSE1170\mods\[Melodic] Belua Hecate SE" ^
   --out "K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW" ^
   --empty "K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW\meshes\CostumeFW\boxtoken.nif"
 pause
