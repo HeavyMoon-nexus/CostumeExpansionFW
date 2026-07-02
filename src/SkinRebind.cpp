@@ -240,40 +240,48 @@ namespace CostumeFW
         }
 
         // --- rebind retry (FSMP carrier attach race) ---------------------------
-        // An injection that runs in the same beat as a token (re)equip can rebind
-        // BEFORE the engine attaches the carrier and FSMP grows its renamed bones
-        // (heavier carriers widen the window; observed in-game 2026-07-02: a CEF
-        // re-enable raced the 1.9MB box44 carrier and every custom bone fell to
-        // the static ancestor remap). When a 3rd-person rebind leaves unresolved
-        // bones on the static fallback, Reconcile again a few frames later - by
-        // then the FSMP bones exist and the same suffix-match rebind promotes
-        // those meshes to real SMP sway. Budgeted per external trigger so contents
-        // whose custom bones genuinely have no carrier (persist items) can only
-        // cost kRebindRetryBudget extra passes, never a loop.
+        // An injection that runs in the same beat as a token (re)equip / player 3D
+        // rebuild can rebind BEFORE the engine finishes the (async) load+attach of
+        // the carrier NIF and FSMP grows its renamed bones - heavier carriers
+        // widen the window (observed in-game 2026-07-02 with the 1.9MB box44
+        // carrier). Injection is idempotent by node name, so a plain Reconcile
+        // can NOT fix a static-bound mesh: the retry must DETACH the items whose
+        // 3rd-person rebind fell to the static fallback and re-inject them once
+        // the carrier had time to attach. Budgeted per external trigger so
+        // contents whose custom bones genuinely have no carrier (persist items)
+        // cost at most kRebindRetryBudget extra passes, never a loop.
         constexpr int kRebindRetryBudget = 2;
-        constexpr int kRebindRetryDelayFrames = 45;  // ~0.75s @60fps per attempt
+        constexpr auto kRebindRetryDelay = std::chrono::milliseconds(1000);
 
         std::atomic<int> g_rebindRetryBudget{ 0 };
         std::atomic<bool> g_rebindRetryQueued{ false };
-        bool g_inRebindRetry = false;  // main-thread only (tasks + Reconcile)
+        bool g_inRebindRetry = false;          // main-thread only (tasks + Reconcile)
+        bool g_injectStatic3p = false;         // set by RebindGeometry, read by InjectInternal
+        std::vector<std::string> g_rebindRetryIds;  // items to detach+re-inject on retry
 
-        void RunAfterFrames(int a_frames, std::function<void()> a_fn)
+        void DetachNodes(const std::string& a_id);  // fwd (defined below)
+
+        void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
         {
             auto* tasks = SKSE::GetTaskInterface();
             if (!tasks) {
                 return;
             }
-            tasks->AddTask([a_frames, fn = std::move(a_fn)]() mutable {
-                if (a_frames <= 0) {
+            tasks->AddTask([a_due, fn = std::move(a_fn)]() mutable {
+                if (std::chrono::steady_clock::now() >= a_due) {
                     fn();
                 } else {
-                    RunAfterFrames(a_frames - 1, std::move(fn));
+                    RunAfterDelay(a_due, std::move(fn));
                 }
             });
         }
 
-        void RequestRebindRetry()
+        void RequestRebindRetry(const std::string& a_id)
         {
+            if (std::find(g_rebindRetryIds.begin(), g_rebindRetryIds.end(), a_id) ==
+                g_rebindRetryIds.end()) {
+                g_rebindRetryIds.push_back(a_id);
+            }
             if (g_rebindRetryQueued.load()) {
                 return;
             }
@@ -282,12 +290,18 @@ namespace CostumeFW
                 return;
             }
             g_rebindRetryQueued = true;
-            SKSE::log::info("  rebind retry queued (+{} frames): FSMP carrier may still be attaching",
-                kRebindRetryDelayFrames);
-            RunAfterFrames(kRebindRetryDelayFrames, []() {
+            SKSE::log::info("  rebind retry queued (+{}ms): FSMP carrier may still be attaching",
+                std::chrono::duration_cast<std::chrono::milliseconds>(kRebindRetryDelay).count());
+            RunAfterDelay(std::chrono::steady_clock::now() + kRebindRetryDelay, []() {
                 g_rebindRetryQueued = false;
+                const auto ids = std::move(g_rebindRetryIds);
+                g_rebindRetryIds.clear();
+                SKSE::log::info("rebind retry: re-injecting {} static item(s)", ids.size());
+                for (const auto& id : ids) {
+                    DetachNodes(id);  // clear the static attach so injection re-runs
+                }
                 g_inRebindRetry = true;
-                Reconcile();
+                Reconcile();  // re-injects the detached items (others skip, idempotent)
                 g_inRebindRetry = false;
             });
         }
@@ -379,7 +393,7 @@ namespace CostumeFW
                 // skeleton, so a 1p remap is permanent and no reason to retry.
                 auto* pc = RE::PlayerCharacter::GetSingleton();
                 if (pc && a_root != pc->Get3D(true)) {
-                    RequestRebindRetry();
+                    g_injectStatic3p = true;  // InjectInternal turns this into a retry
                 }
             }
 
@@ -569,8 +583,14 @@ namespace CostumeFW
                 a_id, a_m3p.nifPath, a_m1p.nifPath);
 
             bool any = false;
+            g_injectStatic3p = false;
             if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap);
+            }
+            if (g_injectStatic3p) {
+                // This item's 3p rebind fell to the static fallback - the carrier
+                // may still be attaching. Queue a detach+re-inject for it.
+                RequestRebindRetry(a_id);
             }
             if (auto* root1p = player->Get3D(true); root1p && !a_m1p.nifPath.empty()) {
                 any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap);
