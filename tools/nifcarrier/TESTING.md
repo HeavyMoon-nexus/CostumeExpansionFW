@@ -44,7 +44,10 @@ geometry 付きの無変更 round-trip で確認する。ここが赤なら carr
 
 ---
 
-## T1. レベル2 不可視 carrier（方策B・box クラス）
+## T1. レベル2 不可視 carrier（方策B・box クラス）✅ 完全成立（2026-07-02 run5）
+
+**結果**: フル NIF zero-alpha carrier で**不可視＋SMP 揺れ＋コリジョンがオリジナル同等**を実機確認。
+製品 recipe＝`nifcarrier zeroalpha <content>.nif <carrier>.nif` 一発（shape 削除なし）。以下は手順の記録。
 
 **狙い**: geometry を最小化した carrier がトークン装備で FSMP に物理を作らせ、二重表示（ほぼ）なしに
 CEF 注入メッシュが揺れる（B §10-1）。レベル1（丸ごと流用）は B §9-9 で成立済み。
