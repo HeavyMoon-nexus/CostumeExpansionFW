@@ -260,11 +260,10 @@ class Program
 
     // Step-1 carrier: keep exactly ONE (smallest, skinned) geometry shape as the
     // engine attach trigger, remove the rest. Rationale: a zero-geometry carrier does
-    // NOT fire FSMP — Skyrim's biped attach returns no attachedNode, so FSMP's
-    // onEvent(ArmorAttachEvent) gate (skeleton && hasAttached && attachedNode &&
-    // armorModel) rejects it and scanBBP/doSkeletonMerge never run (verified in-game
-    // 2026-07-02; FSMP ActorManager.cpp:125). C §9-10 (b)'s "tiny skinned geometry"
-    // requirement applies to the ①armor path too.
+    // NOT fire FSMP — the engine never calls the biped-attach function (15535) for an
+    // armor with no skinned geometry, so neither FSMP event fires and no bones get
+    // merged (verified in-game 2026-07-02; mechanism per FSMP_REINVESTIGATION.md §2-1).
+    // C §9-10 (b)'s "tiny skinned geometry" requirement applies to the ①armor path too.
     static int MakeCarrierKeep1(string inPath, string outPath)
     {
         var nif = new NifFile();
@@ -306,6 +305,158 @@ class Program
         return (shp == 1 && skinned && hdt && bones > 0) ? 0 : 2;
     }
 
+    // Zero every vertex field (Vertex / VertexHalf) in a boxed-struct list via
+    // reflection. Works for BSVertexData, BSVertexDataSSE and any future variant.
+    static int ZeroVertexList(System.Collections.IList list)
+    {
+        if (list == null || list.Count == 0) return 0;
+        var itemType = list[0].GetType();
+        var fields = new[] { itemType.GetField("Vertex"), itemType.GetField("VertexHalf") }
+            .Where(f => f != null).ToArray();
+        if (fields.Length == 0) return 0;
+        for (int i = 0; i < list.Count; i++)
+        {
+            object boxed = list[i];
+            foreach (var f in fields)
+                f.SetValue(boxed, Activator.CreateInstance(f.FieldType));
+            list[i] = boxed;
+        }
+        return list.Count;
+    }
+
+    // Step-2 invisibility: collapse all render vertices to the origin. The skinned
+    // shape (and its skin instance) survives, so Skyrim's biped attach still returns
+    // an attachedNode and FSMP still fires (keep1 requirement); the triangles are
+    // degenerate, so nothing is drawn. For SSE skinned shapes the render vertex data
+    // lives in NiSkinPartition (_vertexData), not in the BSTriShape itself — zero both.
+    static int Collapse(string inPath, string outPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[collapse] FAILED to load {inPath}"); return 1; }
+        Report(nif, "BEFORE");
+
+        int zeroed = 0;
+        foreach (var shape in nif.GetShapes())
+        {
+            var t = shape.GetType();
+            foreach (var propName in new[] { "VertexData", "VertexDataSSE" })
+            {
+                var p = t.GetProperty(propName);
+                if (p?.GetValue(shape) is System.Collections.IList l)
+                    zeroed += ZeroVertexList(l);
+            }
+        }
+        foreach (var part in nif.Blocks.Where(b => b.GetType().Name == "NiSkinPartition"))
+        {
+            var f = part.GetType().GetField("_vertexData",
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+            if (f?.GetValue(part) is System.Collections.IList l)
+                zeroed += ZeroVertexList(l);
+        }
+        Console.WriteLine($"[collapse] zeroed {zeroed} vertex record(s)");
+        if (zeroed == 0)
+        { Console.WriteLine("[collapse] FAILED: found no vertex data to zero"); return 1; }
+
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[collapse] FAILED to save {outPath}"); return 1; }
+        Console.WriteLine($"[collapse] wrote {outPath}");
+
+        // Reload and verify all partition/shape vertices are zero
+        var chk = new NifFile();
+        chk.Load(outPath, new NifFileLoadOptions());
+        Report(chk, "RELOAD");
+        int nonzero = 0, total = 0;
+        foreach (var part in chk.Blocks.Where(b => b.GetType().Name == "NiSkinPartition"))
+        {
+            var f = part.GetType().GetField("_vertexData",
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+            if (f?.GetValue(part) is System.Collections.IList l && l.Count > 0)
+            {
+                var vf = l[0].GetType().GetField("Vertex");
+                for (int i = 0; i < l.Count; i++)
+                {
+                    total++;
+                    if (vf != null && !vf.GetValue(l[i]).Equals(Activator.CreateInstance(vf.FieldType)))
+                        nonzero++;
+                }
+            }
+        }
+        int shp = chk.GetShapes()?.Count() ?? 0;
+        bool skinned = chk.GetShapes()?.Any(s => s.HasSkinInstance) ?? false;
+        bool hdt = chk.Blocks.Any(b => b.GetType().Name == "NiStringExtraData" && NameOf(b) == HDT_EXTRA);
+        Console.WriteLine($"[collapse] VERDICT partitionVerts={total} nonzero={nonzero} (want 0)  shapes={shp} skinned={skinned} hdtExtra={hdt}");
+        return (nonzero == 0 && total > 0 && shp > 0 && skinned && hdt) ? 0 : 2;
+    }
+
+    // Step-2 invisibility, first choice (FSMP_REINVESTIGATION.md §3-6): the community
+    // standard for invisible-but-equipped meshes is zero-alpha — NiAlphaProperty with
+    // blending enabled + shader alpha = 0. The skinned shape still loads, attaches and
+    // fires the armor path; it just draws fully transparent. (Vertex collapse remains
+    // available as the second choice.)
+    const int ALPHA_BLEND_FLAGS = 237; // blend enable | src=SRC_ALPHA | dst=INV_SRC_ALPHA
+
+    static int ZeroAlpha(string inPath, string outPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[zeroalpha] FAILED to load {inPath}"); return 1; }
+        Report(nif, "BEFORE");
+
+        int done = 0;
+        foreach (var shape in nif.GetShapes().ToList()) // materialize: AddBlock below mutates Blocks
+        {
+            // 1. shader alpha -> 0 (BSLightingShaderProperty keeps it in private _alpha)
+            var shader = nif.GetShader(shape);
+            if (shader == null)
+            { Console.WriteLine($"[zeroalpha] WARNING: shape '{NameOf(shape)}' has no shader, skipping"); continue; }
+            var alphaField = shader.GetType().GetField("_alpha", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (alphaField == null)
+            { Console.WriteLine($"[zeroalpha] WARNING: shader {shader.GetType().Name} has no _alpha field, skipping"); continue; }
+            alphaField.SetValue(shader, 0f);
+
+            // 2. ensure a NiAlphaProperty with blending enabled so alpha is honored
+            NiAlphaProperty alphaProp = shape.HasAlphaProperty
+                ? nif.GetBlock<NiAlphaProperty>(shape.AlphaPropertyRef)
+                : null;
+            if (alphaProp == null)
+            {
+                alphaProp = new NiAlphaProperty();
+                int id = nif.AddBlock(alphaProp);
+                shape.AlphaPropertyRef = new NiBlockRef<NiAlphaProperty>(id);
+            }
+            alphaProp.Flags = new NiflySharp.Bitfields.AlphaFlags((ushort)ALPHA_BLEND_FLAGS);
+            alphaProp.Threshold = 0;
+            Console.WriteLine($"[zeroalpha] shape '{NameOf(shape)}': shader alpha=0, NiAlphaProperty flags={ALPHA_BLEND_FLAGS}");
+            done++;
+        }
+        if (done == 0)
+        { Console.WriteLine("[zeroalpha] FAILED: no shape processed"); return 1; }
+
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[zeroalpha] FAILED to save {outPath}"); return 1; }
+        Console.WriteLine($"[zeroalpha] wrote {outPath}");
+
+        // Reload and verify
+        var chk = new NifFile();
+        chk.Load(outPath, new NifFileLoadOptions());
+        Report(chk, "RELOAD");
+        bool allZero = true, allBlend = true;
+        foreach (var shape in chk.GetShapes())
+        {
+            var shader = chk.GetShader(shape);
+            var f = shader?.GetType().GetField("_alpha", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (f == null || (float)f.GetValue(shader) != 0f) allZero = false;
+            var ap = shape.HasAlphaProperty ? chk.GetBlock<NiAlphaProperty>(shape.AlphaPropertyRef) : null;
+            if (ap == null || ap.Flags.Value != ALPHA_BLEND_FLAGS) allBlend = false;
+        }
+        int shp = chk.GetShapes()?.Count() ?? 0;
+        bool skinned = chk.GetShapes()?.Any(s => s.HasSkinInstance) ?? false;
+        bool hdt = chk.Blocks.Any(b => b.GetType().Name == "NiStringExtraData" && NameOf(b) == HDT_EXTRA);
+        Console.WriteLine($"[zeroalpha] VERDICT shaderAlphaZero={allZero} blendFlags={allBlend} shapes={shp} skinned={skinned} hdtExtra={hdt}");
+        return (allZero && allBlend && shp > 0 && skinned && hdt) ? 0 : 2;
+    }
+
     // T0 sanity: pure load -> save round-trip (no edits). Use the output in-game to
     // confirm the engine reads NiflySharp's writer at all, before trusting carriers.
     static int Passthrough(string inPath, string outPath)
@@ -329,6 +480,8 @@ class Program
             Console.WriteLine("usage: nifcarrier dump       <nif>");
             Console.WriteLine("       nifcarrier carrier    <in.nif> <out.nif>");
             Console.WriteLine("       nifcarrier keep1      <in.nif> <out.nif>   (carrier keeping 1 skinned shape as attach trigger)");
+            Console.WriteLine("       nifcarrier collapse   <in.nif> <out.nif>   (zero all render verts -> invisible; 2nd choice)");
+            Console.WriteLine("       nifcarrier zeroalpha  <in.nif> <out.nif>   (shader alpha=0 + NiAlphaProperty blend -> invisible; 1st choice)");
             Console.WriteLine("       nifcarrier verifytree <src> <carrier>");
             Console.WriteLine("       nifcarrier merge      <out.nif> <base.nif> <add.nif> [add2.nif ...]");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
@@ -342,6 +495,8 @@ class Program
                 case "dump": return Dump(args[1]);
                 case "carrier": return MakeCarrier(args[1], args[2]);
                 case "keep1": return MakeCarrierKeep1(args[1], args[2]);
+                case "collapse": return Collapse(args[1], args[2]);
+                case "zeroalpha": return ZeroAlpha(args[1], args[2]);
                 case "verifytree": return VerifyTree(args[1], args[2]);
                 case "merge": return Merge(args[1], args.Skip(2).ToArray());
                 case "anchor": return Anchor(args[1], args[2], args[3]);

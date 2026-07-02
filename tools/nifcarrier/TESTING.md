@@ -50,12 +50,15 @@ geometry 付きの無変更 round-trip で確認する。ここが赤なら carr
 CEF 注入メッシュが揺れる（B §10-1）。レベル1（丸ごと流用）は B §9-9 で成立済み。
 
 > **⚠️ 実機確定（2026-07-02）**: `carrier`（全 geometry 除去、shapes=0）は**①不発火**。skinned shape の
-> 無い armor はエンジンの biped attach が `attachedNode` を返さず、FSMP の `onEvent` ゲートで棄却される
-> （`ActorManager.cpp:125`）。→ **`keep1`（最小 skinned shape を1つ残す）を使うこと**。`carrier` の出力は
-> 頭部経路（T3）等での再利用素材・ボーン和集合のベースとしては有効。
+> 無い armor に対してはエンジンが biped-attach 関数（15535）自体を呼ばず、FSMP のどちらのイベントも
+> 発火しない（機構は FSMP_REINVESTIGATION.md §2-1）。→ **`keep1`（最小 skinned shape を1つ残す）を
+> 使うこと**。`keep1` での①発火は **run3 で実機成立済み**（bound 23／`Armor_<id>` 105本／T0 合格）。
+> `carrier` の出力はボーン和集合のベース素材としては有効。
 
-1. `nifcarrier keep1 <content>.nif <carrier>.nif`（`VERDICT shapes=1 skinned=True hdtExtra=True` を確認）。
-   残役 shape の分だけ部分的二重表示が出る（発火検証段階では想定内）。
+1. `nifcarrier keep1 <content>.nif <tmp>.nif`（`VERDICT shapes=1 skinned=True hdtExtra=True` を確認）→
+   `nifcarrier zeroalpha <tmp>.nif <carrier>.nif`（不可視化第一候補: shader alpha=0＋NiAlphaProperty blend。
+   `VERDICT shaderAlphaZero=True blendFlags=True` を確認）。zero-alpha が実機で効かない場合は
+   `collapse`（全頂点原点潰し・第二候補）に差し替え。
 2. carrier を配置し、トークン ARMA の `WorldModel` を carrier パスへ（houseCARL）。
 3. その content を box の content に add（**同一 content NIF＝ボーン名一致**）。CEF 無効中に行う。
 4. ゲーム起動 → トークン装備 → `cef headdiag`。
