@@ -135,6 +135,12 @@ namespace CostumeFW
             }
             SKSE::GetTaskInterface()->AddTask([rest] { DetachSkinned(rest); });
             Print("[CEF] detaching");
+        } else if (sub == "testnif") {
+            // Inject the NIF path written in Data\SKSE\Plugins\CostumeExpansionFW_test.txt
+            // (id "test"; remove with `cef detach test`). Reads the txt fresh each call —
+            // used e.g. to probe whether files created AFTER launch resolve through the VFS.
+            SKSE::GetTaskInterface()->AddTask([] { InjectTestFromFile(); });
+            Print("[CEF] test inject from CostumeExpansionFW_test.txt (see log)");
         } else if (sub == "box") {
             // cef box <token FormID:Plugin> <content FormID:Plugin>
             std::string token, content;
