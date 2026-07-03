@@ -35,7 +35,28 @@ dotnet run -c Release -- <command> <args>
 | `anchor <in.nif> <out.nif> <anchorBoneName>` | **C body-anchor re-route**: nest all root-level bone branches under a new node (e.g. `NPC Pelvis [Pelv]`) so the physics chain grows from that body bone instead of the head, when driven via the facegen head path (C §9-10). |
 | `mergexml <out.xml> <in1.xml> <in2.xml> […]` | **Unified physics XML**: concatenate `<system>` docs with FSMP-correct semantics (`cef_factory` default-template snapshot at top + reset at each doc boundary; duplicate `<bone>` dropped first-wins; duplicate collision-shape names warned). |
 | `setxml <in.nif> <out.nif> <xmlPath>` | Re-point the root `HDT Skinned Mesh Physics Object` extra data at another XML (verified readback). |
+| `validate <nif>` | **Divide-by-zero gate**: report whether the NIF is safe to bake into an SSE carrier. Rejects non-SSE geometry (`NiTriShape`/`NiTriStrips` — LE/Oldrim, needs SSE NIF Optimizer) and skinned shapes with 0 vertices — the structures that make the engine's skin-partition loader raise `EXCEPTION_INT_DIVIDE_BY_ZERO`. |
 | `sync <manifest> --data <root> […] --out <cefMod> [--empty <token.nif>]` | **Production driver**: read CEF's `CEF_carrier_manifest.json` and rebuild `Box<slot>_carrier.nif` (+ `XML/Box<slot>_physics.xml` when 2+ SMP contents) per box. Unchanged boxes skipped via hash files. See `sync_carriers.cmd`. |
+
+### Skin-partition safety (why `validate`/`sync` gate)
+
+A worn box token loads its carrier NIF through the **vanilla engine**, not CEF — so a
+malformed carrier crashes the game with `INT_DIVIDE_BY_ZERO` in the skin-partition
+loader, and no CEF config change (settings JSON, MCM toggle, external kill-switch) can
+stop it (root cause of the Box44 CTD, 2026-07-03). To prevent a bad build from ever
+reaching disk, `sync`:
+
+1. **Excludes** any single content whose skin data fails `validate` (logged
+   `WARNING … EXCLUDED`), building the box from the remaining valid contents.
+2. Builds into a temp, runs the **final gate** (`validate`) on the assembled carrier,
+   and only then **atomically publishes** to `Box<slot>_carrier.nif`. On failure it
+   keeps the previous good carrier and does **not** bump the revision in `carriers.json`.
+
+Fail-safe on the CEF side: `ApplyCarrierOverrides` refuses to repoint a token ARMA at a
+carrier file missing on disk, so a quarantined bad build falls back to the ESP-default
+(empty) carrier — invisible costume, never a crash. **Recommendation:** ship each token
+ARMA's default `WorldModel` as the 234-byte empty carrier so an unbuilt/removed carrier
+can never CTD.
 
 ## What a level-2 carrier is for
 

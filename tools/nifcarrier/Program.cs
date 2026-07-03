@@ -182,7 +182,66 @@ class Program
         }
     }
 
+    // Ensure a source bone (and its ancestor chain) exists in dst, cloned under the
+    // same-named parent - or under dst root if the bone has NO node parent. This
+    // rescues physics bones that are referenced ONLY by a shape's skin and are NOT in
+    // the source's node hierarchy, which MergeBranch's Children-walk never reaches
+    // (e.g. Pharaoh_Veil's PhSVeil_* bones). Idempotent: returns the existing dst node
+    // if already present, so it never duplicates a shared skeleton bone.
+    static NiNode EnsureBone(NifFile dst, NifFile src, NiNode srcBone, NiNode dstRoot)
+    {
+        string bn = srcBone.Name?.String;
+        if (bn == null) return dstRoot;
+        var existing = dst.FindBlockByName<NiNode>(bn);
+        if (existing != null) return existing;
+        NiNode dparent = dstRoot;
+        var sp = src.GetParentNode(srcBone) as NiNode;
+        if (sp != null && sp.Name?.String != null && !ReferenceEquals(sp, src.GetRootNode()))
+            dparent = EnsureBone(dst, src, sp, dstRoot);  // parent first (chain-safe order)
+        int bid = dst.CloneNamedNode(bn, src);
+        dparent.Children.AddBlockRef(bid);
+        return dst.FindBlockByName<NiNode>(bn) ?? dstRoot;
+    }
+
+    // Merge one source's bones into dst: the hierarchy-reachable branch, then the
+    // union of EVERY remaining named bone (rescues skin-only physics bones like the
+    // Pharaoh_Veil's PhSVeil_* that hang off a shape's skin but not the node tree).
+    static int MergeBones(NifFile dst, NifFile src, NiNode dstRoot)
+    {
+        int before = dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
+        var srcRoot = src.GetRootNode();
+        foreach (var childRef in srcRoot.Children.References.ToList())
+        {
+            var childNode = src.GetBlock<NiNode>(childRef);
+            if (childNode != null) MergeBranch(dst, childNode, dstRoot, src);
+        }
+        foreach (var b in src.Blocks.Where(x => x.GetType().Name == "NiNode" && NameOf(x) != null).ToList())
+            EnsureBone(dst, src, (NiNode)b, dstRoot);
+        return dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null) - before;
+    }
+
+    // True if nif saves to path AND reloads valid. Cross-file CloneShape can emit SSE
+    // geometry that round-trips as null vertex data and throws on reload - the gate
+    // used to keep a corrupting content bones-only WITHOUT losing others' shapes.
+    static bool SaveReloadOk(NifFile nif, string path)
+    {
+        try
+        {
+            if (nif.Save(path, new NifFileSaveOptions()) != 0) return false;
+            var chk = new NifFile();
+            return chk.Load(path, new NifFileLoadOptions()) == 0 && chk.Valid;
+        }
+        catch { return false; }
+    }
+
+    static void TryDelete(string p) { try { System.IO.File.Delete(p); } catch { } }
+
     // Level-3 merge carrier: union the bone branches of many contents into one NIF.
+    // Bones ALWAYS union (FSMP builds every content's physics from bones + XML). Shapes
+    // (collision meshes the XML may reference by name) are added PER CONTENT and kept
+    // only if the NIF still reloads - so a content whose SSE geometry NiflySharp can't
+    // clone cleanly (e.g. Pharaoh_Veil) is kept bones-only WITHOUT stripping the OTHER
+    // contents' collision shapes.
     static int Merge(string outPath, string[] inputs)
     {
         if (inputs.Length < 2) { Console.WriteLine("[merge] need a base NIF + at least one more"); return 1; }
@@ -197,45 +256,53 @@ class Program
             var src = new NifFile();
             if (src.Load(inputs[i], new NifFileLoadOptions()) != 0 || !src.Valid)
             { Console.WriteLine($"[merge] FAILED to load {inputs[i]}"); return 1; }
-            var srcRoot = src.GetRootNode();
-            int before = dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
-            foreach (var childRef in srcRoot.Children.References.ToList())
-            {
-                var childNode = src.GetBlock<NiNode>(childRef);
-                if (childNode != null) MergeBranch(dst, childNode, dstRoot, src);
-            }
-            int after = dst.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
 
-            // Clone the add-NIF's shapes too: SMP XMLs reference collision meshes BY
-            // SHAPE NAME (per-vertex/-triangle-shape), so the carrier must physically
-            // contain every content's shapes. NiflySharp's CloneShape copies geometry
-            // + shader + skin cross-file and re-wires the skin's bone refs to same-
-            // named nodes in dst (clearing then re-adding by name), so it composes
-            // with the bone merge above. Shape names must stay as-authored (the XML
-            // matches on them) — collisions across contents are warned, not renamed.
-            int cloned = 0;
+            int addedBones = MergeBones(dst, src, dstRoot);  // bones ALWAYS union
+
+            // Clone this content's shapes, remembering the new ones so we can drop JUST
+            // them if they corrupt the NIF - keeping every OTHER content's collision mesh.
+            var addedShapes = new List<NiObject>();
             foreach (var srcShape in src.GetShapes().ToList())
             {
                 string nm = NameOf(srcShape) ?? "";
-                if (dst.GetShapes().Any(s => NameOf(s) == nm))
-                {
-                    Console.WriteLine($"[merge] WARNING: duplicate shape name '{nm}' from {inputs[i]} — FSMP resolves collision shapes by name; first one wins");
-                    continue;
-                }
+                if (dst.GetShapes().Any(s => (NameOf(s) ?? "") == nm))
+                { Console.WriteLine($"[merge] WARNING: duplicate shape name '{nm}' from {inputs[i]} — first wins"); continue; }
                 dst.CloneShape(srcShape, nm, src);
-                cloned++;
+                var ns = dst.GetShapes().FirstOrDefault(s => (NameOf(s) ?? "") == nm);
+                if (ns != null) addedShapes.Add((NiObject)ns);
             }
-            Console.WriteLine($"[merge] {inputs[i]}: +{after - before} new bone(s), +{cloned} shape(s) (shared bones reused)");
+            dst.RemoveUnreferencedBlocks();
+
+            // Validate to a throwaway temp (unique per content, so a lingering NiflySharp
+            // read handle can't collide with the next write). Unloadable -> remove just
+            // this content's shapes in memory (its bones stay) = bones-only for it.
+            string vtmp = outPath + $".v{i}";
+            bool ok = SaveReloadOk(dst, vtmp);
+            TryDelete(vtmp);
+            if (ok)
+            {
+                Console.WriteLine($"[merge] {inputs[i]}: +{addedBones} bone(s), +{addedShapes.Count} shape(s)");
+            }
+            else
+            {
+                foreach (var s in addedShapes) dst.RemoveBlock(s);
+                dst.RemoveUnreferencedBlocks();
+                Console.WriteLine($"[merge] {inputs[i]}: +{addedBones} bone(s), shapes unloadable (NiflySharp SSE clone) — kept BONES-ONLY");
+            }
         }
-        dst.RemoveUnreferencedBlocks(); // sweep orphan clones from CloneShape's bone-list rewire
 
         if (dst.Save(outPath, new NifFileSaveOptions()) != 0)
         { Console.WriteLine($"[merge] FAILED to save {outPath}"); return 1; }
-        var chk = new NifFile(); chk.Load(outPath, new NifFileLoadOptions());
+        var chk = new NifFile();
+        try
+        {
+            if (chk.Load(outPath, new NifFileLoadOptions()) != 0 || !chk.Valid)
+            { Console.WriteLine("[merge] merged NIF invalid on reload"); return 2; }
+        }
+        catch (Exception e) { Console.WriteLine($"[merge] merged NIF failed to reload: {e.Message}"); return 2; }
         Report(chk, "MERGED " + outPath);
         bool hdt = chk.Blocks.Any(b => b.GetType().Name == "NiStringExtraData" && NameOf(b) == HDT_EXTRA);
-        Console.WriteLine($"[merge] NOTE root extra data is inherited from base ('{inputs[0]}'); hdtExtra={hdt}.");
-        Console.WriteLine("[merge]      The merged XML must union all contents' physics (see README / test doc).");
+        Console.WriteLine($"[merge] hdtExtra={hdt} (root extra inherited from base '{inputs[0]}').");
         return 0;
     }
 
@@ -609,6 +676,69 @@ class Program
             .FirstOrDefault(b => b.Name?.String == HDT_EXTRA)?.StringData?.String;
     }
 
+    // Geometry block types that must NOT appear in an SSE carrier. SSE skinned
+    // meshes are BSTriShape/BSDynamicTriShape; a skinned NiTriShape (LE/Oldrim, or
+    // a badly-converted mesh) carrying an SSE NiSkinPartition is the classic
+    // EXCEPTION_INT_DIVIDE_BY_ZERO in the engine's skin-partition loader
+    // (root cause of the Box44 CTD, 2026-07-03).
+    static readonly string[] NON_SSE_GEO = {
+        "NiTriShape", "NiTriShapeData", "NiTriStrips", "NiTriStripsData"
+    };
+
+    // Reject a NIF the SSE engine would divide-by-zero on while building a skin
+    // partition. Returns false + a human-readable reason on the FIRST problem, so
+    // a poisoned content never reaches a carrier that a worn box token loads.
+    static bool ValidateNifSkinnable(NifFile nif, out string reason)
+    {
+        // 1. Non-SSE (LE) geometry. Must be SSE-optimized (BSTriShape) first.
+        foreach (var b in nif.Blocks)
+        {
+            string tn = b.GetType().Name;
+            if (Array.IndexOf(NON_SSE_GEO, tn) >= 0)
+            {
+                reason = $"non-SSE geometry block {tn} (run SSE NIF Optimizer on the source)";
+                return false;
+            }
+        }
+        // 2. Skinned shape with zero vertices -> degenerate/empty partition, a
+        //    prime divide-by-zero trigger in the partition loader.
+        foreach (var s in nif.GetShapes())
+        {
+            if (s.HasSkinInstance && (int)s.VertexCount == 0)
+            {
+                reason = $"skinned shape '{NameOf(s)}' has 0 vertices";
+                return false;
+            }
+        }
+        reason = null;
+        return true;
+    }
+
+    // Load a NIF and validate it in one step (false on unreadable OR invalid).
+    static bool ValidateNifPath(string path, out string reason)
+    {
+        var nif = new NifFile();
+        if (nif.Load(path, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { reason = "unreadable / invalid NIF"; return false; }
+        return ValidateNifSkinnable(nif, out reason);
+    }
+
+    // Standalone diagnostic: is this NIF safe to bake into an SSE carrier, or would
+    // the engine's skin-partition loader divide-by-zero on it? Use it to vet a
+    // content NIF before adding it to a box.
+    static int Validate(string path)
+    {
+        var nif = new NifFile();
+        if (nif.Load(path, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[validate] {path}: FAILED to load (unreadable / invalid NIF)"); return 2; }
+        Report(nif, "VALIDATE " + path);
+        bool ok = ValidateNifSkinnable(nif, out string reason);
+        Console.WriteLine(ok
+            ? "[validate] VERDICT: OK (no divide-by-zero risk found)"
+            : $"[validate] VERDICT: REJECT — {reason}");
+        return ok ? 0 : 2;
+    }
+
     static int Sync(string[] args)
     {
         string manifestPath = null, outRoot = null, emptyNif = null, mo2Root = null, profile = "Default";
@@ -702,6 +832,14 @@ class Program
                 { Console.WriteLine($"[sync] box{slot}: cannot resolve '{rel}' under data roots"); resolveError = true; continue; }
                 string xmlRel = GetHdtXmlPath(nifDisk);
                 if (xmlRel == null) continue; // not an SMP content
+                // Defense B: exclude a content whose skin data would crash the
+                // engine's partition loader, rather than baking it into the carrier.
+                // The box is still rebuilt from the remaining (valid) contents.
+                if (!ValidateNifPath(nifDisk, out string contentReason))
+                {
+                    Console.WriteLine($"[sync] box{slot}: WARNING content '{rel}' EXCLUDED — {contentReason} (would crash the SSE skin-partition loader); box built from the rest");
+                    continue;
+                }
                 string xmlDisk2 = ResolveAgainstRoots(xmlRel, dataRoots, meshesRel: false);
                 if (xmlDisk2 == null)
                 { Console.WriteLine($"[sync] box{slot}: physics xml '{xmlRel}' not found under data roots"); resolveError = true; continue; }
@@ -744,16 +882,20 @@ class Program
 
             Console.WriteLine($"[sync] box{slot}: {smp.Count} SMP content(s)");
             int rc;
+            // Build into a temp, VALIDATE, then atomically publish to the base
+            // carrier - so a bad build can never clobber the last good carrier
+            // that a worn box token already loads.
+            string outTmp = System.IO.Path.Combine(tmpDir, $"box{slot}_out.nif");
             if (smp.Count == 0)
             {
                 if (emptyNif == null || !System.IO.File.Exists(emptyNif))
                 { Console.WriteLine($"[sync] box{slot}: no SMP contents and no --empty template — skipped"); failed++; continue; }
-                System.IO.File.Copy(emptyNif, carrierPath, overwrite: true);
+                System.IO.File.Copy(emptyNif, outTmp, overwrite: true);
                 rc = 0;
             }
             else if (smp.Count == 1)
             {
-                rc = ZeroAlpha(smp[0].nif, carrierPath);
+                rc = ZeroAlpha(smp[0].nif, outTmp);
             }
             else
             {
@@ -765,10 +907,21 @@ class Program
                 rc = Merge(t1, smp.Select(s => s.nif).ToArray());
                 if (rc == 0) rc = ZeroAlpha(t1, t2);
                 if (rc == 0) rc = MergeXml(mergedXmlDisk, smp.Select(s => s.xmlDisk).ToArray());
-                if (rc == 0) rc = SetXml(t2, carrierPath, mergedXmlRel);
+                if (rc == 0) rc = SetXml(t2, outTmp, mergedXmlRel);
             }
-            if (rc == 0) { System.IO.File.WriteAllText(hashPath, hash); built++; }
-            else { failed++; Console.WriteLine($"[sync] box{slot}: FAILED (rc={rc})"); continue; }
+            // Defense A: final gate. Never publish a carrier the SSE loader would
+            // divide-by-zero on (catches anything the merge itself introduces).
+            if (rc == 0 && !ValidateNifPath(outTmp, out string builtReason))
+            {
+                Console.WriteLine($"[sync] box{slot}: BUILT CARRIER REJECTED — {builtReason}; keeping previous carrier, revision NOT bumped");
+                rc = 3;
+            }
+            if (rc != 0) { failed++; Console.WriteLine($"[sync] box{slot}: FAILED (rc={rc})"); continue; }
+
+            // Publish the validated build to the base carrier, then record the hash.
+            System.IO.File.Copy(outTmp, carrierPath, overwrite: true);
+            System.IO.File.WriteAllText(hashPath, hash);
+            built++;
 
             EnsurePool();
 
@@ -846,6 +999,7 @@ class Program
             Console.WriteLine("       nifcarrier setxml     <in.nif> <out.nif> <xmlPath>   (re-point HDT extra data at an XML)");
             Console.WriteLine("       nifcarrier sync       <manifest.json> --data <root> [--data ...] --out <cefModRoot> [--empty <token.nif>]");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
+            Console.WriteLine("       nifcarrier validate   <nif>   (is it safe to bake into an SSE carrier? divide-by-zero check)");
             Console.WriteLine("       nifcarrier passthrough <in.nif> <out.nif>   (T0 sanity: load->save round-trip)");
             return 1;
         }
@@ -862,6 +1016,7 @@ class Program
                 case "merge": return Merge(args[1], args.Skip(2).ToArray());
                 case "mergexml": return MergeXml(args[1], args.Skip(2).ToArray());
                 case "setxml": return SetXml(args[1], args[2], args[3]);
+                case "validate": return Validate(args[1]);
                 case "sync": return Sync(args.Skip(1).ToArray());
                 case "anchor": return Anchor(args[1], args[2], args[3]);
                 case "passthrough": return Passthrough(args[1], args[2]);
