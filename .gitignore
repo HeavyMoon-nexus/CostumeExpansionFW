@@ -30,6 +30,7 @@ tools/**/obj/
 
 # Internal dev docs (not for public release)
 HANDOFF.md
+HANDOVER.md
 FSMP_API_PROPOSAL.md
 FSMP_INTEGRATION.md
 FSMP_APPROACH_A.md
