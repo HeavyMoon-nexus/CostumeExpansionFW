@@ -277,6 +277,71 @@ namespace CostumeFW
         // a volatile in-memory form edit - reapplied on every settings load.
         constexpr const char* kCarriersJsonPath = "Data\\meshes\\CostumeFW\\carriers.json";
 
+        // Tokens with a carrier swap mid-flight (detach -> unequip -> equip ->
+        // verification passes). A new revision arriving during a swap must not
+        // start a second interleaved sequence - it re-applies once the slot frees.
+        std::unordered_set<std::string> g_swapInProgress;
+        std::atomic<bool> g_reapplyQueued{ false };
+
+        void ApplyCarrierOverridesImpl(bool a_refreshChanged);  // fwd (recursion via requeue)
+
+        // The swap sequencer. In-game 2026-07-03 showed two failure modes of the
+        // naive "repoint + re-equip": (1) injected meshes re-bound to the OLD
+        // carrier's renamed bones in the unequip->clean window - a bind that looks
+        // successful but the nodes die at FSMP's next cleanArmor sweep, leaving
+        // invisible/broken meshes the retry system never touches ("bound" != needs
+        // retry); (2) the new carrier's async model load outlives the rebind-retry
+        // budget. So: detach the box's contents FIRST (nothing can hold stale
+        // bones), unequip, equip after the detach settles, then run detach+
+        // Reconcile verification passes while the new carrier attaches.
+        void RunCarrierSwap(const std::string& a_token, const std::vector<std::string>& a_contents)
+        {
+            const std::uint32_t formId = ResolveFormId(a_token);
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+            auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+            if (!player || !obj || player->GetWornArmor(formId) == nullptr) {
+                return;  // not worn: next normal equip loads the new path anyway
+            }
+            auto* eqm = RE::ActorEquipManager::GetSingleton();
+            if (!eqm) {
+                return;
+            }
+            g_swapInProgress.insert(a_token);
+            for (const auto& c : a_contents) {
+                DetachSkinned(c);  // pre-detach: no stale binds to dying bones
+            }
+            eqm->UnequipObject(player, obj);
+            const std::string token = a_token;
+            const std::vector<std::string> contents = a_contents;
+            RunAfterDelayMs(600, [formId, token, contents]() {
+                auto* pl = RE::PlayerCharacter::GetSingleton();
+                auto* f = RE::TESForm::LookupByID(formId);
+                auto* o = f ? f->As<RE::TESBoundObject>() : nullptr;
+                if (pl && o) {
+                    if (auto* m = RE::ActorEquipManager::GetSingleton()) {
+                        m->EquipObject(pl, o);
+                        SKSE::log::info("carrier swap: re-equipped token '{}'", token);
+                    }
+                }
+                // Verification passes: the fresh carrier attaches asynchronously
+                // (multi-MB NIFs take seconds). Detach + Reconcile re-runs the
+                // bind cleanly; anything still static falls to the retry system.
+                auto verify = [token, contents](bool a_last) {
+                    for (const auto& c : contents) {
+                        DetachSkinned(c);
+                    }
+                    Reconcile();
+                    if (a_last) {
+                        g_swapInProgress.erase(token);
+                        SKSE::log::info("carrier swap: verification complete for token '{}'", token);
+                    }
+                };
+                RunAfterDelayMs(1500, [verify]() { verify(false); });
+                RunAfterDelayMs(4000, [verify]() { verify(true); });
+            });
+        }
+
         void ApplyCarrierOverridesImpl(bool a_refreshChanged)
         {
             std::ifstream f(kCarriersJsonPath);
@@ -312,33 +377,19 @@ namespace CostumeFW
                 arma->bipedModels[RE::SEXES::kFemale].model = file.c_str();
                 SKSE::log::info("carrier override: slot {} token '{}' -> {}", key, b.token, file);
                 if (a_refreshChanged) {
-                    // Two-phase re-equip. An immediate unequip+equip (RefreshWornToken)
-                    // is coalesced by the engine - the 3D never rebuilds and the old
-                    // carrier stays (verified in-game 2026-07-03). Unequip now, equip
-                    // after a beat so the detach fully processes and the equip loads
-                    // the new (uncached) carrier path -> FSMP rebuilds -> the rebind
-                    // auto-retry binds the injected meshes.
-                    const std::uint32_t formId = ResolveFormId(b.token);
-                    auto* player = RE::PlayerCharacter::GetSingleton();
-                    auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
-                    auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
-                    if (player && obj && player->GetWornArmor(formId) != nullptr) {
-                        if (auto* eqm = RE::ActorEquipManager::GetSingleton()) {
-                            eqm->UnequipObject(player, obj);
-                            const std::string token = b.token;
-                            RunAfterDelayMs(500, [formId, token]() {
-                                auto* pl = RE::PlayerCharacter::GetSingleton();
-                                auto* f = RE::TESForm::LookupByID(formId);
-                                auto* o = f ? f->As<RE::TESBoundObject>() : nullptr;
-                                if (pl && o) {
-                                    if (auto* m = RE::ActorEquipManager::GetSingleton()) {
-                                        m->EquipObject(pl, o);
-                                        SKSE::log::info("carrier swap: re-equipped token '{}'", token);
-                                    }
-                                }
+                    if (g_swapInProgress.contains(b.token)) {
+                        // Mid-swap: never interleave a second unequip/equip chain
+                        // (the in-flight equip already loads the newest path). Try
+                        // the whole apply again once the slot frees.
+                        if (!g_reapplyQueued.exchange(true)) {
+                            RunAfterDelayMs(6000, []() {
+                                g_reapplyQueued = false;
+                                ApplyCarrierOverridesImpl(true);
                             });
                         }
+                        continue;
                     }
+                    RunCarrierSwap(b.token, b.contents);
                 }
             }
         }

@@ -250,7 +250,7 @@ namespace CostumeFW
         // the carrier had time to attach. Budgeted per external trigger so
         // contents whose custom bones genuinely have no carrier (persist items)
         // cost at most kRebindRetryBudget extra passes, never a loop.
-        constexpr int kRebindRetryBudget = 2;
+        constexpr int kRebindRetryBudget = 4;  // heavy carriers load async for seconds
         constexpr auto kRebindRetryDelay = std::chrono::milliseconds(1000);
 
         std::atomic<int> g_rebindRetryBudget{ 0 };
