@@ -351,7 +351,11 @@ namespace CostumeFW
             const std::vector<std::string> contents = a_contents;
             const int slot = a_slot;
 
-            eqm->UnequipObject(player, obj);
+            // queueEquip=false / applyNow=true: the DEFAULT queued+deferred path let
+            // a same-item unequip+equip cancel out with no 3D rebuild - both state
+            // polls timed out with the slot 3D never clearing (in-game 2026-07-03).
+            eqm->UnequipObject(player, obj, nullptr, 1, nullptr,
+                /*queueEquip*/ false, /*force*/ false, /*sounds*/ true, /*applyNow*/ true);
             WaitUntil([slot]() { return !SlotHas3D(slot); }, 150, 30,
                 [formId, token, contents, slot](bool a_gone) {
                     if (!a_gone) {
@@ -362,7 +366,8 @@ namespace CostumeFW
                     auto* o = f ? f->As<RE::TESBoundObject>() : nullptr;
                     if (pl && o) {
                         if (auto* m = RE::ActorEquipManager::GetSingleton()) {
-                            m->EquipObject(pl, o);
+                            m->EquipObject(pl, o, nullptr, 1, nullptr,
+                                /*queueEquip*/ false, /*force*/ false, /*sounds*/ true, /*applyNow*/ true);
                             SKSE::log::info("carrier swap: re-equipped token '{}' (slot {} detachObserved={})",
                                 token, slot, a_gone);
                         }
