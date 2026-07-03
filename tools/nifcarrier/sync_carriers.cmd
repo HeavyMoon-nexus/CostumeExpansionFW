@@ -18,4 +18,5 @@ dotnet "%DLL%" sync "K:\Mo2_SkyrimSE1170\overwrite\SKSE\plugins\CEF_carrier_mani
   --mo2 "K:\Mo2_SkyrimSE1170" --profile Default ^
   --out "K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW" ^
   --empty "K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW\meshes\CostumeFW\boxtoken.nif"
-pause
+REM keep the window open only for manual runs (CEF auto-sync passes "auto")
+if "%~1"=="" pause

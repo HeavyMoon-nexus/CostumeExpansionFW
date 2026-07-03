@@ -24,14 +24,19 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <iterator>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
+
+#include <Windows.h>  // CreateProcess (auto-sync child process)
 
 namespace CostumeFW
 {
@@ -189,6 +194,8 @@ namespace CostumeFW
         // persist, skipped when nothing changed (keeps sync's hash-skip effective).
         constexpr const char* kManifestPath = "Data\\SKSE\\Plugins\\CEF_carrier_manifest.json";
 
+        void ScheduleAutoSync();  // fwd (defined below)
+
         void WriteCarrierManifest()
         {
             auto* dh = RE::TESDataHandler::GetSingleton();
@@ -255,8 +262,9 @@ namespace CostumeFW
             }
             f << out;
             SKSE::log::info(
-                "carrier manifest updated ({} box(es)) - run 'nifcarrier sync' then `cef carriers` to rebuild FSMP carriers",
+                "carrier manifest updated ({} box(es)) - rebuilding FSMP carriers",
                 g_boxes.size());
+            ScheduleAutoSync();
         }
 
         // --- carrier revision overrides (restart-free swaps) --------------------
@@ -333,6 +341,97 @@ namespace CostumeFW
                     }
                 }
             }
+        }
+
+        // --- auto-sync: spawn nifcarrier when the manifest changes ---------------
+        // Full hands-off loop: manifest change (the exact "box content set changed"
+        // signal) -> debounce -> spawn the sync command as a child process -> wait
+        // for it on a background thread -> ApplyCarrierOverridesImpl(true) on the
+        // main thread (slot repoint + two-phase re-equip). Enabled by the presence
+        // of CEF_sync_command.txt (one line: the command to run); absent = manual
+        // mode (run sync_carriers.cmd + `cef carriers` yourself).
+        constexpr const char* kSyncCommandPath = "Data\\SKSE\\Plugins\\CEF_sync_command.txt";
+        constexpr int kSyncDebounceMs = 2000;     // MCM edits come in bursts
+        constexpr DWORD kSyncTimeoutMs = 120000;  // safety net for a wedged child
+
+        std::atomic<bool> g_syncScheduled{ false };
+        std::atomic<bool> g_syncRunning{ false };
+        std::atomic<bool> g_syncRerun{ false };  // manifest changed while a sync ran
+
+        std::string ReadSyncCommand()
+        {
+            std::ifstream f(kSyncCommandPath);
+            if (!f) {
+                return {};
+            }
+            std::string line;
+            std::getline(f, line);
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+                line.pop_back();
+            }
+            return line;
+        }
+
+        void SpawnSyncProcess()
+        {
+            const std::string cmd = ReadSyncCommand();
+            if (cmd.empty()) {
+                return;
+            }
+            if (g_syncRunning.exchange(true)) {
+                g_syncRerun = true;  // coalesce: rerun once the current child exits
+                return;
+            }
+            std::string full = "cmd /c \"" + cmd + "\"";
+            STARTUPINFOA si{};
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi{};
+            std::vector<char> buf(full.begin(), full.end());
+            buf.push_back('\0');
+            if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                    nullptr, nullptr, &si, &pi)) {
+                SKSE::log::error("auto-sync: CreateProcess failed ({}) for: {}", GetLastError(), cmd);
+                g_syncRunning = false;
+                return;
+            }
+            SKSE::log::info("auto-sync: rebuilding carriers ({})", cmd);
+            CloseHandle(pi.hThread);
+            std::thread([h = pi.hProcess]() {
+                DWORD code = 1;
+                if (WaitForSingleObject(h, kSyncTimeoutMs) == WAIT_OBJECT_0) {
+                    GetExitCodeProcess(h, &code);
+                } else {
+                    SKSE::log::warn("auto-sync: nifcarrier timed out");
+                }
+                CloseHandle(h);
+                g_syncRunning = false;
+                if (g_syncRerun.exchange(false)) {
+                    SpawnSyncProcess();
+                    return;
+                }
+                if (code == 0) {
+                    SKSE::GetTaskInterface()->AddTask([]() {
+                        SKSE::log::info("auto-sync: done - applying carrier revisions");
+                        ApplyCarrierOverridesImpl(true);
+                    });
+                } else {
+                    SKSE::log::error("auto-sync: nifcarrier failed (exit {}) - carriers unchanged", code);
+                }
+            }).detach();
+        }
+
+        void ScheduleAutoSync()
+        {
+            if (ReadSyncCommand().empty()) {
+                return;  // manual mode
+            }
+            if (g_syncScheduled.exchange(true)) {
+                return;  // a debounced spawn is already pending
+            }
+            RunAfterDelayMs(kSyncDebounceMs, []() {
+                g_syncScheduled = false;
+                SpawnSyncProcess();
+            });
         }
     }
 
