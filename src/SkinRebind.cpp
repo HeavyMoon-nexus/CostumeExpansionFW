@@ -1105,6 +1105,11 @@ namespace CostumeFW
         SKSE::log::debug("  detached {}", a_id);
     }
 
+    void HideInjectedNodes(const std::string& a_id)
+    {
+        DetachNodes(a_id);  // registry untouched: Reconcile re-injects
+    }
+
     void RefreshGender(const std::string& a_id)
     {
         for (auto& it : g_active) {

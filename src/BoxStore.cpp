@@ -309,7 +309,7 @@ namespace CostumeFW
             }
             g_swapInProgress.insert(a_token);
             for (const auto& c : a_contents) {
-                DetachSkinned(c);  // pre-detach: no stale binds to dying bones
+                HideInjectedNodes(c);  // pre-detach (keep registered): no stale binds to dying bones
             }
             eqm->UnequipObject(player, obj);
             const std::string token = a_token;
@@ -329,7 +329,7 @@ namespace CostumeFW
                 // bind cleanly; anything still static falls to the retry system.
                 auto verify = [token, contents](bool a_last) {
                     for (const auto& c : contents) {
-                        DetachSkinned(c);
+                        HideInjectedNodes(c);  // keep registered - Reconcile below re-injects
                     }
                     Reconcile();
                     if (a_last) {

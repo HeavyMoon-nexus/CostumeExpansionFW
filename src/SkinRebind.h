@@ -60,8 +60,14 @@ namespace CostumeFW
     void ClearRegistry();
 
     // Remove a previously injected node ("CostumeFW_<id>") from the player
-    // skeleton(s). Main thread only.
+    // skeleton(s) AND unregister it - Reconcile will NOT bring it back. Full
+    // removal (cef detach / content removal). Main thread only.
     void DetachSkinned(const std::string& a_id);
+
+    // Hide an injected item's scene nodes WITHOUT unregistering it - the next
+    // Reconcile re-injects it fresh. For carrier swaps / forced re-binds where
+    // the mesh must let go of soon-to-die FSMP bones. Main thread only.
+    void HideInjectedNodes(const std::string& a_id);
 
     // Force one active item's injected model to re-resolve for its current
     // effective sex (after its forced-gender mode changed) and re-inject: detaches
