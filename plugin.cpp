@@ -7,6 +7,7 @@
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Commands.h"
+#include "Config.h"
 #include "Cosave.h"
 #include "LoreBox.h"
 #include "Papyrus.h"
@@ -109,6 +110,12 @@ namespace
 
     void OnMessage(SKSE::MessagingInterface::Message* a_msg)
     {
+        // Defense-in-depth: SKSEPluginLoad already returns before registering this
+        // listener when CEF is hard-disabled, so this normally can't fire. Guard it
+        // anyway so no message ever installs a hook / sink / 3D task while disabled.
+        if (CostumeFW::HardDisabled()) {
+            return;
+        }
         switch (a_msg->type) {
         case SKSE::MessagingInterface::kPostPostLoad:
             // Acquire skee's IBodyMorphInterface AFTER all kPostLoad handlers ran -
@@ -154,6 +161,17 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     CostumeFW::SetupLog();
     SKSE::Init(skse);
     SKSE::log::info("CostumeExpansionFW loaded");
+
+    // Honor the external kill-switch as early as possible. When disabled we return
+    // true (so the DLL still loads and its ESP masters resolve) but register
+    // NOTHING - no trampoline, no serialization, no Papyrus, no message listener.
+    // CEF becomes wholly inert, so a save a CEF CTD left unloadable opens clean:
+    // the stale co-save chunk is simply skipped (no handler), and any MCM native
+    // call returns None (a harmless Papyrus warning, never a crash).
+    if (CostumeFW::HardDisabled()) {
+        SKSE::log::warn("CostumeExpansionFW is DISABLED via external config - doing nothing");
+        return true;
+    }
 
     SKSE::AllocTrampoline(64);  // for the console CompileAndRun hook
     CostumeFW::InstallSerialization();

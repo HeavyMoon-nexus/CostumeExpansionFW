@@ -81,6 +81,17 @@ namespace CostumeFW
     // load. Idempotent. Main thread only.
     void Reconcile();
 
+    // The distinct FSMP "Armor_<id>" carrier merge ids currently on the player's
+    // 3rd-person skeleton (lowercased 8-hex). Snapshot before a carrier swap so the
+    // new twin carrier's freshly-appeared id can be isolated. Main thread only.
+    std::vector<std::string> CollectFsmpCarrierIds();
+
+    // Restrict subsequent FSMP-physics binds (in Reconcile/RebindGeometry) to these
+    // carrier ids. A carrier swap sets this to the new twin carrier's id so content
+    // cannot bind to the just-unequipped twin's still-lingering dying node. Pass an
+    // empty vector to lift the restriction. Main thread only.
+    void SetPreferCarrierIds(const std::vector<std::string>& a_ids);
+
     // Detach + unregister every active item. Main thread only.
     void DetachAll();
 

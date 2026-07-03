@@ -14,6 +14,9 @@ namespace CostumeFW
     {
         std::string label;
         std::string token;
+        std::string tokenB;  // twin token (same slot) for restart-free carrier swaps
+                             // (plan Y flip-flop). "" = single-token legacy box: swaps
+                             // fall back to the DoReset3D whole-actor rebuild.
         std::vector<std::string> contents;
         std::string ability;  // colon-form Spell id granted while the token is worn ("" = none)
         bool enabled{ true };  // distribute the token to the player? off = removed (conflict escape)
@@ -89,9 +92,15 @@ namespace CostumeFW
     // caller Reconciles afterward. Main thread (mutates the registry).
     void LoadBoxes();
 
-    // True if the FormID is any defined box's token (regardless of whether it has
-    // injected content) - so the equip sink fires even for ability-only boxes.
+    // True if the FormID is any defined box's token (either twin) - so the equip
+    // sink fires even for ability-only boxes, and hide-when-worn treats both twins
+    // as "our own" (not a real item that should hide content).
     bool IsBoxToken(std::uint32_t a_form);
+
+    // Given one twin's token FormID, the OTHER twin's resolved FormID (plan Y
+    // flip-flop pairing), or 0 if a_tokenForm isn't a twinned box token. Lets the
+    // content worn-check (Reconcile) show a box while EITHER twin is worn. Symmetric.
+    std::uint32_t TwinTokenForm(std::uint32_t a_tokenForm);
 
     // Resilience: if a defined box's token has left the player's inventory (sold /
     // dropped) and the player now has none, give one back. So the box system can

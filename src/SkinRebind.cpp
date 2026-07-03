@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <unordered_set>
 #include <fstream>
 #include <map>
 #include <string>
@@ -179,6 +180,23 @@ namespace CostumeFW
             return out;
         }
 
+        // Restrict FSMP-physics binds to a specific set of carrier merge ids (the
+        // <8hex> of "hdtSSEPhysics_AutoRename_Armor_<id>"). While non-empty, a bind
+        // is accepted ONLY under one of these ids. A carrier swap sets this to the
+        // NEWLY-appeared twin carrier's id so content can't bind to the just-
+        // unequipped twin's still-lingering (dying) FSMP node = the "floats until
+        // manual re-equip" bug. Empty = no restriction (normal injection). All
+        // access is on the SKSE main task thread. Ids are stored lowercased.
+        std::unordered_set<std::string> g_preferCarrierIds;
+
+        std::string LowerHex(std::string_view a_hex)
+        {
+            std::string s{ a_hex };
+            std::transform(s.begin(), s.end(), s.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return s;
+        }
+
         // FSMP merges the physics bones it builds into the LIVE skeleton under a
         // renamed node: "hdtSSEPhysics_AutoRename_Armor_<8hex> <origName>" (equip
         // armor-attach path) or "hdtSSEPhysics_AutoRename_Head_<8hex> <origName>"
@@ -187,7 +205,8 @@ namespace CostumeFW
         // can't construct the name up-front. Search the skeleton for a node whose
         // name is exactly <known-prefix><8 hex><space><bone>. Returns first BFS
         // match, or null. If found, the injected mesh can bind to the SIMULATED
-        // bone and get real SMP sway (instead of the static ancestor remap).
+        // bone and get real SMP sway (instead of the static ancestor remap). When
+        // g_preferCarrierIds is set, a match under any OTHER id is rejected.
         RE::NiAVObject* FindFsmpRenamedBone(RE::NiAVObject* a_root, const char* a_bone)
         {
             if (!a_root || !a_bone || !*a_bone) {
@@ -214,9 +233,16 @@ namespace CostumeFW
                     if (nm[pfx.size() + 8] != ' ') {
                         continue;
                     }
-                    if (nm.substr(pfx.size() + 8 + 1) == bone) {
-                        return true;
+                    if (nm.substr(pfx.size() + 8 + 1) != bone) {
+                        continue;
                     }
+                    // Carrier-id filter (active during a swap): only bind under the
+                    // new twin carrier's id, never the just-unequipped twin's.
+                    if (!g_preferCarrierIds.empty() &&
+                        !g_preferCarrierIds.contains(LowerHex(hex))) {
+                        continue;
+                    }
+                    return true;
                 }
                 return false;
             };
@@ -748,6 +774,51 @@ namespace CostumeFW
             std::move(a_fn));
     }
 
+    std::vector<std::string> CollectFsmpCarrierIds()
+    {
+        std::vector<std::string> out;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* root = player ? player->Get3D(false) : nullptr;
+        if (!root) {
+            return out;
+        }
+        constexpr std::string_view kPfx = "hdtSSEPhysics_AutoRename_Armor_";
+        std::unordered_set<std::string> seen;
+        std::vector<RE::NiAVObject*> stack{ root };
+        while (!stack.empty()) {
+            auto* obj = stack.back();
+            stack.pop_back();
+            if (!obj) {
+                continue;
+            }
+            const std::string_view nm{ obj->name.c_str() };
+            if (nm.size() >= kPfx.size() + 8 && nm.substr(0, kPfx.size()) == kPfx) {
+                const std::string_view hex = nm.substr(kPfx.size(), 8);
+                if (std::all_of(hex.begin(), hex.end(),
+                        [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+                    std::string id = LowerHex(hex);
+                    if (seen.insert(id).second) {
+                        out.push_back(std::move(id));
+                    }
+                }
+            }
+            if (auto* node = obj->AsNode()) {
+                for (auto& child : node->GetChildren()) {
+                    stack.push_back(child.get());
+                }
+            }
+        }
+        return out;
+    }
+
+    void SetPreferCarrierIds(const std::vector<std::string>& a_ids)
+    {
+        g_preferCarrierIds.clear();
+        for (const auto& id : a_ids) {
+            g_preferCarrierIds.insert(LowerHex(id));
+        }
+    }
+
     void Reconcile()
     {
         if (g_active.empty()) {
@@ -769,7 +840,15 @@ namespace CostumeFW
             if (cefOn) {
                 show = (it.tokenForm == 0);
                 if (!show && player) {
+                    // Plan Y flip-flop: a box's content shows while EITHER twin token
+                    // is worn (a swap equips the inactive twin, so mid-swap the worn
+                    // token briefly IS the twin, and it must keep showing).
                     show = (player->GetWornArmor(it.tokenForm) != nullptr);
+                    if (!show) {
+                        if (const auto twin = TwinTokenForm(it.tokenForm)) {
+                            show = (player->GetWornArmor(twin) != nullptr);
+                        }
+                    }
                 }
             }
             // §8.10 hide-when-worn: hide this content while any of its configured

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Carrier divide-by-zero CTD (Box44 class):** a box whose merged FSMP carrier NIF
+  contained non-SSE geometry (`NiTriShape`) or a degenerate skin partition crashed the
+  game with `EXCEPTION_INT_DIVIDE_BY_ZERO` in the vanilla skin-partition loader whenever
+  the box token was worn — unstoppable from CEF config, since the engine (not CEF) loads
+  a worn token's mesh. `nifcarrier` now validates skin data: `sync` excludes an
+  individual crashing content, builds into a temp, runs a final validation gate on the
+  assembled carrier, and only atomically publishes a passing build (keeping the previous
+  good carrier + revision otherwise). New `nifcarrier validate <nif>` diagnostic. CEF's
+  `ApplyCarrierOverrides` no longer repoints a token ARMA at a carrier file missing on
+  disk (falls back to the ESP-default empty carrier).
+
+### Added
+- **External hard kill-switch (crash recovery):** CEF can now be fully disabled from
+  outside the game, read once at startup before any hook runs. Set `bEnabled=0` in
+  `Data\SKSE\Plugins\CostumeExpansionFW.ini`, or just drop an empty
+  `Data\SKSE\Plugins\CEF_DISABLE.txt` (existence forces off). When disabled, CEF
+  registers no hooks/sinks, loads no boxes, and does no mesh injection or carrier/FSMP
+  work — so a save a CEF crash left unloadable opens with the plugin inert. Distinct
+  from the MCM master toggle, which only hides meshes while the hooks keep running.
+
 ## v1.01 (2026-07-01)
 
 ### Added

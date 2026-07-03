@@ -41,6 +41,21 @@ Presets (`Data\SKSE\Plugins\CEF\Presets\CEFP_*.json`) are the shareable unit —
 human-readable set of content. Settings live in `Data\SKSE\Plugins\CEF_settings.json`
 (global, shared across saves).
 
+## Disabling CEF from outside the game (recovery)
+
+The MCM master toggle only hides/shows meshes at runtime; the plugin's hooks still run.
+For a hard off — and to **recover a save that a CEF crash left unloadable** — use the
+external config, read once at startup **before CEF touches anything**, so you can edit it
+without launching the game. Two ways (either is enough):
+
+- `Data\SKSE\Plugins\CostumeExpansionFW.ini` → `[General]` `bEnabled=0`
+- Create an empty `Data\SKSE\Plugins\CEF_DISABLE.txt` — its mere presence forces CEF off
+  (typo-proof panic switch).
+
+When disabled, CEF registers no hooks, no event sinks, loads no boxes, and does no mesh
+injection or carrier/FSMP work — the save opens with the plugin fully inert (the stale
+co-save data is skipped). Set `bEnabled=1` / delete the flag file to re-enable.
+
 ## Uninstalling
 
 Before removing the mod, open **MCM → Main → Prepare for uninstall**. This returns every
