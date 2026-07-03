@@ -108,7 +108,6 @@ namespace CostumeFW
                 nlohmann::json jb;
                 jb["label"] = b.label;
                 jb["token"] = b.token;
-                jb["tokenB"] = b.tokenB;  // twin token (plan Y); "" = single-token box
                 jb["contents"] = b.contents;
                 jb["ability"] = b.ability;
                 jb["enabled"] = b.enabled;
@@ -280,267 +279,6 @@ namespace CostumeFW
         // a volatile in-memory form edit - reapplied on every settings load.
         constexpr const char* kCarriersJsonPath = "Data\\meshes\\CostumeFW\\carriers.json";
 
-        // Tokens with a carrier swap mid-flight (detach -> unequip -> equip ->
-        // verification passes). A new revision arriving during a swap must not
-        // start a second interleaved sequence - it re-applies once the slot frees.
-        std::unordered_set<std::string> g_swapInProgress;
-        std::atomic<bool> g_reapplyQueued{ false };
-
-        // The carrier revision file the WORN twin was last swapped TO, per box (A
-        // token key). The swap edge is `g_lastSwappedFile[token] != file`, NOT
-        // RepointCarrier's mutation return - the ARMA record is repointed eagerly (so
-        // the eventual equip loads the newest path), so a revision arriving mid-swap
-        // would otherwise make the deferred re-apply see "no change" and silently drop
-        // the swap. Main-thread only (SKSE task thread).
-        std::unordered_map<std::string, std::string> g_lastSwappedFile;
-
-        void ApplyCarrierOverridesImpl(bool a_refreshChanged);  // fwd (recursion via requeue)
-
-        // Poll a predicate on the main thread until it holds (a_then(true)) or the
-        // attempts run out (a_then(false)).
-        void WaitUntil(std::function<bool()> a_pred, int a_intervalMs, int a_maxTries,
-            std::function<void(bool)> a_then)
-        {
-            if (a_pred()) {
-                a_then(true);
-                return;
-            }
-            if (a_maxTries <= 0) {
-                a_then(false);
-                return;
-            }
-            RunAfterDelayMs(a_intervalMs, [a_pred = std::move(a_pred), a_intervalMs, a_maxTries,
-                                              a_then = std::move(a_then)]() mutable {
-                WaitUntil(std::move(a_pred), a_intervalMs, a_maxTries - 1, std::move(a_then));
-            });
-        }
-
-        // Is a 3D part currently attached in the player's biped slot?
-        bool SlotHas3D(int a_slot)
-        {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player || a_slot < 30 || a_slot > 61) {
-                return false;
-            }
-            const auto& biped = player->GetActorRuntimeData().biped;
-            if (!biped) {
-                return false;
-            }
-            return biped->objects[a_slot - 30].partClone != nullptr;
-        }
-
-        // Shared verification tail: after a swap lands a new 3D in the slot, re-hide
-        // (keep-registered) + Reconcile twice so every content rebinds onto the new
-        // carrier's freshly-merged bones (the rebind-retry budget covers async load).
-        void VerifySwapBinds(const std::string& a_token, const std::vector<std::string>& a_contents)
-        {
-            const std::string token = a_token;
-            const std::vector<std::string> contents = a_contents;
-            auto verify = [token, contents](bool a_last) {
-                for (const auto& c : contents) {
-                    HideInjectedNodes(c);  // keep registered - Reconcile re-injects
-                }
-                Reconcile();
-                if (a_last) {
-                    g_swapInProgress.erase(token);
-                    SKSE::log::info("carrier swap: verification complete for token '{}'", token);
-                }
-            };
-            RunAfterDelayMs(500, [verify]() { verify(false); });
-            RunAfterDelayMs(3000, [verify]() { verify(true); });
-        }
-
-        // Twin-swap verification (plan Y). After the flip-equip, FSMP merges the box's
-        // NEW carrier asynchronously. a_before = the carrier ids present just before the
-        // equip, so the box's carrier is whatever id then APPEARS that isn't in that set.
-        // We wait for it (also covers a slow/heavy carrier's async merge) and bind PINNED
-        // to it (SetPreferCarrierIds), so the content latches box44's carrier and not some
-        // OTHER live carrier that renames the same bones (e.g. the same outfit ALSO worn
-        // normally = a second carrier with identical bone names). Logs worn-twin + carrier
-        // ids for diagnosis; on timeout it binds unfiltered (first-match).
-        void VerifyTwinSwapBinds(const std::string& a_token, std::uint32_t a_target,
-            std::uint32_t a_formA, std::uint32_t a_formB,
-            const std::vector<std::string>& a_contents, const std::vector<std::string>& a_before)
-        {
-            const std::string token = a_token;
-            const std::vector<std::string> contents = a_contents;
-            const std::uint32_t target = a_target;  // the twin we flipped TO (must become worn)
-            const std::uint32_t formA = a_formA;
-            const std::uint32_t formB = a_formB;
-            const std::vector<std::string> before = a_before;
-            auto diag = [formA, formB](const char* a_tag) {
-                auto* p = RE::PlayerCharacter::GetSingleton();
-                const bool wa = p && p->GetWornArmor(formA) != nullptr;
-                const bool wb = p && p->GetWornArmor(formB) != nullptr;
-                std::string ids;
-                for (const auto& id : CollectFsmpCarrierIds()) {
-                    ids += id;
-                    ids += ' ';
-                }
-                SKSE::log::info("carrier swap [{}]: wornA={} wornB={} carrierIds=[{}]",
-                    a_tag, wa, wb, ids);
-            };
-            auto newIdsNow = [before]() {
-                std::vector<std::string> out;
-                for (const auto& id : CollectFsmpCarrierIds()) {
-                    if (std::find(before.begin(), before.end(), id) == before.end()) {
-                        out.push_back(id);
-                    }
-                }
-                return out;
-            };
-            // The natural (queued) equip lands a few frames -> a few seconds later, and
-            // FSMP then merges the box carrier async. So wait for BOTH: the target twin
-            // is actually worn (flip landed) AND a new carrier id has appeared (box
-            // carrier merged). Only then is the pinned bind meaningful.
-            auto ready = [target, newIdsNow]() {
-                auto* p = RE::PlayerCharacter::GetSingleton();
-                return p && p->GetWornArmor(target) != nullptr && !newIdsNow().empty();
-            };
-            WaitUntil(ready, 250, 60,
-                [token, contents, newIdsNow, diag](bool a_ready) {
-                    const std::vector<std::string> newIds = newIdsNow();
-                    diag(a_ready ? "ready" : "timeout");
-                    if (a_ready) {
-                        SKSE::log::info("carrier swap: box carrier id = {} - pinning binds",
-                            newIds.front());
-                    } else {
-                        SKSE::log::warn("carrier swap: swap not ready in 15s - binding unfiltered");
-                    }
-                    // Pin binds to the box carrier for ONE synchronous Reconcile, then
-                    // lift (so unrelated content isn't filtered). Empty newIds (timeout)
-                    // => unfiltered first-match.
-                    auto bindPass = [contents, newIds]() {
-                        SetPreferCarrierIds(newIds);
-                        for (const auto& c : contents) {
-                            HideInjectedNodes(c);
-                        }
-                        Reconcile();
-                        SetPreferCarrierIds({});
-                    };
-                    bindPass();
-                    RunAfterDelayMs(2000, [token, diag, bindPass]() {
-                        bindPass();
-                        diag("final");
-                        g_swapInProgress.erase(token);
-                        SKSE::log::info("carrier swap: verification complete for token '{}'", token);
-                    });
-                });
-        }
-
-        // FALLBACK swap executor (plan X, legacy single-token boxes with no twin).
-        // A full actor-3D rebuild: every game load re-dresses the token and
-        // everything binds, so DoReset3D(false) is that primitive on demand. The
-        // rebuild re-dresses every worn item through the engine's own load path, the
-        // new (uncached) carrier path loads, FSMP merges its bones, CEF's Load3D hook
-        // re-injects, and the verification passes make the rebind deterministic.
-        // Costs a brief whole-character rebuild (same as closing RaceMenu). Retained
-        // as the fallback for boxes without a twin, and for the future head-part
-        // path (approach C) which needs DoReset3D anyway.
-        void RunCarrierSwapReset(const std::string& a_token,
-            const std::vector<std::string>& a_contents, int a_slot)
-        {
-            const std::uint32_t formId = ResolveFormId(a_token);
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player || player->GetWornArmor(formId) == nullptr) {
-                return;  // not worn: the next normal equip loads the new path anyway
-            }
-            g_swapInProgress.insert(a_token);
-            for (const auto& c : a_contents) {
-                HideInjectedNodes(c);  // nothing may hold the old carrier's dying bones
-            }
-            const int slot = a_slot;
-            SKSE::log::info("carrier swap: DoReset3D for token '{}' (slot {})", a_token, slot);
-            player->DoReset3D(false);
-            WaitUntil([slot]() { return SlotHas3D(slot); }, 250, 60,
-                [token = a_token, contents = a_contents](bool a_on) {
-                    if (!a_on) {
-                        SKSE::log::warn("carrier swap: rebuilt 3D not observed in slot (verifying anyway)");
-                    }
-                    VerifySwapBinds(token, contents);
-                });
-        }
-
-        // The plan-Y swap executor: FLIP to the twin token. We UNEQUIP the worn twin
-        // and EQUIP the other; the inactive twin's carrier (repointed to the newest
-        // revision by ApplyCarrierOverridesImpl, uncached this session) loads with
-        // FSMP re-merging its bones. No whole-actor rebuild; the change is local to
-        // this slot. The twins share the token's biped slot, so equipping one would
-        // auto-replace the other - but we do the unequip EXPLICITLY so the swap is
-        // deterministic and CONVERGES a co-equipped state back to a single worn twin
-        // (both worn = both carriers present = ambiguous binds, and the next swap
-        // degenerates into a same-item re-equip that queue-cancels). Unequip(A) then
-        // Equip(B) are DISTINCT items, so they do NOT queue-cancel the way an A/A
-        // unequip+equip did.
-        void RunCarrierSwap(const std::string& a_token, const std::string& a_tokenB,
-            const std::vector<std::string>& a_contents, int a_slot)
-        {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player) {
-                return;
-            }
-            const std::uint32_t formA = ResolveFormId(a_token);
-            const std::uint32_t formB = a_tokenB.empty() ? 0 : ResolveFormId(a_tokenB);
-            if (formB == 0) {
-                RunCarrierSwapReset(a_token, a_contents, a_slot);  // no twin: fall back
-                return;
-            }
-            const bool wornA = player->GetWornArmor(formA) != nullptr;
-            const bool wornB = player->GetWornArmor(formB) != nullptr;
-            if (!wornA && !wornB) {
-                return;  // neither twin worn: the next normal equip loads the new path
-            }
-            // Flip TO the inactive twin; unequip whichever is currently worn (both, if
-            // a prior swap left them co-equipped - this converges back to one worn).
-            const std::uint32_t inactiveForm = wornA ? formB : formA;
-            auto* inForm = RE::TESForm::LookupByID(inactiveForm);
-            auto* inObj = inForm ? inForm->As<RE::TESBoundObject>() : nullptr;
-            auto* eqm = RE::ActorEquipManager::GetSingleton();
-            if (!inObj || !eqm) {
-                return;
-            }
-            auto boundOf = [](std::uint32_t a_form) -> RE::TESBoundObject* {
-                auto* form = a_form ? RE::TESForm::LookupByID(a_form) : nullptr;
-                return form ? form->As<RE::TESBoundObject>() : nullptr;
-            };
-            // Guard keyed by the canonical (A) token, matching ApplyCarrierOverridesImpl.
-            g_swapInProgress.insert(a_token);
-            for (const auto& c : a_contents) {
-                HideInjectedNodes(c);  // nothing may hold the old carrier's dying bones
-            }
-            // Give the inactive twin on demand: it is NOT distributed up front (it
-            // exists only to receive swaps), so it may be absent from the inventory.
-            const auto counts = player->GetInventoryCounts();
-            const auto cit = counts.find(inObj);
-            if (cit == counts.end() || cit->second <= 0) {
-                player->AddObjectToContainer(inObj, nullptr, 1, nullptr);
-            }
-            const int slot = a_slot;
-            const bool coEquip = wornA && wornB;
-            // Snapshot the carriers present BEFORE the equip so the box's carrier reads
-            // as the id that then APPEARS (VerifyTwinSwapBinds pins the bind to it).
-            const std::vector<std::string> beforeIds = CollectFsmpCarrierIds();
-            SKSE::log::info("carrier swap: flip token '{}' -> twin {:08X} (slot {})",
-                a_token, inactiveForm, slot);
-            // NATIVE SLOT REPLACEMENT: equip the OTHER twin on the SAME slot 44 as a
-            // SINGLE queued op - the engine unequips the current twin and loads the new
-            // carrier, exactly like a manual re-equip (which works). Do NOT issue a
-            // separate unequip+equip pair: an immediate (applyNow) pair COALESCES to a
-            // no-op, and a queued pair STALLS in the equip queue for >10s (both observed
-            // in-game). VerifyTwinSwapBinds waits for the flip to actually land.
-            if (coEquip) {
-                // Both worn (old-save leftover): equipping the already-worn target is a
-                // no-op, so unequip the OTHER twin to converge back to one worn.
-                if (auto* other = boundOf(inactiveForm == formA ? formB : formA)) {
-                    eqm->UnequipObject(player, other, nullptr, 1, nullptr,
-                        /*queueEquip*/ true, /*force*/ false, /*sounds*/ false, /*applyNow*/ false);
-                }
-            }
-            eqm->EquipObject(player, inObj, nullptr, 1, nullptr,
-                /*queueEquip*/ true, /*force*/ false, /*sounds*/ true, /*applyNow*/ false);
-            VerifyTwinSwapBinds(a_token, inactiveForm, formA, formB, a_contents, beforeIds);
-        }
-
         // Repoint a token ARMO's carrier ARMA (both sexes) at a_file. Returns true if
         // the path actually changed (the ARMA was on a different revision before).
         bool RepointCarrier(RE::TESObjectARMO* a_armo, const std::string& a_file)
@@ -600,27 +338,22 @@ namespace CostumeFW
                         key, file);
                     continue;
                 }
-                // Repoint the token's carrier ARMA (both twins, if a tokenB exists) to
-                // the newest revision. USER-DRIVEN APPLY: the new carrier LOADS when the
-                // user re-equips the token - we do NOT auto-swap. A programmatic re-equip
-                // either coalesces to a no-op (applyNow) or stalls in the equip queue for
-                // >10s (queued), and even when the flip lands there is no reliable signal
-                // to bind the content to the LIVE carrier amid FSMP's id reuse + stale-
-                // carrier accumulation (plan Y history). A manual re-equip reloads cleanly
-                // every time (FSMP has settled), so we let the user drive the apply.
-                auto* armoB = b.tokenB.empty() ? nullptr : ResolveArmo(b.tokenB);
-                const bool changed = RepointCarrier(armoA, file);
-                RepointCarrier(armoB, file);
-                if (changed) {
+                // Repoint the token's carrier ARMA at the newest revision. USER-DRIVEN
+                // APPLY: the new carrier LOADS when the user re-equips the token - CEF
+                // does NOT auto-swap (a programmatic re-equip coalesces / stalls in the
+                // equip queue and can't be automated reliably). A manual re-equip reloads
+                // cleanly once FSMP has settled.
+                if (RepointCarrier(armoA, file)) {
                     SKSE::log::info("carrier override: slot {} token '{}' -> {} (re-equip to apply)",
                         key, b.token, file);
                     anyChanged = true;
                 }
             }
-            // Runtime content change (not the load-time pass): prompt the user to re-equip
-            // the box token so the freshly-built carrier loads and its SMP applies.
+            // Runtime content change (not the load-time pass): prompt the user to re-equip.
+            // FSMP merges the new carrier's bones asynchronously, so it can take a couple
+            // of re-equips to catch - tell the user to repeat until the SMP sways.
             if (a_refreshChanged && anyChanged) {
-                RE::DebugNotification("Costume Box updated - re-equip the box token to apply");
+                RE::DebugNotification("Costume Box updated - re-equip the box token until the outfit sways");
             }
         }
 
@@ -724,7 +457,6 @@ namespace CostumeFW
         g_genderModes.clear();
         g_contentEnchants.clear();
         g_persistPreset.clear();
-        g_lastSwappedFile.clear();  // repopulated by ApplyCarrierOverridesImpl(false) below
         g_cefEnabled = true;
 
         // Read CEF_settings.json; fall back to the legacy costume_boxes.json once
@@ -758,8 +490,6 @@ namespace CostumeFW
             if (b.token.empty()) {
                 continue;
             }
-            // Migration: old settings have no "tokenB" -> "" (single-token legacy).
-            b.tokenB = jb.value("tokenB", std::string{});
             for (const auto& c : jb.value("contents", nlohmann::json::array())) {
                 if (c.is_string()) {
                     b.contents.push_back(c.get<std::string>());
@@ -866,32 +596,8 @@ namespace CostumeFW
             if (ResolveFormId(b.token) == a_form) {
                 return true;
             }
-            if (!b.tokenB.empty() && ResolveFormId(b.tokenB) == a_form) {
-                return true;
-            }
         }
         return false;
-    }
-
-    std::uint32_t TwinTokenForm(std::uint32_t a_tokenForm)
-    {
-        if (a_tokenForm == 0) {
-            return 0;
-        }
-        for (const auto& b : g_boxes) {
-            if (b.tokenB.empty()) {
-                continue;
-            }
-            const std::uint32_t a = ResolveFormId(b.token);
-            const std::uint32_t bb = ResolveFormId(b.tokenB);
-            if (a == a_tokenForm) {
-                return bb;
-            }
-            if (bb == a_tokenForm) {
-                return a;
-            }
-        }
-        return 0;
     }
 
     void ReplenishToken(std::uint32_t a_tokenForm)
@@ -900,15 +606,9 @@ namespace CostumeFW
             return;
         }
         // Only replenish a token whose box is ENABLED (distribution on). A disabled
-        // box's token is meant to be gone, so don't fight the user removing it. The
-        // B twin is SWAP-managed (on-demand added by RunCarrierSwap, never distributed
-        // up front), so it is deliberately NOT replenished here - IsBoxToken recognizes
-        // it (for worn/hide gating) but ContainerSink's replenish must not act on it.
+        // box's token is meant to be gone, so don't fight the user removing it.
         bool enabledBox = false;
         for (const auto& b : g_boxes) {
-            if (!b.tokenB.empty() && ResolveFormId(b.tokenB) == a_tokenForm) {
-                return;  // B twin: swap-managed, not replenished
-            }
             if (ResolveFormId(b.token) == a_tokenForm) {
                 enabledBox = b.enabled;
                 break;
@@ -1462,9 +1162,6 @@ namespace CostumeFW
                 type = AT::kHeavyArmor;
             }
             ApplyStatsToToken(a_box.token, a_box, armorSum, weightSum, type);
-            if (!a_box.tokenB.empty()) {
-                ApplyStatsToToken(a_box.tokenB, a_box, armorSum, weightSum, type);
-            }
         }
 
         // Clear a token ARMO's stat fields (freed box / disabled).
@@ -1803,13 +1500,9 @@ namespace CostumeFW
         if (idx < 0) {
             return false;
         }
-        const std::string tokenB = g_boxes[idx].tokenB;  // capture before erase
         g_boxes.erase(g_boxes.begin() + idx);  // caller detaches each content node
         WriteJson();
         ResetTokenStats(a_token);  // freed token: clear its stat fields
-        if (!tokenB.empty()) {
-            ResetTokenStats(tokenB);  // twin too (plan Y)
-        }
         return true;
     }
 
