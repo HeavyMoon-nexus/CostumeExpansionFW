@@ -365,6 +365,10 @@ namespace CostumeFW
         // of CEF_sync_command.txt (one line: the command to run); absent = manual
         // mode (run sync_carriers.cmd + `cef carriers` yourself).
         constexpr const char* kSyncCommandPath = "Data\\SKSE\\Plugins\\CEF_sync_command.txt";
+        // nifcarrier's stdout/stderr is captured here (truncated each run) so the
+        // [sync]/[merge] decisions - e.g. a content excluded, veil kept bones-only -
+        // are visible instead of discarded. Lands in MO2 overwrite via the VFS.
+        constexpr const char* kSyncLogPath = "Data\\SKSE\\Plugins\\CEF_sync.log";
         constexpr int kSyncDebounceMs = 2000;     // MCM edits come in bursts
         constexpr DWORD kSyncTimeoutMs = 120000;  // safety net for a wedged child
 
@@ -402,8 +406,30 @@ namespace CostumeFW
             PROCESS_INFORMATION pi{};
             std::vector<char> buf(full.begin(), full.end());
             buf.push_back('\0');
-            if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                    nullptr, nullptr, &si, &pi)) {
+
+            // Redirect the child's stdout+stderr into CEF_sync.log (truncate per run)
+            // so nifcarrier's diagnostics survive. Inheritable handle; BOTH streams
+            // point at it. On failure we just run without redirection (log lost, sync
+            // still works). Console output is Shift-JIS - readable in a JP text editor.
+            SECURITY_ATTRIBUTES sa{};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+            HANDLE hLog = CreateFileA(kSyncLogPath, GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL, nullptr);
+            const BOOL inherit = (hLog != INVALID_HANDLE_VALUE) ? TRUE : FALSE;
+            if (inherit) {
+                si.dwFlags |= STARTF_USESTDHANDLES;
+                si.hStdOutput = hLog;
+                si.hStdError = hLog;
+                si.hStdInput = INVALID_HANDLE_VALUE;
+            }
+            BOOL ok = CreateProcessA(nullptr, buf.data(), nullptr, nullptr, inherit,
+                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                CloseHandle(hLog);  // child holds its own inherited copy
+            }
+            if (!ok) {
                 SKSE::log::error("auto-sync: CreateProcess failed ({}) for: {}", GetLastError(), cmd);
                 g_syncRunning = false;
                 return;

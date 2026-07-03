@@ -2,7 +2,25 @@
 
 ## Unreleased
 
+### Changed
+- **Carrier apply is user-driven (re-equip to apply):** when a box's content set
+  changes, CEF now rebuilds the carrier and repoints the token ARMA at the new
+  revision, then asks you to *re-equip the box token until the outfit sways* — it
+  no longer tries to swap the token for you. Programmatic re-equips coalesce or
+  stall in the equip queue, and FSMP recycles carrier ids while leaving the old
+  carrier alive for a few seconds, so an auto-swap could bind the injected mesh to
+  a dying carrier and leave it floating. A manual re-equip reloads cleanly once
+  FSMP has settled. The old two-token flip-flop machinery has been removed.
+
 ### Fixed
+- **Skin-only physics bones dropped from merged carriers (veil didn't sway):**
+  merging a multi-content box only walked the node hierarchy, so a content whose
+  physics bones are referenced *only* by skin data (e.g. a Pharaoh veil's
+  `PhSVeil_*`) lost those bones and went static in-game. `nifcarrier` now unions
+  every named bone (skin-referenced included, parent chains preserved). When
+  NiflySharp's cross-file shape clone would corrupt a specific content's SSE vertex
+  data, that content is baked in bones-only rather than dropped, so the rest keep
+  their collision meshes.
 - **Carrier divide-by-zero CTD (Box44 class):** a box whose merged FSMP carrier NIF
   contained non-SSE geometry (`NiTriShape`) or a degenerate skin partition crashed the
   game with `EXCEPTION_INT_DIVIDE_BY_ZERO` in the vanilla skin-partition loader whenever
@@ -13,6 +31,14 @@
   good carrier + revision otherwise). New `nifcarrier validate <nif>` diagnostic. CEF's
   `ApplyCarrierOverrides` no longer repoints a token ARMA at a carrier file missing on
   disk (falls back to the ESP-default empty carrier).
+- **One broken content no longer sinks a whole box:** a content that can't be
+  resolved under the data roots (or whose physics XML is missing) is now *excluded*
+  with a warning and the carrier is rebuilt from the rest, matching how a
+  crash-prone content is already handled — instead of failing the entire box. A box
+  that declared contents but resolved none keeps its previous carrier rather than
+  clobbering it down to empty (guards a transient path miss). Auto-sync also
+  captures nifcarrier's output to `Data\SKSE\Plugins\CEF_sync.log` (truncated each
+  run) so the `[sync]`/`[merge]` decisions are visible instead of discarded.
 
 ### Added
 - **External hard kill-switch (crash recovery):** CEF can now be fully disabled from

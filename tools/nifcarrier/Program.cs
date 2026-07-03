@@ -822,14 +822,18 @@ class Program
             string hashPath = System.IO.Path.Combine(carrierDir, $"Box{slot}_carrier.hash");
 
             // Collect SMP contents: (resolved nif, resolved xml)
+            // A content that can't be resolved/validated is EXCLUDED (warn + drop),
+            // NOT failed - one broken content must never sink the whole box; the
+            // carrier is rebuilt from the rest, mirroring the Defense-B exclusion.
+            var contentsArr = box.GetProperty("contents");
+            int declared = contentsArr.GetArrayLength();
             var smp = new List<(string nif, string xmlDisk, string xmlRel)>();
-            bool resolveError = false;
-            foreach (var c in box.GetProperty("contents").EnumerateArray())
+            foreach (var c in contentsArr.EnumerateArray())
             {
                 string rel = c.GetProperty("nif").GetString();
                 string nifDisk = ResolveAgainstRoots(rel, dataRoots, meshesRel: true);
                 if (nifDisk == null)
-                { Console.WriteLine($"[sync] box{slot}: cannot resolve '{rel}' under data roots"); resolveError = true; continue; }
+                { Console.WriteLine($"[sync] box{slot}: WARNING content '{rel}' EXCLUDED — cannot resolve under data roots; box built from the rest"); continue; }
                 string xmlRel = GetHdtXmlPath(nifDisk);
                 if (xmlRel == null) continue; // not an SMP content
                 // Defense B: exclude a content whose skin data would crash the
@@ -842,10 +846,19 @@ class Program
                 }
                 string xmlDisk2 = ResolveAgainstRoots(xmlRel, dataRoots, meshesRel: false);
                 if (xmlDisk2 == null)
-                { Console.WriteLine($"[sync] box{slot}: physics xml '{xmlRel}' not found under data roots"); resolveError = true; continue; }
+                { Console.WriteLine($"[sync] box{slot}: WARNING content '{rel}' EXCLUDED — physics xml '{xmlRel}' not found under data roots; box built from the rest"); continue; }
                 smp.Add((nifDisk, xmlDisk2, xmlRel));
             }
-            if (resolveError) { failed++; continue; }
+
+            // A box that DECLARED contents but resolved none must not clobber a good
+            // carrier down to empty - that would strip physics on a transient path
+            // miss. Keep the last good build (Defense A/B: never lose it). Genuinely
+            // empty boxes (declared == 0) still fall through to the --empty template.
+            if (declared > 0 && smp.Count == 0 && System.IO.File.Exists(carrierPath))
+            {
+                Console.WriteLine($"[sync] box{slot}: all {declared} declared content(s) unresolved/excluded — keeping previous carrier");
+                EnsurePool(); skipped++; continue;
+            }
 
             // Hash inputs; skip when unchanged
             var h = new System.Text.StringBuilder("v1|");
