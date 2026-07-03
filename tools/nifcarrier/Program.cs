@@ -739,6 +739,321 @@ class Program
         return ok ? 0 : 2;
     }
 
+    // ---------------------------------------------------------------------------
+    // approach-C head carrier (facegen path ②). Structurally a box carrier
+    // (physics bones + zero-alpha'd shapes + HDT xml extra data), plus three
+    // requirements the facegen path adds on top of the armor path:
+    //   R1. the "HDT Skinned Mesh Physics Object" extra data must hang on the
+    //       MODEL ROOT node - FSMP's scanBBP walks only the root's own extra
+    //       data list, and the head path scans the head-part model root
+    //       (FMD->faceNode; APPROACH_C §9-2).
+    //   R2. at least one skinned shape must list, in its skin bones, a bone
+    //       that is NOT in the live skeleton - the head path calls
+    //       doSkeletonMerge only from the per-bone unresolved branch
+    //       (ActorManager.cpp:1535); a carrier skinned purely to vanilla bones
+    //       never merges its physics chains and physics stays dead
+    //       (FSMP_REINVESTIGATION.md §2-2). The armor path has no such gate.
+    //   R3. every custom bone must be REACHABLE in the node tree -
+    //       doSkeletonMerge walks the scene graph only, so a bone block that
+    //       exists but hangs off nothing (skin-only, e.g. Pharaoh_Veil's
+    //       PhSVeil_*) is never created on the skeleton (the head-path twin of
+    //       the §3-C merge bug; multi-content Merge already unions these,
+    //       single-content carriers need the tree completed explicitly).
+    //
+    // "Not in the live skeleton" can't be known offline; the proxy: vanilla /
+    // XPMSSE skeleton nodes follow well-known naming, custom physics bones
+    // don't. In-game `cef headdiag` remains the ground truth.
+    static readonly string[] LIVE_BONE_PREFIXES = {
+        "NPC ", "CME ", "MOV ", "AnimObject", "Camera", "Weapon", "Shield",
+        "Quiver", "SaddleBone", "HorseSpine", "Bip01"
+    };
+    static readonly string[] LIVE_BONE_EXACT = {
+        "NPC", "Root", "MagicEffectsNode", "BSFaceGenNiNodeSkinned"
+    };
+
+    static bool LooksLiveSkeletonBone(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return true;
+        foreach (var p in LIVE_BONE_PREFIXES)
+            if (name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (var e in LIVE_BONE_EXACT)
+            if (string.Equals(name, e, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // The root-attached HDT extra data (or null): R1 above.
+    static NiStringExtraData RootHdtExtra(NifFile nif)
+    {
+        var root = nif.GetRootNode();
+        if (root == null) return null;
+        foreach (var r in root.ExtraDataList.References)
+        {
+            var sed = nif.GetBlock<NiStringExtraData>(r);
+            if (sed != null && sed.Name?.String == HDT_EXTRA) return sed;
+        }
+        return null;
+    }
+
+    // Re-attach a stray HDT extra data to the root's extra-data list (R1
+    // fix-up). SMP convention IS root, but a content that carries it elsewhere
+    // would work on the armor path and silently die on the head path.
+    static bool EnsureRootHdtExtra(NifFile nif)
+    {
+        if (RootHdtExtra(nif) != null) return true;
+        var stray = nif.Blocks.OfType<NiStringExtraData>()
+            .FirstOrDefault(b => b.Name?.String == HDT_EXTRA);
+        if (stray == null) return false;
+        if (!nif.GetBlockIndex(stray, out int id)) return false;
+        nif.GetRootNode().ExtraDataList.AddBlockRef(id);
+        Console.WriteLine("[headcarrier] HDT extra data was not root-attached - re-attached to root");
+        return RootHdtExtra(nif) != null;
+    }
+
+    // All node names reachable from the root via Children (the tree
+    // doSkeletonMerge actually walks). Root's own name included.
+    static HashSet<string> TreeNodeNames(NifFile nif)
+    {
+        var names = new HashSet<string>();
+        void Walk(NiNode n)
+        {
+            if (n == null) return;
+            var nm = n.Name?.String;
+            if (nm != null && !names.Add(nm)) return;  // cycle/dup guard
+            foreach (var r in n.Children.References)
+                if (nif.GetBlock<NiNode>(r) is NiNode c) Walk(c);
+        }
+        Walk(nif.GetRootNode());
+        return names;
+    }
+
+    // R3 fix-up: parent every orphaned named NiNode block (referenced only from
+    // a skin instance's bone ptr array, not from the scene graph) under the
+    // root, so the head path's doSkeletonMerge can see it. Same rescue
+    // MergeBones does across files, applied within one file.
+    static int CompleteBoneTree(NifFile nif)
+    {
+        var root = nif.GetRootNode();
+        int reparented = 0;
+        foreach (var b in nif.Blocks.Where(x => x.GetType().Name == "NiNode" && NameOf(x) != null).ToList())
+        {
+            var node = (NiNode)b;
+            if (ReferenceEquals(node, root)) continue;
+            if (nif.GetParentNode(node) != null) continue;
+            if (!nif.GetBlockIndex(node, out int id)) continue;
+            root.Children.AddBlockRef(id);
+            reparented++;
+            Console.WriteLine($"[headcarrier] orphan bone '{NameOf(node)}' re-parented under root (was skin-only)");
+        }
+        return reparented;
+    }
+
+    // Anchor re-route that (unlike the plain `anchor` verb) reuses an existing
+    // same-named node and leaves live-named branches (NPC *, CME *, ...) where
+    // they are - so a content whose chains already hang under "NPC Pelvis
+    // [Pelv]" is not double-nested (APPROACH_C §9-10 recipe).
+    static (int moved, int kept) AnchorInMemory(NifFile nif, string anchorName)
+    {
+        var root = nif.GetRootNode();
+        var anchor = nif.FindBlockByName<NiNode>(anchorName);
+        if (anchor == null)
+        {
+            anchor = new NiNode { Name = new NiStringRef(anchorName) };
+            int anchorId = nif.AddBlock(anchor);
+            root.Children.AddBlockRef(anchorId);
+        }
+        int moved = 0, kept = 0;
+        foreach (var r in root.Children.References.ToList())
+        {
+            var n = nif.GetBlock<NiNode>(r);
+            if (n == null || ReferenceEquals(n, anchor)) continue;
+            string nm = NameOf(n);
+            if (nm != null && LooksLiveSkeletonBone(nm)) { kept++; continue; }
+            anchor.Children.AddBlockRef(r.Index);
+            r.Clear();
+            moved++;
+        }
+        return (moved, kept);
+    }
+
+    static int AnchorSmart(string inPath, string outPath, string anchorName)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[anchorsmart] FAILED to load {inPath}"); return 1; }
+        var (moved, kept) = AnchorInMemory(nif, anchorName);
+        Console.WriteLine($"[anchorsmart] '{anchorName}': moved {moved} root branch(es) under it, kept {kept} live-named branch(es) at root");
+        if (nif.Save(outPath, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[anchorsmart] FAILED to save {outPath}"); return 1; }
+        return 0;
+    }
+
+    // Offline gate for a facegen-path carrier: R1/R2/R3 above plus the SSE
+    // divide-by-zero gate. Also useful on a known-good SMP hair NIF to
+    // sanity-check the heuristics (expected: OK), or on a raw content to see
+    // whether it needs headcarrier's fix-ups (veil-likes fail R3).
+    static int ValidateHead(string path)
+    {
+        var nif = new NifFile();
+        if (nif.Load(path, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[validatehead] {path}: FAILED to load (unreadable / invalid NIF)"); return 2; }
+        Report(nif, "VALIDATEHEAD " + path);
+
+        bool ctdOk = ValidateNifSkinnable(nif, out string ctdReason);
+        var rootExtra = RootHdtExtra(nif);
+        bool anyExtra = nif.Blocks.OfType<NiStringExtraData>().Any(b => b.Name?.String == HDT_EXTRA);
+        int bones = nif.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
+        var tree = TreeNodeNames(nif);
+
+        int triggers = 0;
+        var unreachable = new HashSet<string>();
+        foreach (var s in nif.GetShapes())
+        {
+            if (!s.HasSkinInstance)
+            { Console.WriteLine($"    shape '{NameOf(s)}': UNSKINNED (no merge trigger)"); continue; }
+            var names = nif.GetShapeBoneNames(s);
+            var custom = names.Where(n => !LooksLiveSkeletonBone(n)).ToList();
+            bool trig = custom.Count > 0;
+            if (trig) triggers++;
+            foreach (var c in custom)
+                if (!tree.Contains(c)) unreachable.Add(c);
+            Console.WriteLine($"    shape '{NameOf(s)}' verts={(int)s.VertexCount}: skinBones={names.Count} custom={custom.Count}{(trig ? "  TRIGGER" : "  (vanilla-only)")}");
+        }
+
+        // §9-10 anchor report: doSkeletonMerge resolves live-named nodes GLOBALLY
+        // and attaches each custom chain under its nearest NAMED ancestor - so the
+        // effective merge anchor of every chain is knowable offline. A chain top
+        // whose anchor is the model root attaches under the npc root node (works,
+        // but the rest pose then ignores any intended body-bone frame).
+        var rootNode = nif.GetRootNode();
+        var anchors = new Dictionary<string, string>();  // chainTop -> anchor
+        foreach (var b in nif.Blocks.Where(x => x.GetType().Name == "NiNode" && NameOf(x) != null))
+        {
+            if (ReferenceEquals(b, rootNode)) continue;  // the model root is not a bone
+            string nm = NameOf(b);
+            if (LooksLiveSkeletonBone(nm)) continue;
+            // nearest NAMED ancestor (unnamed nodes are transparent to the merge)
+            var p = nif.GetParentNode((NiObject)b);
+            while (p != null && p.Name?.String == null && !ReferenceEquals(p, rootNode))
+                p = nif.GetParentNode(p);
+            string pn = p == null ? "(orphan)" : (ReferenceEquals(p, rootNode) ? "(model root)" : p.Name?.String ?? "(model root)");
+            if (pn != "(orphan)" && pn != "(model root)" && !LooksLiveSkeletonBone(pn))
+                continue;  // parent is custom too -> not a chain top
+            anchors[nm] = pn;
+        }
+        foreach (var kv in anchors.OrderBy(k => k.Value).ThenBy(k => k.Key))
+            Console.WriteLine($"    chain top '{kv.Key}' -> anchors under '{kv.Value}'");
+
+        Console.WriteLine($"[validatehead] R1 rootHdtExtra={(rootExtra != null)}"
+            + (rootExtra == null && anyExtra ? "  (extra data EXISTS but NOT on root - scanBBP misses it)" : "")
+            + (rootExtra != null ? $"  xml='{rootExtra.StringData?.String}'" : ""));
+        Console.WriteLine($"[validatehead] R2 mergeTriggerShapes={triggers} (skinned shape referencing a non-live bone)");
+        Console.WriteLine($"[validatehead] R3 unreachableCustomBones={unreachable.Count}"
+            + (unreachable.Count > 0 ? $"  ({string.Join(", ", unreachable.Take(5))}{(unreachable.Count > 5 ? ", ..." : "")}) - doSkeletonMerge would never create these" : ""));
+        Console.WriteLine($"[validatehead] bones={bones}  sseSkinnable={ctdOk}{(ctdOk ? "" : " — " + ctdReason)}");
+        bool pass = ctdOk && rootExtra != null && bones > 0 && triggers > 0 && unreachable.Count == 0;
+        Console.WriteLine($"[validatehead] VERDICT: {(pass ? "OK (should fire the facegen path)" : "REJECT")}");
+        return pass ? 0 : 2;
+    }
+
+    // One-shot facegen-path carrier build:
+    //   base pick (a content owning a merge-trigger shape; its shapes load
+    //   in-place and never cross-file CloneShape, so the trigger survives even
+    //   when another content falls back to bones-only) -> merge (2+ contents)
+    //   -> zero-alpha -> in-memory final pass (R3 bone-tree completion,
+    //   optional anchor re-route, optional xml re-point, R1 root fix-up)
+    //   -> validatehead gate.
+    // NOTE multi-content: pass --xml with a PRE-MERGED xml (see mergexml); this
+    // verb takes disk paths and cannot resolve the contents' game-relative xml
+    // paths. Per-content anchors: run anchorsmart on each content first.
+    static int HeadCarrier(string[] args)
+    {
+        string outPath = null, xmlRel = null, anchorName = null;
+        var contents = new List<string>();
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--xml": xmlRel = args[++i]; break;
+                case "--anchor": anchorName = args[++i]; break;
+                default:
+                    if (outPath == null) outPath = args[i];
+                    else contents.Add(args[i]);
+                    break;
+            }
+        }
+        if (outPath == null || contents.Count == 0)
+        { Console.WriteLine("usage: headcarrier <out.nif> <content.nif> [content2 ...] [--xml <gameRelXml>] [--anchor <liveBoneName>]"); return 1; }
+
+        // CTD gate per content - loud fail (exclusion policy lives in sync, not here)
+        foreach (var c in contents)
+            if (!ValidateNifPath(c, out string why))
+            { Console.WriteLine($"[headcarrier] REJECT content '{c}' — {why}"); return 1; }
+
+        // R2: base = first content owning a merge-trigger shape
+        int baseIdx = -1;
+        for (int i = 0; i < contents.Count && baseIdx < 0; i++)
+        {
+            var n = new NifFile();
+            if (n.Load(contents[i], new NifFileLoadOptions()) != 0 || !n.Valid) continue;
+            foreach (var s in n.GetShapes())
+                if (s.HasSkinInstance && n.GetShapeBoneNames(s).Any(b => !LooksLiveSkeletonBone(b)))
+                { baseIdx = i; break; }
+        }
+        if (baseIdx < 0)
+        {
+            Console.WriteLine("[headcarrier] FAILED: no content has a skinned shape referencing a custom bone —");
+            Console.WriteLine("[headcarrier]         the facegen path would never call doSkeletonMerge (R2, FSMP_REINVESTIGATION.md §2-2)");
+            return 1;
+        }
+        if (baseIdx != 0)
+            Console.WriteLine($"[headcarrier] base reordered to '{contents[baseIdx]}' (owns a merge-trigger shape)");
+        var ordered = new List<string> { contents[baseIdx] };
+        ordered.AddRange(contents.Where((_, i) => i != baseIdx));
+
+        string tMerged = outPath + ".hc1.nif";
+        string tZa = outPath + ".hc2.nif";
+        try
+        {
+            string cur = ordered[0];
+            if (ordered.Count > 1)
+            {
+                if (Merge(tMerged, ordered.ToArray()) != 0) return 1;
+                if (xmlRel == null)
+                    Console.WriteLine("[headcarrier] WARNING: 2+ contents but no --xml — carrier keeps the base's xml; the other contents' physics configs are NOT merged");
+                cur = tMerged;
+            }
+            if (ZeroAlpha(cur, tZa) != 0) return 1;
+
+            // Final pass (in-memory): R3 completion -> anchor -> xml -> R1 -> save
+            var fin = new NifFile();
+            if (fin.Load(tZa, new NifFileLoadOptions()) != 0 || !fin.Valid)
+            { Console.WriteLine("[headcarrier] FAILED to reload assembled carrier"); return 1; }
+            int orphans = CompleteBoneTree(fin);
+            if (orphans > 0) Console.WriteLine($"[headcarrier] R3: re-parented {orphans} skin-only bone(s) into the tree");
+            if (anchorName != null)
+            {
+                var (moved, kept) = AnchorInMemory(fin, anchorName);
+                Console.WriteLine($"[headcarrier] anchor '{anchorName}': moved {moved} branch(es), kept {kept} live-named at root");
+            }
+            if (xmlRel != null)
+            {
+                var ex = fin.Blocks.OfType<NiStringExtraData>().FirstOrDefault(b => b.Name?.String == HDT_EXTRA);
+                if (ex == null)
+                { Console.WriteLine($"[headcarrier] FAILED: no '{HDT_EXTRA}' extra data to re-point"); return 1; }
+                Console.WriteLine($"[headcarrier] xml '{ex.StringData?.String}' -> '{xmlRel}'");
+                ex.StringData = new NiStringRef(xmlRel);
+            }
+            if (!EnsureRootHdtExtra(fin))
+            { Console.WriteLine($"[headcarrier] FAILED: no '{HDT_EXTRA}' extra data anywhere — not an SMP content set"); return 1; }
+            if (fin.Save(outPath, new NifFileSaveOptions()) != 0)
+            { Console.WriteLine($"[headcarrier] FAILED to save {outPath}"); return 1; }
+            Console.WriteLine($"[headcarrier] wrote {outPath}");
+        }
+        finally { TryDelete(tMerged); TryDelete(tZa); }
+
+        return ValidateHead(outPath);
+    }
+
     static int Sync(string[] args)
     {
         string manifestPath = null, outRoot = null, emptyNif = null, mo2Root = null, profile = "Default";
@@ -1012,7 +1327,10 @@ class Program
             Console.WriteLine("       nifcarrier setxml     <in.nif> <out.nif> <xmlPath>   (re-point HDT extra data at an XML)");
             Console.WriteLine("       nifcarrier sync       <manifest.json> --data <root> [--data ...] --out <cefModRoot> [--empty <token.nif>]");
             Console.WriteLine("       nifcarrier anchor     <in.nif> <out.nif> <anchorBoneName>");
+            Console.WriteLine("       nifcarrier anchorsmart <in.nif> <out.nif> <anchorBoneName>   (reuses existing node; leaves live-named branches)");
             Console.WriteLine("       nifcarrier validate   <nif>   (is it safe to bake into an SSE carrier? divide-by-zero check)");
+            Console.WriteLine("       nifcarrier validatehead <nif>   (approach-C gates: R1 root-xml / R2 merge-trigger / R3 tree-reachable)");
+            Console.WriteLine("       nifcarrier headcarrier <out.nif> <content.nif> [c2 ...] [--xml <gameRelXml>] [--anchor <liveBone>]   (approach-C facegen carrier)");
             Console.WriteLine("       nifcarrier passthrough <in.nif> <out.nif>   (T0 sanity: load->save round-trip)");
             return 1;
         }
@@ -1032,6 +1350,9 @@ class Program
                 case "validate": return Validate(args[1]);
                 case "sync": return Sync(args.Skip(1).ToArray());
                 case "anchor": return Anchor(args[1], args[2], args[3]);
+                case "anchorsmart": return AnchorSmart(args[1], args[2], args[3]);
+                case "validatehead": return ValidateHead(args[1]);
+                case "headcarrier": return HeadCarrier(args.Skip(1).ToArray());
                 case "passthrough": return Passthrough(args[1], args[2]);
                 default: Console.WriteLine($"unknown command '{args[0]}'"); return 1;
             }
