@@ -3,6 +3,7 @@
 
 #include "RE/A/ActorEquipManager.h"
 #include "RE/B/BGSBipedObjectForm.h"
+#include "RE/B/BipedAnim.h"
 #include "RE/B/BGSKeyword.h"
 #include "RE/C/ConcreteFormFactory.h"
 #include "RE/E/Effect.h"
@@ -285,16 +286,51 @@ namespace CostumeFW
 
         void ApplyCarrierOverridesImpl(bool a_refreshChanged);  // fwd (recursion via requeue)
 
-        // The swap sequencer. In-game 2026-07-03 showed two failure modes of the
-        // naive "repoint + re-equip": (1) injected meshes re-bound to the OLD
-        // carrier's renamed bones in the unequip->clean window - a bind that looks
-        // successful but the nodes die at FSMP's next cleanArmor sweep, leaving
-        // invisible/broken meshes the retry system never touches ("bound" != needs
-        // retry); (2) the new carrier's async model load outlives the rebind-retry
-        // budget. So: detach the box's contents FIRST (nothing can hold stale
-        // bones), unequip, equip after the detach settles, then run detach+
-        // Reconcile verification passes while the new carrier attaches.
-        void RunCarrierSwap(const std::string& a_token, const std::vector<std::string>& a_contents)
+        // Poll a predicate on the main thread until it holds (a_then(true)) or the
+        // attempts run out (a_then(false)).
+        void WaitUntil(std::function<bool()> a_pred, int a_intervalMs, int a_maxTries,
+            std::function<void(bool)> a_then)
+        {
+            if (a_pred()) {
+                a_then(true);
+                return;
+            }
+            if (a_maxTries <= 0) {
+                a_then(false);
+                return;
+            }
+            RunAfterDelayMs(a_intervalMs, [a_pred = std::move(a_pred), a_intervalMs, a_maxTries,
+                                              a_then = std::move(a_then)]() mutable {
+                WaitUntil(std::move(a_pred), a_intervalMs, a_maxTries - 1, std::move(a_then));
+            });
+        }
+
+        // Is a 3D part currently attached in the player's biped slot?
+        bool SlotHas3D(int a_slot)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player || a_slot < 30 || a_slot > 61) {
+                return false;
+            }
+            const auto& biped = player->GetActorRuntimeData().biped;
+            if (!biped) {
+                return false;
+            }
+            return biped->objects[a_slot - 30].partClone != nullptr;
+        }
+
+        // The swap sequencer, STATE-verified. Fixed-timer variants failed twice
+        // in-game: (1) injected meshes re-bound to the OLD carrier's renamed bones
+        // in the unequip->clean window (a "successful" bind onto nodes that die at
+        // FSMP's next cleanArmor sweep); (2) a timed unequip+equip of the SAME item
+        // can cancel out with NO 3D rebuild at all - the old FSMP system (old id)
+        // survived a 600ms two-phase swap and the new carrier never loaded (kuno/
+        // coco add, 2026-07-03). So: detach the box's contents first (nothing holds
+        // dying bones), unequip and WAIT until the slot 3D is really gone, equip
+        // and WAIT until the new 3D is really attached (FSMP merges its bones
+        // synchronously inside that attach), then detach+Reconcile verify passes.
+        void RunCarrierSwap(const std::string& a_token, const std::vector<std::string>& a_contents,
+            int a_slot)
         {
             const std::uint32_t formId = ResolveFormId(a_token);
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -311,35 +347,47 @@ namespace CostumeFW
             for (const auto& c : a_contents) {
                 HideInjectedNodes(c);  // pre-detach (keep registered): no stale binds to dying bones
             }
-            eqm->UnequipObject(player, obj);
             const std::string token = a_token;
             const std::vector<std::string> contents = a_contents;
-            RunAfterDelayMs(600, [formId, token, contents]() {
-                auto* pl = RE::PlayerCharacter::GetSingleton();
-                auto* f = RE::TESForm::LookupByID(formId);
-                auto* o = f ? f->As<RE::TESBoundObject>() : nullptr;
-                if (pl && o) {
-                    if (auto* m = RE::ActorEquipManager::GetSingleton()) {
-                        m->EquipObject(pl, o);
-                        SKSE::log::info("carrier swap: re-equipped token '{}'", token);
+            const int slot = a_slot;
+
+            eqm->UnequipObject(player, obj);
+            WaitUntil([slot]() { return !SlotHas3D(slot); }, 150, 30,
+                [formId, token, contents, slot](bool a_gone) {
+                    if (!a_gone) {
+                        SKSE::log::warn("carrier swap: slot {} 3D never detached (proceeding)", slot);
                     }
-                }
-                // Verification passes: the fresh carrier attaches asynchronously
-                // (multi-MB NIFs take seconds). Detach + Reconcile re-runs the
-                // bind cleanly; anything still static falls to the retry system.
-                auto verify = [token, contents](bool a_last) {
-                    for (const auto& c : contents) {
-                        HideInjectedNodes(c);  // keep registered - Reconcile below re-injects
+                    auto* pl = RE::PlayerCharacter::GetSingleton();
+                    auto* f = RE::TESForm::LookupByID(formId);
+                    auto* o = f ? f->As<RE::TESBoundObject>() : nullptr;
+                    if (pl && o) {
+                        if (auto* m = RE::ActorEquipManager::GetSingleton()) {
+                            m->EquipObject(pl, o);
+                            SKSE::log::info("carrier swap: re-equipped token '{}' (slot {} detachObserved={})",
+                                token, slot, a_gone);
+                        }
                     }
-                    Reconcile();
-                    if (a_last) {
-                        g_swapInProgress.erase(token);
-                        SKSE::log::info("carrier swap: verification complete for token '{}'", token);
-                    }
-                };
-                RunAfterDelayMs(1500, [verify]() { verify(false); });
-                RunAfterDelayMs(4000, [verify]() { verify(true); });
-            });
+                    WaitUntil([slot]() { return SlotHas3D(slot); }, 200, 50,
+                        [token, contents](bool a_on) {
+                            if (!a_on) {
+                                SKSE::log::warn("carrier swap: new carrier 3D not observed (verifying anyway)");
+                            }
+                            auto verify = [token, contents](bool a_last) {
+                                for (const auto& c : contents) {
+                                    HideInjectedNodes(c);  // keep registered - Reconcile re-injects
+                                }
+                                Reconcile();
+                                if (a_last) {
+                                    g_swapInProgress.erase(token);
+                                    SKSE::log::info("carrier swap: verification complete for token '{}'", token);
+                                }
+                            };
+                            // Attach observed => FSMP bones exist (merge is synchronous
+                            // inside the attach). First pass promptly, second as safety.
+                            RunAfterDelayMs(500, [verify]() { verify(false); });
+                            RunAfterDelayMs(3000, [verify]() { verify(true); });
+                        });
+                });
         }
 
         void ApplyCarrierOverridesImpl(bool a_refreshChanged)
@@ -389,7 +437,7 @@ namespace CostumeFW
                         }
                         continue;
                     }
-                    RunCarrierSwap(b.token, b.contents);
+                    RunCarrierSwap(b.token, b.contents, SlotNumberOf(armo));
                 }
             }
         }
