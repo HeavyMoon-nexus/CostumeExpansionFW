@@ -12,11 +12,10 @@ if not exist "%DLL%" (
   echo nifcarrier is not built. Run: dotnet build -c Release
   exit /b 1
 )
+REM --mo2 reads the profile modlist.txt (enabled mods, winners-first) so NO
+REM per-mod --data maintenance is needed when boxes gain contents from new mods.
 dotnet "%DLL%" sync "K:\Mo2_SkyrimSE1170\overwrite\SKSE\plugins\CEF_carrier_manifest.json" ^
-  --data "K:\Mo2_SkyrimSE1170\mods\BODYSLIDE MESH BUILD" ^
-  --data "K:\Mo2_SkyrimSE1170\mods\Cosplay Basics - (CBBE 3BA)" ^
-  --data "K:\Mo2_SkyrimSE1170\mods\Cosplay Pack - hdt SMP (CBBE 3BA)" ^
-  --data "K:\Mo2_SkyrimSE1170\mods\[Melodic] Belua Hecate SE" ^
+  --mo2 "K:\Mo2_SkyrimSE1170" --profile Default ^
   --out "K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW" ^
   --empty "K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW\meshes\CostumeFW\boxtoken.nif"
 pause

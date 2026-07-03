@@ -611,20 +611,44 @@ class Program
 
     static int Sync(string[] args)
     {
-        string manifestPath = null, outRoot = null, emptyNif = null;
+        string manifestPath = null, outRoot = null, emptyNif = null, mo2Root = null, profile = "Default";
         var dataRoots = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
                 case "--data": dataRoots.Add(args[++i]); break;
+                case "--mo2": mo2Root = args[++i]; break;
+                case "--profile": profile = args[++i]; break;
                 case "--out": outRoot = args[++i]; break;
                 case "--empty": emptyNif = args[++i]; break;
                 default: manifestPath ??= args[i]; break;
             }
         }
+        if (mo2Root != null)
+        {
+            // Resolve data roots from the MO2 profile: overwrite first (top
+            // priority), then every ENABLED mod in modlist.txt order — the file
+            // lists mods winners-first (verified against a live instance), which
+            // matches first-hit resolution. Explicit --data roots stay ahead as
+            // deliberate overrides.
+            string ml = System.IO.Path.Combine(mo2Root, "profiles", profile, "modlist.txt");
+            if (!System.IO.File.Exists(ml))
+            { Console.WriteLine($"[sync] --mo2: modlist not found: {ml}"); return 1; }
+            var mo2Roots = new List<string> { System.IO.Path.Combine(mo2Root, "overwrite") };
+            foreach (var line in System.IO.File.ReadLines(ml))
+            {
+                if (!line.StartsWith("+")) continue;                 // enabled mods only
+                string name = line.Substring(1);
+                if (name.EndsWith("_separator")) continue;
+                string root = System.IO.Path.Combine(mo2Root, "mods", name);
+                if (System.IO.Directory.Exists(root)) mo2Roots.Add(root);
+            }
+            dataRoots.AddRange(mo2Roots);
+            Console.WriteLine($"[sync] --mo2: {mo2Roots.Count - 1} enabled mod root(s) (winners first) + overwrite, profile '{profile}'");
+        }
         if (manifestPath == null || outRoot == null || dataRoots.Count == 0)
-        { Console.WriteLine("[sync] usage: sync <manifest.json> --data <root> [--data <root>...] --out <cefModRoot> [--empty <emptyToken.nif>]"); return 1; }
+        { Console.WriteLine("[sync] usage: sync <manifest.json> (--mo2 <instanceRoot> [--profile <name>] | --data <root> [--data ...]) --out <cefModRoot> [--empty <emptyToken.nif>]"); return 1; }
 
         var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(manifestPath));
         string carrierDir = System.IO.Path.Combine(outRoot, "meshes", "CostumeFW");
