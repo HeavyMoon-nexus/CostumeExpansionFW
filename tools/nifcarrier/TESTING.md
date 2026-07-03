@@ -166,3 +166,18 @@ content 除去で復活）。「揺れない」報告の切り分けでは **car
 - 当面の運用: 同時装着する box の SMP ボーン合計を控えめに（目安: カスタムボーン 300本未満）。
 - 将来: **BLE（Bone Limit Extender）対応** — carrier のボーンは nifcarrier が全生成するため、BLE が
   認識する形式で焼けば上限を拡張できる可能性。要精査（タスク登録済み）。
+
+---
+
+## 既知の制約: NiTriShape 系 SMP 衣装はゼロ除算 CTD（2026-07-03 実機確定）
+
+**旧形式 `NiTriShape` を使う SMP 衣装を box に入れると、ゼロ除算によるエンジンレベルの CTD** が発生する
+（ユーザー実機確認）。carrier パイプライン（merge の CloneShape / zeroalpha）を通った NiTriShape で
+エンジンのスキニング系が 0 除算に落ちるとみられる（発生箇所の特定は未実施）。
+
+- **当面の運用**: NiTriShape 系の SMP 衣装は box に入れない。
+- **対策候補（未実装）**:
+  1. **sync 側で検出して除外＋WARNING**（nifcarrier は shape 型を判別できる＝`dump` の型集計を流用）。
+     CTD を構造的に防ぐ最小対策。まずこれ。
+  2. NiTriShape→BSTriShape **変換**（SSE NIF Optimizer 相当）を nifcarrier に実装（大きめの工事）。
+  3. ゼロ除算の発生箇所を特定してピンポイント回避（要デバッガ/クラッシュログ解析）。
