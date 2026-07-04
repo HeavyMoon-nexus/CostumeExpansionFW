@@ -1164,6 +1164,16 @@ class Program
         int dropped = 0;
         foreach (var s in all)
             if (!proxies.Contains(s)) { nif.RemoveBlock((NiObject)s); dropped++; }
+        // Strip the inherited HDT extra data: the proxy must NOT declare its own
+        // physics file, or FSMP creates a SECOND system for the same bones (the
+        // carrier's xml diverges from the source once per-*-shape names are
+        // rewritten, so physicsDupes would no longer dedupe them).
+        foreach (var sed in nif.Blocks.OfType<NiStringExtraData>()
+                     .Where(b => b.Name?.String == HDT_EXTRA).ToList())
+        {
+            nif.RemoveBlock(sed);
+            Console.WriteLine("[proxynif] stripped inherited HDT physics extra data");
+        }
         nif.RemoveUnreferencedBlocks();
 
         string tmp = outPath + ".px.nif";
