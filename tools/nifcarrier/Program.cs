@@ -976,7 +976,7 @@ class Program
     static int HeadCarrier(string[] args)
     {
         string outPath = null, xmlRel = null, anchorName = null;
-        bool keep1 = false;
+        bool keep1 = false, proxyShader = false;
         var contents = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
@@ -985,6 +985,7 @@ class Program
                 case "--xml": xmlRel = args[++i]; break;
                 case "--anchor": anchorName = args[++i]; break;
                 case "--keep1": keep1 = true; break;
+                case "--proxyshader": proxyShader = true; break;
                 default:
                     if (outPath == null) outPath = args[i];
                     else contents.Add(args[i]);
@@ -992,7 +993,7 @@ class Program
             }
         }
         if (outPath == null || contents.Count == 0)
-        { Console.WriteLine("usage: headcarrier <out.nif> <content.nif> [content2 ...] [--xml <gameRelXml>] [--anchor <liveBoneName>] [--keep1]"); return 1; }
+        { Console.WriteLine("usage: headcarrier <out.nif> <content.nif> [content2 ...] [--xml <gameRelXml>] [--anchor <liveBoneName>] [--keep1] [--proxyshader]"); return 1; }
 
         // CTD gate per content - loud fail (exclusion policy lives in sync, not here)
         foreach (var c in contents)
@@ -1058,11 +1059,42 @@ class Program
                     .FirstOrDefault();
                 if (keep == null)
                 { Console.WriteLine("[headcarrier] FAILED: --keep1 found no shader-bearing trigger shape"); return 1; }
+                var kept = new List<NiflySharp.INiShape> { keep };
+                if (proxyShader)
+                {
+                    // Keep shader-less SKINNED collision proxies (VirtualHead...) by
+                    // pointing them at the kept shape's shader block - zero-alpha'd,
+                    // so still invisible, but present: R4 (facegen breaks on
+                    // shader-less geometry) is satisfied AND the physics XML's
+                    // per-*-shape collision meshes stay resolvable in the facegen
+                    // system (dropping VirtualHead cost the veil its head collision,
+                    // in-game 2026-07-04).
+                    int shaderId = -1;
+                    var keptRefObj = keep.GetType().GetProperty("ShaderPropertyRef")?.GetValue(keep);
+                    if (keptRefObj != null)
+                        shaderId = (int)(keptRefObj.GetType().GetProperty("Index")?.GetValue(keptRefObj) ?? -1);
+                    foreach (var s in all)
+                    {
+                        if (ReferenceEquals(s, keep) || !s.HasSkinInstance) continue;
+                        if (fin.GetShader(s) != null) continue;  // shader-bearing extras still drop (minimal carrier)
+                        var prop = s.GetType().GetProperty("ShaderPropertyRef");
+                        if (shaderId >= 0 && prop != null && prop.CanWrite)
+                        {
+                            prop.SetValue(s, Activator.CreateInstance(prop.PropertyType, shaderId));
+                            kept.Add(s);
+                            Console.WriteLine($"[headcarrier] proxyshader: kept collision proxy '{NameOf(s)}' sharing '{NameOf(keep)}' shader (zero-alpha)");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[headcarrier] proxyshader: WARNING cannot set shader on '{NameOf(s)}' ({s.GetType().Name}) - dropped");
+                        }
+                    }
+                }
                 int dropped = 0;
                 foreach (var s in all)
-                    if (!ReferenceEquals(s, keep)) { fin.RemoveBlock((NiObject)s); dropped++; }
+                    if (!kept.Contains(s)) { fin.RemoveBlock((NiObject)s); dropped++; }
                 fin.RemoveUnreferencedBlocks();
-                Console.WriteLine($"[headcarrier] keep1: kept '{NameOf(keep)}' ({(int)keep.VertexCount} verts), dropped {dropped} shape(s) (collision proxies included - their XML collision goes inert)");
+                Console.WriteLine($"[headcarrier] keep1: kept {kept.Count} shape(s) ('{NameOf(keep)}' trigger{(kept.Count > 1 ? " + collision proxies" : "")}), dropped {dropped}");
             }
             if (anchorName != null)
             {
