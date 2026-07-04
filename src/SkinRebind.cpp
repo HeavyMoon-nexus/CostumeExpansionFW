@@ -193,13 +193,15 @@ namespace CostumeFW
             if (!a_root || !a_bone || !*a_bone) {
                 return nullptr;
             }
+            // Index 1 = Armor, 2 = Head (see match() return).
             static constexpr std::string_view kPrefixes[] = {
                 "hdtSSEPhysics_AutoRename_Armor_",
                 "hdtSSEPhysics_AutoRename_Head_",
             };
             const std::string_view bone{ a_bone };
-            auto matches = [&](std::string_view nm) {
-                for (const auto pfx : kPrefixes) {
+            auto match = [&](std::string_view nm) -> int {
+                for (std::size_t p = 0; p < 2; ++p) {
+                    const auto pfx = kPrefixes[p];
                     if (nm.size() != pfx.size() + 8 + 1 + bone.size()) {
                         continue;
                     }
@@ -217,10 +219,19 @@ namespace CostumeFW
                     if (nm.substr(pfx.size() + 8 + 1) != bone) {
                         continue;
                     }
-                    return true;
+                    return static_cast<int>(p) + 1;
                 }
-                return false;
+                return 0;
             };
+            // PREFER a _Head_ match over an _Armor_ one when both exist. A Head
+            // merge comes from a registered head part = durable (survives outfit
+            // changes, rebuilt from the save). An Armor merge comes from a WORN
+            // item = transient: unequipping kills its nodes, and a mesh bound
+            // there stretches to garbage (seen in-game 2026-07-04 when the veil
+            // ARMO was worn during MCM capture and then swapped out). Box
+            // contents are hidden while their token is unworn, so preferring
+            // Head never leaves them bound to a dead node either.
+            RE::NiAVObject* armorHit = nullptr;
             std::vector<RE::NiAVObject*> stack{ a_root };
             while (!stack.empty()) {
                 auto* obj = stack.back();
@@ -228,8 +239,12 @@ namespace CostumeFW
                 if (!obj) {
                     continue;
                 }
-                if (matches(std::string_view(obj->name.c_str()))) {
-                    return obj;
+                const int m = match(std::string_view(obj->name.c_str()));
+                if (m == 2) {
+                    return obj;  // Head match wins immediately
+                }
+                if (m == 1 && !armorHit) {
+                    armorHit = obj;  // remember, but keep looking for a Head match
                 }
                 if (auto* node = obj->AsNode()) {
                     for (auto& child : node->GetChildren()) {
@@ -237,7 +252,7 @@ namespace CostumeFW
                     }
                 }
             }
-            return nullptr;
+            return armorHit;
         }
 
         // --- rebind retry (FSMP carrier attach race) ---------------------------
