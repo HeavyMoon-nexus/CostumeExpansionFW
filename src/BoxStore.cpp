@@ -206,6 +206,36 @@ namespace CostumeFW
             }
             nlohmann::json doc;
             doc["version"] = 1;
+            // Resolve a colon-id content to its worn NIF path (female 3P first,
+            // male fallback - mirrors ResolveArmaModels' sex fallback). Returns
+            // a null json when the id/ARMA/model can't be resolved.
+            const auto resolveContent = [&](const std::string& id) -> nlohmann::json {
+                const auto colon = id.find(':');
+                if (colon == std::string::npos) {
+                    return nullptr;
+                }
+                const auto lid = static_cast<std::uint32_t>(
+                    std::strtoul(id.substr(0, colon).c_str(), nullptr, 16));
+                const std::string plugin = id.substr(colon + 1);
+                auto* arma = dh->LookupForm<RE::TESObjectARMA>(lid, plugin);
+                if (!arma) {
+                    if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin);
+                        armo && !armo->armorAddons.empty()) {
+                        arma = armo->armorAddons.front();
+                    }
+                }
+                if (!arma) {
+                    return nullptr;
+                }
+                const char* nif = arma->bipedModels[RE::SEXES::kFemale].model.c_str();
+                if (!nif || !*nif) {
+                    nif = arma->bipedModels[RE::SEXES::kMale].model.c_str();
+                }
+                if (!nif || !*nif) {
+                    return nullptr;
+                }
+                return { { "id", id }, { "nif", nif } };
+            };
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
                 nlohmann::json jb;
@@ -213,38 +243,27 @@ namespace CostumeFW
                 jb["token"] = b.token;
                 auto contents = nlohmann::json::array();
                 for (const auto& id : b.contents) {
-                    const auto colon = id.find(':');
-                    if (colon == std::string::npos) {
-                        continue;
+                    if (auto c = resolveContent(id); !c.is_null()) {
+                        contents.push_back(std::move(c));
                     }
-                    const auto lid = static_cast<std::uint32_t>(
-                        std::strtoul(id.substr(0, colon).c_str(), nullptr, 16));
-                    const std::string plugin = id.substr(colon + 1);
-                    auto* arma = dh->LookupForm<RE::TESObjectARMA>(lid, plugin);
-                    if (!arma) {
-                        if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin);
-                            armo && !armo->armorAddons.empty()) {
-                            arma = armo->armorAddons.front();
-                        }
-                    }
-                    if (!arma) {
-                        continue;
-                    }
-                    // Female 3P model first (CEF's dominant authoring case), male fallback
-                    // - mirrors ResolveArmaModels' sex fallback.
-                    const char* nif = arma->bipedModels[RE::SEXES::kFemale].model.c_str();
-                    if (!nif || !*nif) {
-                        nif = arma->bipedModels[RE::SEXES::kMale].model.c_str();
-                    }
-                    if (!nif || !*nif) {
-                        continue;
-                    }
-                    contents.push_back({ { "id", id }, { "nif", nif } });
                 }
                 jb["contents"] = std::move(contents);
                 arr.push_back(std::move(jb));
             }
             doc["boxes"] = std::move(arr);
+            // approach-C persist section: the token-less class rides the facegen
+            // head path. sync builds Persist_carrier/_partNN (+ the per-*-shape
+            // renamed physics XML) from these; CEF registers the head-part pool
+            // and repoints its models (stage 3b).
+            {
+                auto pcontents = nlohmann::json::array();
+                for (const auto& id : g_persist) {
+                    if (auto c = resolveContent(id); !c.is_null()) {
+                        pcontents.push_back(std::move(c));
+                    }
+                }
+                doc["persist"] = { { "contents", std::move(pcontents) } };
+            }
 
             const std::string out = doc.dump(1);
             {

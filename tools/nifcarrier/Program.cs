@@ -1191,6 +1191,351 @@ class Program
         return (shp == proxies.Count && allShader) ? 0 : 2;
     }
 
+    // ---------------------------------------------------------------------------
+    // approach-C persist pipeline (stage 3). The persist class rides the facegen
+    // head path, whose PoC-proven constraints shape everything here:
+    //   - the engine materializes ONE geometry per head part, renamed to the
+    //     part's editorID -> every mesh the physics XML references must be its
+    //     OWN head part, and the XML's per-*-shape names must be REWRITTEN to
+    //     the pool editorIDs (C §9-18).
+    //   - head parts are static ESP records -> a fixed POOL: CFW_PersistCarrier
+    //     (bones + XML + trigger shape) and CFW_PersistProxy01..NN (one per
+    //     additional collision/cloth mesh). sync assigns meshes to pool slots
+    //     and CEF registers/repoints only the assigned ones (stage 3b).
+    //   - every part NIF carries the full bone tree (merge is idempotent via
+    //     FSMP's renameMap, and processing order of sibling parts is not
+    //     guaranteed).
+    const int kMaxPersistProxies = 8;
+    const string kPersistCarrierEditorId = "CFW_PersistCarrier";
+
+    static string PersistProxyEditorId(int i) => $"CFW_PersistProxy{i:00}";
+
+    // Rewrite per-*-shape name attributes per the pool assignment.
+    static int RenameShapesInXml(string inPath, string outPath, Dictionary<string, string> renames)
+    {
+        var xdoc = System.Xml.Linq.XDocument.Load(inPath);
+        if (xdoc.Root == null) return 1;
+        int n = 0;
+        foreach (var el in xdoc.Root.Elements())
+        {
+            var tag = el.Name.LocalName;
+            if (tag != "per-vertex-shape" && tag != "per-triangle-shape") continue;
+            var nm = el.Attribute("name")?.Value;
+            if (nm != null && renames.TryGetValue(nm, out var to))
+            {
+                el.SetAttributeValue("name", to);
+                n++;
+            }
+        }
+        xdoc.Save(outPath);
+        Console.WriteLine($"[persist] xml '{System.IO.Path.GetFileName(inPath)}': renamed {n} per-*-shape name(s)");
+        return 0;
+    }
+
+    static string SyncPersistBuild(System.Text.Json.JsonElement persistEl, List<string> dataRoots,
+        string carrierDir, string xmlDir, string tmpDir, string emptyNif, int kSlots,
+        string oldFragment, ref int built, ref int skipped, ref int failed, ref int poolCreated)
+    {
+        string basePath = System.IO.Path.Combine(carrierDir, "Persist_carrier.nif");
+        string hashPath = System.IO.Path.Combine(carrierDir, "Persist_carrier.hash");
+
+        // Slot pool: placeholders must pre-exist for restart-free swaps (usvfs
+        // cannot see files created after launch). Seeded from the base carrier
+        // (or the empty token nif) - unused proxies are never REGISTERED, so
+        // their placeholder content is irrelevant.
+        int localPool = 0;
+        void EnsurePool()
+        {
+            string seed = System.IO.File.Exists(basePath) ? basePath : emptyNif;
+            for (int k = 0; k < kSlots; k++)
+            {
+                string cn = System.IO.Path.Combine(carrierDir, $"Persist_carrier_r{k}.nif");
+                if (!System.IO.File.Exists(cn) && seed != null) { System.IO.File.Copy(seed, cn); localPool++; }
+                for (int i = 1; i <= kMaxPersistProxies; i++)
+                {
+                    string pn = System.IO.Path.Combine(carrierDir, $"Persist_part{i:00}_r{k}.nif");
+                    if (!System.IO.File.Exists(pn) && seed != null) { System.IO.File.Copy(seed, pn); localPool++; }
+                }
+                string sx = System.IO.Path.Combine(xmlDir, $"Persist_physics_r{k}.xml");
+                if (!System.IO.File.Exists(sx))
+                { System.IO.File.WriteAllText(sx, "<?xml version=\"1.0\"?>\n<system></system>\n"); localPool++; }
+            }
+        }
+
+        // Resolve contents - EXCLUDE (warn + drop), never fail the whole set.
+        var smp = new List<(string nif, string xmlDisk, string xmlRel)>();
+        int declared = 0;
+        if (persistEl.ValueKind == System.Text.Json.JsonValueKind.Object &&
+            persistEl.TryGetProperty("contents", out var pcontents))
+        {
+            declared = pcontents.GetArrayLength();
+            foreach (var c in pcontents.EnumerateArray())
+            {
+                string rel = c.GetProperty("nif").GetString();
+                string nifDisk = ResolveAgainstRoots(rel, dataRoots, meshesRel: true);
+                if (nifDisk == null)
+                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — cannot resolve under data roots"); continue; }
+                string xmlRel = GetHdtXmlPath(nifDisk);
+                if (xmlRel == null) continue; // not an SMP content
+                if (!ValidateNifPath(nifDisk, out string reason))
+                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — {reason}"); continue; }
+                string xmlDisk = ResolveAgainstRoots(xmlRel, dataRoots, meshesRel: false);
+                if (xmlDisk == null)
+                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — physics xml '{xmlRel}' not found"); continue; }
+                smp.Add((nifDisk, xmlDisk, xmlRel));
+            }
+        }
+
+        if (smp.Count == 0)
+        {
+            // Empty persist set: keep previous artifacts; the registration side
+            // (CEF) decides what stays active. Guard against clobbering on a
+            // transient path miss, mirroring the box behavior.
+            if (declared > 0)
+                Console.WriteLine($"[persist] all {declared} declared content(s) unresolved/excluded — keeping previous artifacts");
+            EnsurePool();
+            poolCreated += localPool;
+            return oldFragment;
+        }
+
+        // Hash inputs; skip when unchanged
+        var h = new System.Text.StringBuilder("p1|");
+        foreach (var s in smp.OrderBy(x => x.nif))
+        {
+            var fi = new System.IO.FileInfo(s.nif);
+            var xi = new System.IO.FileInfo(s.xmlDisk);
+            h.Append($"{s.nif}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}|{s.xmlDisk}|{xi.Length}|{xi.LastWriteTimeUtc.Ticks}|");
+        }
+        string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(h.ToString())));
+        if (System.IO.File.Exists(hashPath) && System.IO.File.Exists(basePath)
+            && System.IO.File.ReadAllText(hashPath) == hash && oldFragment != null)
+        { EnsurePool(); poolCreated += localPool; skipped++; return oldFragment; }
+
+        Console.WriteLine($"[persist] {smp.Count} SMP content(s)");
+
+        // Base ordering: a trigger-owning content first (its shapes load
+        // in-place and survive another content's bones-only fallback).
+        int baseIdx = -1;
+        for (int i = 0; i < smp.Count && baseIdx < 0; i++)
+        {
+            var n = new NifFile();
+            if (n.Load(smp[i].nif, new NifFileLoadOptions()) != 0 || !n.Valid) continue;
+            foreach (var s in n.GetShapes())
+                if (s.HasSkinInstance && n.GetShader(s) != null &&
+                    n.GetShapeBoneNames(s).Any(b => !LooksLiveSkeletonBone(b)))
+                { baseIdx = i; break; }
+        }
+        if (baseIdx < 0)
+        { Console.WriteLine("[persist] FAILED: no content owns a merge-trigger shape (R2)"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+        var ordered = new List<(string nif, string xmlDisk, string xmlRel)> { smp[baseIdx] };
+        ordered.AddRange(smp.Where((_, i) => i != baseIdx));
+
+        // Master merged nif: bones union + every content's shapes (zero-alpha'd),
+        // R3-completed, root HDT extra ensured. Parts are pruned copies of this.
+        string tMg = System.IO.Path.Combine(tmpDir, "persist_mg.nif");
+        string tZa = System.IO.Path.Combine(tmpDir, "persist_za.nif");
+        string tBase = System.IO.Path.Combine(tmpDir, "persist_base.nif");
+        int rc = 0;
+        string cur = ordered[0].nif;
+        if (ordered.Count > 1)
+        {
+            rc = Merge(tMg, ordered.Select(s => s.nif).ToArray());
+            cur = tMg;
+        }
+        if (rc == 0) rc = ZeroAlpha(cur, tZa);
+        if (rc != 0)
+        { Console.WriteLine("[persist] FAILED building the master merge"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+        {
+            var fin = new NifFile();
+            if (fin.Load(tZa, new NifFileLoadOptions()) != 0 || !fin.Valid)
+            { Console.WriteLine("[persist] FAILED to reload master merge"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+            CompleteBoneTree(fin);
+            if (!EnsureRootHdtExtra(fin))
+            { Console.WriteLine("[persist] FAILED: no HDT extra data in the merged set"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+            if (fin.Save(tBase, new NifFileSaveOptions()) != 0)
+            { Console.WriteLine("[persist] FAILED to save master merge"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+        }
+
+        // Needed head meshes = every per-*-shape name across the contents' XMLs.
+        var needed = new List<string>();
+        foreach (var xmlDisk in ordered.Select(s => s.xmlDisk).Distinct())
+        {
+            try
+            {
+                var xdoc = System.Xml.Linq.XDocument.Load(xmlDisk);
+                foreach (var el in xdoc.Root.Elements())
+                {
+                    var tag = el.Name.LocalName;
+                    if (tag != "per-vertex-shape" && tag != "per-triangle-shape") continue;
+                    var nm = el.Attribute("name")?.Value;
+                    if (nm != null && !needed.Contains(nm)) needed.Add(nm);
+                }
+            }
+            catch (Exception e)
+            { Console.WriteLine($"[persist] WARNING cannot parse xml '{xmlDisk}': {e.Message}"); }
+        }
+
+        // Shape inventory of the master merge
+        var inv = new NifFile();
+        inv.Load(tBase, new NifFileLoadOptions());
+        var shapeInfo = new Dictionary<string, (bool skinned, bool shader, bool custom)>();
+        foreach (var s in inv.GetShapes())
+        {
+            string nm = NameOf(s) ?? "";
+            bool skinned = s.HasSkinInstance;
+            bool shader = inv.GetShader(s) != null;
+            bool custom = skinned && inv.GetShapeBoneNames(s).Any(b => !LooksLiveSkeletonBone(b));
+            shapeInfo[nm] = (skinned, shader, custom);
+        }
+
+        // Assignment: carrier gets a trigger-qualifying mesh (prefer one the XML
+        // references, so its rename doubles as the cloth body); remaining needed
+        // meshes go to the proxy pool in order.
+        string carrierMesh = needed.FirstOrDefault(nm =>
+            shapeInfo.TryGetValue(nm, out var si) && si.skinned && si.custom);
+        if (carrierMesh == null)
+            carrierMesh = shapeInfo.FirstOrDefault(kv => kv.Value.skinned && kv.Value.custom).Key;
+        if (carrierMesh == null)
+        { Console.WriteLine("[persist] FAILED: master merge has no trigger shape (R2)"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+
+        var assign = new List<(string mesh, string editorId)> { (carrierMesh, kPersistCarrierEditorId) };
+        int pi = 1;
+        foreach (var nm in needed)
+        {
+            if (nm == carrierMesh) continue;
+            if (!shapeInfo.TryGetValue(nm, out var si) || !si.skinned)
+            { Console.WriteLine($"[persist] WARNING collision mesh '{nm}' has no skinned shape in the merge — its collision goes inert"); continue; }
+            if (pi > kMaxPersistProxies)
+            { Console.WriteLine($"[persist] WARNING proxy pool exhausted ({kMaxPersistProxies}) — collision mesh '{nm}' goes inert"); continue; }
+            assign.Add((nm, PersistProxyEditorId(pi)));
+            pi++;
+        }
+        foreach (var (mesh, eid) in assign)
+            Console.WriteLine($"[persist] assign '{mesh}' -> {eid}");
+
+        // XML: per-content rename -> merge -> temp
+        var renames = assign.ToDictionary(a => a.mesh, a => a.editorId);
+        var txmls = new List<string>();
+        int ti = 0;
+        foreach (var xmlDisk in ordered.Select(s => s.xmlDisk).Distinct())
+        {
+            string t = System.IO.Path.Combine(tmpDir, $"persist_x{ti++}.xml");
+            if (RenameShapesInXml(xmlDisk, t, renames) != 0)
+            { Console.WriteLine($"[persist] FAILED xml transform '{xmlDisk}'"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+            txmls.Add(t);
+        }
+        string tXml = System.IO.Path.Combine(tmpDir, "persist_physics.xml");
+        if (txmls.Count == 1) System.IO.File.Copy(txmls[0], tXml, overwrite: true);
+        else if (MergeXml(tXml, txmls.ToArray()) != 0)
+        { Console.WriteLine("[persist] FAILED xml merge"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+
+        // Revision + slot paths
+        int rev = 1;
+        if (oldFragment != null)
+        {
+            try { rev = System.Text.Json.JsonDocument.Parse(oldFragment).RootElement.GetProperty("rev").GetInt32() + 1; }
+            catch { }
+        }
+        int slotIdx = rev % kSlots;
+        string slotXmlDisk = System.IO.Path.Combine(xmlDir, $"Persist_physics_r{slotIdx}.xml");
+        string slotXmlRel = $"meshes\\CostumeFW\\XML\\Persist_physics_r{slotIdx}.xml";
+
+        // Build every part into tmp, validate, then publish the whole set.
+        var partFiles = new List<(string editorId, string tmp, string slotDisk, string slotRel)>();
+        foreach (var (mesh, editorId) in assign)
+        {
+            bool isCarrier = editorId == kPersistCarrierEditorId;
+            var part = new NifFile();
+            if (part.Load(tBase, new NifFileLoadOptions()) != 0 || !part.Valid)
+            { Console.WriteLine("[persist] FAILED to reload master for part build"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+            var all = part.GetShapes().ToList();
+            var target = all.FirstOrDefault(s => (NameOf(s) ?? "") == mesh);
+            if (target == null)
+            { Console.WriteLine($"[persist] FAILED: shape '{mesh}' missing from master"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+            // Borrow a shader BEFORE dropping the donor (R4: facegen breaks on
+            // shader-less geometry).
+            if (part.GetShader(target) == null)
+            {
+                var donor = all.FirstOrDefault(s => part.GetShader(s) != null);
+                var dref = donor?.GetType().GetProperty("ShaderPropertyRef")?.GetValue(donor);
+                int sid = dref != null ? (int)(dref.GetType().GetProperty("Index")?.GetValue(dref) ?? -1) : -1;
+                var prop = target.GetType().GetProperty("ShaderPropertyRef");
+                if (sid < 0 || prop == null || !prop.CanWrite)
+                { Console.WriteLine($"[persist] FAILED: cannot shader-fix proxy '{mesh}'"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+                prop.SetValue(target, Activator.CreateInstance(prop.PropertyType, sid));
+            }
+            foreach (var s in all)
+                if (!ReferenceEquals(s, target)) part.RemoveBlock((NiObject)s);
+            if (isCarrier)
+            {
+                var ex = part.Blocks.OfType<NiStringExtraData>().FirstOrDefault(b => b.Name?.String == HDT_EXTRA);
+                if (ex == null)
+                { Console.WriteLine("[persist] FAILED: carrier lost its HDT extra data"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+                ex.StringData = new NiStringRef(slotXmlRel);
+            }
+            else
+            {
+                foreach (var sed in part.Blocks.OfType<NiStringExtraData>()
+                             .Where(b => b.Name?.String == HDT_EXTRA).ToList())
+                    part.RemoveBlock(sed);
+            }
+            part.RemoveUnreferencedBlocks();
+
+            string tOut = System.IO.Path.Combine(tmpDir, $"persist_{editorId}.nif");
+            if (part.Save(tOut, new NifFileSaveOptions()) != 0)
+            { Console.WriteLine($"[persist] FAILED to save part '{editorId}'"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+            if (!ValidateNifPath(tOut, out string preason))
+            { Console.WriteLine($"[persist] FAILED: part '{editorId}' rejected — {preason}"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+
+            string slotDisk, slotRel;
+            if (isCarrier)
+            {
+                slotDisk = System.IO.Path.Combine(carrierDir, $"Persist_carrier_r{slotIdx}.nif");
+                slotRel = $"CostumeFW/Persist_carrier_r{slotIdx}.nif";
+            }
+            else
+            {
+                string idx = editorId.Substring(editorId.Length - 2);
+                slotDisk = System.IO.Path.Combine(carrierDir, $"Persist_part{idx}_r{slotIdx}.nif");
+                slotRel = $"CostumeFW/Persist_part{idx}_r{slotIdx}.nif";
+            }
+            partFiles.Add((editorId, tOut, slotDisk, slotRel));
+        }
+
+        // Final gate on the carrier part (R1-R4), then publish atomically.
+        string carrierTmp = partFiles.First(p => p.editorId == kPersistCarrierEditorId).tmp;
+        if (ValidateHead(carrierTmp) != 0)
+        { Console.WriteLine("[persist] FAILED: carrier part rejected by validatehead — previous artifacts kept"); failed++; EnsurePool(); poolCreated += localPool; return oldFragment; }
+
+        System.IO.File.Copy(tXml, slotXmlDisk, overwrite: true);
+        foreach (var p in partFiles)
+            System.IO.File.Copy(p.tmp, p.slotDisk, overwrite: true);
+        System.IO.File.Copy(carrierTmp, basePath, overwrite: true);
+        System.IO.File.WriteAllText(hashPath, hash);
+        built++;
+        EnsurePool();
+        poolCreated += localPool;
+
+        // Fragment: rev/file mirror the box entry shape (tolerant readers), plus
+        // the persist-specific xml + parts assignment for CEF's registration.
+        var frag = new System.Text.StringBuilder();
+        frag.Append("{ \"rev\": ").Append(rev)
+            .Append(", \"file\": \"").Append(partFiles.First(p => p.editorId == kPersistCarrierEditorId).slotRel)
+            .Append("\", \"xml\": \"").Append(slotXmlRel.Replace("\\", "\\\\"))
+            .Append("\", \"parts\": [");
+        bool pf = true;
+        foreach (var p in partFiles.Where(p => p.editorId != kPersistCarrierEditorId))
+        {
+            if (!pf) frag.Append(", ");
+            pf = false;
+            frag.Append("{ \"editorid\": \"").Append(p.editorId).Append("\", \"file\": \"").Append(p.slotRel).Append("\" }");
+        }
+        frag.Append("] }");
+        Console.WriteLine($"[persist] rev={rev} -> {partFiles.Count} part(s), xml={slotXmlRel}");
+        return frag.ToString();
+    }
+
     static int Sync(string[] args)
     {
         string manifestPath = null, outRoot = null, emptyNif = null, mo2Root = null, profile = "Default";
@@ -1250,15 +1595,27 @@ class Program
         const int kSlots = 8;
         string carriersJsonPath = System.IO.Path.Combine(carrierDir, "carriers.json");
         var carriers = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, object>>();
+        // The persist entry has a RICHER shape (parts assignment) than box
+        // entries, so it round-trips as a raw JSON fragment: parsing it into
+        // the {rev,file} dict would silently drop the parts on the next
+        // skip-path rewrite.
+        string persistFragment = null;
         if (System.IO.File.Exists(carriersJsonPath))
         {
             try
             {
                 foreach (var p in System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(carriersJsonPath)).RootElement.EnumerateObject())
+                {
+                    if (p.Name == "persist")
+                    {
+                        persistFragment = p.Value.GetRawText();
+                        continue;
+                    }
                     carriers[p.Name] = new System.Collections.Generic.Dictionary<string, object> {
                         ["rev"] = p.Value.GetProperty("rev").GetInt32(),
                         ["file"] = p.Value.GetProperty("file").GetString()
                     };
+                }
             }
             catch { Console.WriteLine("[sync] WARNING: carriers.json unreadable, starting fresh"); }
         }
@@ -1414,6 +1771,13 @@ class Program
             Console.WriteLine($"[sync] box{slot}: rev={rev} -> {slotNifRel}");
         }
 
+        // approach-C persist pipeline (after boxes: shares the tmp dir + pools)
+        if (doc.RootElement.TryGetProperty("persist", out var persistEl))
+        {
+            persistFragment = SyncPersistBuild(persistEl, dataRoots, carrierDir, xmlDir, tmpDir,
+                emptyNif, kSlots, persistFragment, ref built, ref skipped, ref failed, ref poolCreated);
+        }
+
         // carriers.json: always rewrite (pre-existing file = externally-visible swap signal)
         var jsonOut = new System.Text.StringBuilder("{\n");
         bool first = true;
@@ -1422,6 +1786,12 @@ class Program
             if (!first) jsonOut.Append(",\n");
             first = false;
             jsonOut.Append($" \"{kv.Key}\": {{ \"rev\": {kv.Value["rev"]}, \"file\": \"{kv.Value["file"]}\" }}");
+        }
+        if (persistFragment != null)
+        {
+            if (!first) jsonOut.Append(",\n");
+            first = false;
+            jsonOut.Append($" \"persist\": {persistFragment}");
         }
         jsonOut.Append("\n}\n");
         System.IO.File.WriteAllText(carriersJsonPath, jsonOut.ToString());
