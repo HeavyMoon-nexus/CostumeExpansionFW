@@ -1120,6 +1120,67 @@ class Program
         return ValidateHead(outPath);
     }
 
+    // Collision-proxy companion NIF for the ExtraParts pattern: the engine
+    // materializes only ONE geometry per head part (named after the editorID -
+    // vanilla ships hair + hairline as SEPARATE linked parts for this reason),
+    // so a collision proxy inside the carrier NIF never reaches the facegen
+    // head and the physics XML's per-*-shape pair goes inert (in-game
+    // 2026-07-04: veil collision dead with --proxyshader). Emit the proxies as
+    // their OWN nif to hang off the carrier HDPT's ExtraParts: keep only the
+    // shader-less SKINNED proxy shapes, give them the smallest shader-bearing
+    // shape's shader block (borrowed BEFORE that shape is dropped), then
+    // zero-alpha the result. No HDT extra data needed - the collision mesh is
+    // resolved BY NAME across the whole facegen head by the carrier's system.
+    static int ProxyNif(string inPath, string outPath)
+    {
+        var nif = new NifFile();
+        if (nif.Load(inPath, new NifFileLoadOptions()) != 0 || !nif.Valid)
+        { Console.WriteLine($"[proxynif] FAILED to load {inPath}"); return 1; }
+
+        var all = nif.GetShapes().ToList();
+        var donor = all
+            .Where(s => s.HasSkinInstance && nif.GetShader(s) != null)
+            .OrderBy(s => (int)s.VertexCount)
+            .FirstOrDefault();
+        var proxies = all.Where(s => s.HasSkinInstance && nif.GetShader(s) == null).ToList();
+        if (donor == null || proxies.Count == 0)
+        { Console.WriteLine($"[proxynif] FAILED: need a shader-bearing donor and >=1 shader-less skinned proxy (donor={(donor != null)}, proxies={proxies.Count})"); return 1; }
+
+        int shaderId = -1;
+        var donorRef = donor.GetType().GetProperty("ShaderPropertyRef")?.GetValue(donor);
+        if (donorRef != null)
+            shaderId = (int)(donorRef.GetType().GetProperty("Index")?.GetValue(donorRef) ?? -1);
+        if (shaderId < 0)
+        { Console.WriteLine("[proxynif] FAILED: cannot read donor shader ref"); return 1; }
+
+        foreach (var p in proxies)
+        {
+            var prop = p.GetType().GetProperty("ShaderPropertyRef");
+            if (prop == null || !prop.CanWrite)
+            { Console.WriteLine($"[proxynif] FAILED: cannot set shader on '{NameOf(p)}' ({p.GetType().Name})"); return 1; }
+            prop.SetValue(p, Activator.CreateInstance(prop.PropertyType, shaderId));
+            Console.WriteLine($"[proxynif] proxy '{NameOf(p)}' borrows '{NameOf(donor)}' shader");
+        }
+        int dropped = 0;
+        foreach (var s in all)
+            if (!proxies.Contains(s)) { nif.RemoveBlock((NiObject)s); dropped++; }
+        nif.RemoveUnreferencedBlocks();
+
+        string tmp = outPath + ".px.nif";
+        if (nif.Save(tmp, new NifFileSaveOptions()) != 0)
+        { Console.WriteLine($"[proxynif] FAILED to save {tmp}"); TryDelete(tmp); return 1; }
+        int rc = ZeroAlpha(tmp, outPath);  // invisible + NiAlphaProperty
+        TryDelete(tmp);
+        if (rc != 0) return rc;
+
+        var chk = new NifFile();
+        chk.Load(outPath, new NifFileLoadOptions());
+        int shp = chk.GetShapes()?.Count() ?? 0;
+        bool allShader = chk.GetShapes()?.All(s => chk.GetShader(s) != null) ?? false;
+        Console.WriteLine($"[proxynif] VERDICT shapes={shp} (want {proxies.Count}) allShader={allShader} dropped={dropped}");
+        return (shp == proxies.Count && allShader) ? 0 : 2;
+    }
+
     static int Sync(string[] args)
     {
         string manifestPath = null, outRoot = null, emptyNif = null, mo2Root = null, profile = "Default";
@@ -1419,6 +1480,7 @@ class Program
                 case "anchorsmart": return AnchorSmart(args[1], args[2], args[3]);
                 case "validatehead": return ValidateHead(args[1]);
                 case "headcarrier": return HeadCarrier(args.Skip(1).ToArray());
+                case "proxynif": return ProxyNif(args[1], args[2]);
                 case "passthrough": return Passthrough(args[1], args[2]);
                 default: Console.WriteLine($"unknown command '{args[0]}'"); return 1;
             }
