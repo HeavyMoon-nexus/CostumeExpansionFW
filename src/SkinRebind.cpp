@@ -322,6 +322,63 @@ namespace CostumeFW
             });
         }
 
+        // --- dead-bind sweep (FSMP merge generations) --------------------------
+        // BOTH FSMP merge classes are GENERATIONAL: an Armor merge dies when its
+        // worn item is removed, and a Head merge dies on every facegen head
+        // rebuild - FSMP detaches the old renamed nodes and re-merges under a
+        // new sequential id. Observed in-game 2026-07-04: the load sequence
+        // builds the head twice; a persist veil bound to Head_00000001 kept the
+        // DETACHED (world-frozen) nodes after the rebuild to Head_00000002 and
+        // stretched between them and its live bones. An injected mesh cannot
+        // heal itself (injection is idempotent by node name), so every
+        // Reconcile sweeps for bones that no longer hang under the live
+        // skeleton and detaches the item for re-injection into the CURRENT
+        // generation. Only FSMP-renamed bones can die this way; plain skeleton
+        // bones live until the full 3D rebuild, which re-triggers injection
+        // anyway (Load3D hook).
+        bool IsAttachedUnder(RE::NiAVObject* a_obj, RE::NiAVObject* a_root)
+        {
+            for (auto* p = a_obj; p; p = p->parent) {
+                if (p == a_root) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool HasDeadPhysicsBind(const std::string& a_id, RE::NiAVObject* a_root3p)
+        {
+            auto* holder = a_root3p ? a_root3p->GetObjectByName(NodeName(a_id)) : nullptr;
+            if (!holder) {
+                return false;  // not injected on the 3p skeleton - nothing to sweep
+            }
+            bool dead = false;
+            RE::BSVisit::TraverseScenegraphGeometries(holder,
+                [&](RE::BSGeometry* a_geom) {
+                    auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
+                    if (!skin || !skin->bones || !skin->skinData) {
+                        return RE::BSVisit::BSVisitControl::kContinue;
+                    }
+                    const std::uint32_t n = skin->skinData->bones;
+                    for (std::uint32_t i = 0; i < n; ++i) {
+                        auto* bone = skin->bones[i];
+                        if (!bone) {
+                            continue;
+                        }
+                        const std::string_view nm{ bone->name.c_str() };
+                        if (!nm.starts_with("hdtSSEPhysics_AutoRename_")) {
+                            continue;
+                        }
+                        if (!IsAttachedUnder(bone, a_root3p)) {
+                            dead = true;
+                            return RE::BSVisit::BSVisitControl::kStop;
+                        }
+                    }
+                    return RE::BSVisit::BSVisitControl::kContinue;
+                });
+            return dead;
+        }
+
         // Resolve every bone of one geometry's skin against the live skeleton.
         // Two-pass gate: resolve ALL first; only commit if every bone resolved
         // (avoids the "missing skeleton root node" fatal / partial rebind).
@@ -826,6 +883,16 @@ namespace CostumeFW
             }
             SKSE::log::debug("  item '{}' tokenForm={:08X} show={}", it.id, it.tokenForm, show);
             if (show) {
+                // Dead-bind sweep: if this item's injected mesh holds FSMP bones of a
+                // dead merge generation (armor unequipped / head rebuilt), detach it
+                // first so the injection below rebinds to the CURRENT generation.
+                if (player) {
+                    if (auto* r3 = player->Get3D(false); r3 && HasDeadPhysicsBind(it.id, r3)) {
+                        SKSE::log::info("  '{}': bound FSMP bones are DETACHED (dead merge "
+                                        "generation) - re-injecting", it.id);
+                        DetachNodes(it.id);
+                    }
+                }
                 InjectInternal(it.id, it.m3p, it.m1p);
             } else {
                 DetachNodes(it.id);

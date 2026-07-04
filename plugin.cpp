@@ -30,6 +30,13 @@ namespace
         {
             auto* result = func(a_this, a_backgroundLoading);
             SKSE::GetTaskInterface()->AddTask([] { CostumeFW::Reconcile(); });
+            // The engine builds the facegen head AGAIN a few seconds into the
+            // load sequence; FSMP then retires the old Head merge generation and
+            // an injected mesh bound to it keeps dead, world-frozen bones
+            // (in-game 2026-07-04: bound at Head_00000001, headdiag showed
+            // Head_00000002). Reconcile's dead-bind sweep repairs that - but
+            // only when it runs, so run one more pass after the rebuild window.
+            CostumeFW::RunAfterDelayMs(4000, [] { CostumeFW::Reconcile(); });
             return result;
         }
         static inline REL::Relocation<decltype(thunk)> func;
