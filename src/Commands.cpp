@@ -169,6 +169,19 @@ namespace CostumeFW
                     c->Print(("[CEF] nuke removed " + std::to_string(n) + " node(s)").c_str());
                 }
             });
+        } else if (sub == "repair") {
+            // Manual equivalent of the MCM CEF off->on cycle: detach every
+            // injected node (registry intact) and re-inject into the CURRENT
+            // FSMP merge generations. The bind watchdog does this automatically
+            // when it detects a dead generation; this is the on-demand button.
+            SKSE::GetTaskInterface()->AddTask([] {
+                const int n = DetachAllInjected();
+                Reconcile();
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print(("[CEF] repair: re-injected (" + std::to_string(n) +
+                              " node(s) detached)").c_str());
+                }
+            });
         } else if (sub == "list") {
             SKSE::GetTaskInterface()->AddTask([] { ListActive(); });
         } else if (sub == "headdiag") {
@@ -190,7 +203,7 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | headdiag | hair");
         }
     }
 }

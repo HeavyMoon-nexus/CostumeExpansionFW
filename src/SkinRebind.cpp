@@ -821,8 +821,46 @@ namespace CostumeFW
             std::move(a_fn));
     }
 
+    // --- bind watchdog ------------------------------------------------------
+    // A one-shot delayed pass raced the engine's SECOND facegen head build
+    // (observed up to ~13s after load) and lost - the merge generation died
+    // AFTER the pass and the stretched mesh stayed until a manual CEF
+    // off->on. Timing guesses are the approach this project keeps re-learning
+    // to avoid; instead a permanent lightweight tick (a few parent-chain
+    // walks every 2.5s) detects dead-generation binds WHENEVER they happen
+    // (load sequence, RaceMenu, any mod rebuilding the head) and runs the
+    // Reconcile sweep to re-inject into the current generation.
+    constexpr int kBindWatchdogMs = 2500;
+
+    void BindWatchdogTick()
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        RE::NiAVObject* r3 = player ? player->Get3D(false) : nullptr;
+        if (r3) {
+            for (const auto& it : g_active) {
+                if (HasDeadPhysicsBind(it.id, r3)) {
+                    SKSE::log::info("bind watchdog: '{}' holds a dead merge generation - reconciling", it.id);
+                    Reconcile();  // the sweep inside detaches + re-injects
+                    break;
+                }
+            }
+        }
+        RunAfterDelayMs(kBindWatchdogMs, BindWatchdogTick);
+    }
+
+    void StartBindWatchdogOnce()
+    {
+        static std::atomic<bool> started{ false };
+        if (started.exchange(true)) {
+            return;
+        }
+        SKSE::log::info("bind watchdog started ({}ms tick)", kBindWatchdogMs);
+        RunAfterDelayMs(kBindWatchdogMs, BindWatchdogTick);
+    }
+
     void Reconcile()
     {
+        StartBindWatchdogOnce();
         if (g_active.empty()) {
             return;
         }
