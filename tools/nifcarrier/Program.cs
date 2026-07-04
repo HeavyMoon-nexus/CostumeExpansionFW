@@ -1210,6 +1210,22 @@ class Program
 
     static string PersistProxyEditorId(int i) => $"CFW_PersistProxy{i:00}";
 
+    // Return the fragment with its "count" (SMP content count of the CURRENT
+    // persist set) set/overwritten. CEF keys the head-part registration on this:
+    // count!=0 -> register carrier+proxies, count==0 -> deregister. Older
+    // fragments (pre-count) pass through unchanged on parse failure.
+    static string FragmentWithCount(string fragment, int count)
+    {
+        if (fragment == null) return null;
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(fragment);
+            node["count"] = count;
+            return node.ToJsonString();
+        }
+        catch { return fragment; }
+    }
+
     // Rewrite per-*-shape name attributes per the pool assignment.
     static int RenameShapesInXml(string inPath, string outPath, Dictionary<string, string> renames)
     {
@@ -1263,8 +1279,11 @@ class Program
         }
 
         // Resolve contents - EXCLUDE (warn + drop), never fail the whole set.
+        // Distinguish TRANSIENT misses (path resolution - a data-root/VFS hiccup
+        // may heal on the next run) from DECISIVE exclusions (non-SMP content /
+        // validation reject): only a decisively-empty set may flip count to 0.
         var smp = new List<(string nif, string xmlDisk, string xmlRel)>();
-        int declared = 0;
+        int declared = 0, transientMiss = 0;
         if (persistEl.ValueKind == System.Text.Json.JsonValueKind.Object &&
             persistEl.TryGetProperty("contents", out var pcontents))
         {
@@ -1274,28 +1293,34 @@ class Program
                 string rel = c.GetProperty("nif").GetString();
                 string nifDisk = ResolveAgainstRoots(rel, dataRoots, meshesRel: true);
                 if (nifDisk == null)
-                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — cannot resolve under data roots"); continue; }
+                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — cannot resolve under data roots"); transientMiss++; continue; }
                 string xmlRel = GetHdtXmlPath(nifDisk);
                 if (xmlRel == null) continue; // not an SMP content
                 if (!ValidateNifPath(nifDisk, out string reason))
                 { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — {reason}"); continue; }
                 string xmlDisk = ResolveAgainstRoots(xmlRel, dataRoots, meshesRel: false);
                 if (xmlDisk == null)
-                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — physics xml '{xmlRel}' not found"); continue; }
+                { Console.WriteLine($"[persist] WARNING content '{rel}' EXCLUDED — physics xml '{xmlRel}' not found"); transientMiss++; continue; }
                 smp.Add((nifDisk, xmlDisk, xmlRel));
             }
         }
 
         if (smp.Count == 0)
         {
-            // Empty persist set: keep previous artifacts; the registration side
-            // (CEF) decides what stays active. Guard against clobbering on a
-            // transient path miss, mirroring the box behavior.
-            if (declared > 0)
-                Console.WriteLine($"[persist] all {declared} declared content(s) unresolved/excluded — keeping previous artifacts");
             EnsurePool();
             poolCreated += localPool;
-            return oldFragment;
+            if (transientMiss > 0)
+            {
+                // Guard against clobbering on a transient path miss, mirroring
+                // the box behavior: keep previous artifacts AND count.
+                Console.WriteLine($"[persist] {transientMiss} content(s) unresolved (transient?) — keeping previous artifacts");
+                return oldFragment;
+            }
+            // Decisively no SMP persist content: artifacts stay (rev continuity),
+            // but count goes 0 so CEF deregisters the head-part pool.
+            if (declared > 0)
+                Console.WriteLine($"[persist] no SMP content among {declared} declared — count=0 (CEF deregisters)");
+            return FragmentWithCount(oldFragment, 0);
         }
 
         // Hash inputs; skip when unchanged
@@ -1310,7 +1335,7 @@ class Program
             System.Text.Encoding.UTF8.GetBytes(h.ToString())));
         if (System.IO.File.Exists(hashPath) && System.IO.File.Exists(basePath)
             && System.IO.File.ReadAllText(hashPath) == hash && oldFragment != null)
-        { EnsurePool(); poolCreated += localPool; skipped++; return oldFragment; }
+        { EnsurePool(); poolCreated += localPool; skipped++; return FragmentWithCount(oldFragment, smp.Count); }
 
         Console.WriteLine($"[persist] {smp.Count} SMP content(s)");
 
@@ -1521,6 +1546,7 @@ class Program
         // the persist-specific xml + parts assignment for CEF's registration.
         var frag = new System.Text.StringBuilder();
         frag.Append("{ \"rev\": ").Append(rev)
+            .Append(", \"count\": ").Append(smp.Count)
             .Append(", \"file\": \"").Append(partFiles.First(p => p.editorId == kPersistCarrierEditorId).slotRel)
             .Append("\", \"xml\": \"").Append(slotXmlRel.Replace("\\", "\\\\"))
             .Append("\", \"parts\": [");

@@ -1152,6 +1152,109 @@ namespace CostumeFW
         }
     }
 
+    namespace
+    {
+        bool HasHeadPart(RE::TESNPC* a_base, RE::BGSHeadPart* a_part)
+        {
+            if (!a_base->headParts) {
+                return false;
+            }
+            for (std::int8_t i = 0; i < a_base->numHeadParts; ++i) {
+                if (a_base->headParts[i] == a_part) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Remove ONE occurrence of a_part from the base's headParts by shifting
+        // the array in place (the engine offers no removal counterpart to
+        // ChangeHeadPart; the slack slot stays allocated, which is harmless -
+        // the next ChangeHeadPart add reallocates anyway).
+        bool RemoveHeadPartDirect(RE::TESNPC* a_base, RE::BGSHeadPart* a_part)
+        {
+            if (!a_base->headParts) {
+                return false;
+            }
+            const std::int8_t n = a_base->numHeadParts;
+            std::int8_t idx = -1;
+            for (std::int8_t i = 0; i < n; ++i) {
+                if (a_base->headParts[i] == a_part) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                return false;
+            }
+            for (std::int8_t i = idx; i + 1 < n; ++i) {
+                a_base->headParts[i] = a_base->headParts[i + 1];
+            }
+            a_base->headParts[n - 1] = nullptr;
+            a_base->numHeadParts = static_cast<std::int8_t>(n - 1);
+            return true;
+        }
+    }
+
+    bool ReconcilePersistHeadParts(const std::vector<RE::BGSHeadPart*>& a_desired,
+        const std::vector<RE::BGSHeadPart*>& a_pool)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* base = player ? player->GetActorBase() : nullptr;
+        if (!base) {
+            return false;
+        }
+        bool changed = false;
+        for (auto* part : a_pool) {
+            if (!part) {
+                continue;
+            }
+            const bool want =
+                std::find(a_desired.begin(), a_desired.end(), part) != a_desired.end();
+            if (want) {
+                if (!HasHeadPart(base, part)) {
+                    base->ChangeHeadPart(part);
+                    SKSE::log::info("persist head: + '{}' ({:08X})",
+                        part->GetFormEditorID(), part->GetFormID());
+                    changed = true;
+                }
+            } else {
+                // Loop: duplicates could exist from older sessions / PoC leftovers.
+                while (RemoveHeadPartDirect(base, part)) {
+                    SKSE::log::info("persist head: - '{}' ({:08X})",
+                        part->GetFormEditorID(), part->GetFormID());
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            // ChangeHeadPart flags this itself; the direct removals need it so
+            // the save serializes the edited array.
+            base->AddChange(RE::TESNPC::ChangeFlags::kFace);
+        }
+        return changed;
+    }
+
+    bool PlayerHasHeadPart(RE::BGSHeadPart* a_part)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* base = player ? player->GetActorBase() : nullptr;
+        return base && a_part && HasHeadPart(base, a_part);
+    }
+
+    void RebuildPlayerHead()
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !player->Get3D(false)) {
+            return;  // no 3D yet - the engine builds the head with the current set
+        }
+        SKSE::log::info("persist head: DoReset3D (facegen rebuild)");
+        player->DoReset3D(false);
+        // Load3D hook does not fire on DoReset3D (C §9-11(ii)): re-inject
+        // explicitly once the rebuild settles; the watchdog converges the rest.
+        RunAfterDelayMs(1500, [] { Reconcile(); });
+    }
+
     bool ChangeHeadPartPoC(const std::string& a_id)
     {
         // FSMP approach-C active PoC (stage 1): drive a head-part change from CEF

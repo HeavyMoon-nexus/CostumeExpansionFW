@@ -118,6 +118,19 @@ namespace CostumeFW
     // the json. Call on kPostLoadGame before Reconcile. Main thread.
     void ReapplyBoxes();
 
+    // --- approach-C persist head carriers (stage 3b) --------------------------
+    // The persist class's SMP physics rides the facegen head path: nifcarrier
+    // `sync` builds a head-part POOL (CFW_PersistCarrier = bones + physics XML +
+    // trigger shape, CFW_PersistProxy01..08 = one per additional collision mesh)
+    // and records the assignment in carriers.json's "persist" entry.
+    // ApplyCarrierOverrides() repoints the pool HDPT models at the current
+    // revision AND reconciles the player's headParts registration (carrier +
+    // assigned proxies while the persist SMP set is non-empty and CEF is on;
+    // deregistered otherwise), rebuilding the head when anything changed.
+    // These are the manual console levers on top of that:
+    void PersistCarrierStatus();  // `cef persist` - print pool registration + entry
+    void PersistCarrierRemove();  // `cef persist remove` - deregister pool + rebuild head
+
     // One currently-worn armor: its display name + colon-form id (for the MCM
     // "add worn item" capture flow).
     struct WornItem

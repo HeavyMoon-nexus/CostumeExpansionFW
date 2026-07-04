@@ -184,6 +184,28 @@ namespace CostumeFW
             });
         } else if (sub == "list") {
             SKSE::GetTaskInterface()->AddTask([] { ListActive(); });
+        } else if (sub == "persist") {
+            // Stage 3b persist head-carrier levers:
+            //   cef persist          - status (pool registration + carriers.json entry)
+            //   cef persist regen    - re-read carriers.json, reconcile + FORCE a head
+            //                          rebuild (repair lever; sync-complete runs the
+            //                          same pass automatically)
+            //   cef persist remove   - deregister the whole pool (cleanup lever)
+            const std::string arg = Lower(rest);
+            if (arg.empty()) {
+                SKSE::GetTaskInterface()->AddTask([] { PersistCarrierStatus(); });
+            } else if (arg == "regen") {
+                SKSE::GetTaskInterface()->AddTask([] {
+                    ApplyCarrierOverrides(true);
+                    RebuildPlayerHead();  // force even when nothing changed
+                });
+                Print("[CEF] persist: reapplying carriers + rebuilding head (see log)");
+            } else if (arg == "remove") {
+                SKSE::GetTaskInterface()->AddTask([] { PersistCarrierRemove(); });
+                Print("[CEF] persist: deregistering head-carrier pool (see log)");
+            } else {
+                Print("[CEF] usage: cef persist [regen|remove]");
+            }
         } else if (sub == "headdiag") {
             // FSMP approach-C passive PoC: enumerate FSMP-renamed physics bones on
             // the live skeleton(s). Apply an SMP hair first to see "_Head_" bones.
@@ -203,7 +225,7 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | repair | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | headdiag | hair");
         }
     }
 }

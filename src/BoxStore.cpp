@@ -3,6 +3,8 @@
 
 #include "RE/A/ActorEquipManager.h"
 #include "RE/B/BGSBipedObjectForm.h"
+#include "RE/B/BGSHeadPart.h"
+#include "RE/C/ConsoleLog.h"
 #include "RE/B/BipedAnim.h"
 #include "RE/B/BGSKeyword.h"
 #include "RE/C/ConcreteFormFactory.h"
@@ -315,6 +317,137 @@ namespace CostumeFW
             return true;
         }
 
+        // --- approach-C persist head-carrier pool (stage 3b) --------------------
+        // The engine materializes ONE geometry per head part, renamed to the
+        // part's editorID, so every mesh the physics XML references needs its own
+        // HDPT (C §9-18). The pool is static ESP records; nifcarrier assigns the
+        // current build's meshes to pool slots (carriers.json "persist" entry),
+        // CEF repoints the assigned models and registers exactly those parts on
+        // the player. Registration itself is save-persisted (player appearance);
+        // the model repoints are volatile form edits reapplied on every pass.
+        constexpr const char* kCarrierPlugin = "CostumeFW_Boxes_FSMPCarrier_001.esp";
+        constexpr std::uint32_t kPersistCarrierId = 0x000809;    // CFW_PersistCarrier
+        constexpr std::uint32_t kPersistProxyFirstId = 0x00080A;  // CFW_PersistProxy01..08
+        constexpr int kMaxPersistProxies = 8;
+
+        RE::BGSHeadPart* LookupPoolPart(std::uint32_t a_localId)
+        {
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            return dh ? dh->LookupForm<RE::BGSHeadPart>(a_localId, kCarrierPlugin) : nullptr;
+        }
+
+        // The full pool (carrier first), skipping unresolved records (plugin
+        // absent / trimmed). Empty = the persist head path is unavailable.
+        std::vector<RE::BGSHeadPart*> PersistPool()
+        {
+            std::vector<RE::BGSHeadPart*> pool;
+            if (auto* c = LookupPoolPart(kPersistCarrierId)) {
+                pool.push_back(c);
+            }
+            for (int i = 0; i < kMaxPersistProxies; ++i) {
+                if (auto* p = LookupPoolPart(kPersistProxyFirstId + i)) {
+                    pool.push_back(p);
+                }
+            }
+            return pool;
+        }
+
+        bool CarrierFileOnDisk(const std::string& a_file)
+        {
+            std::string diskPath = "Data\\meshes\\" + a_file;
+            std::replace(diskPath.begin(), diskPath.end(), '/', '\\');
+            return std::ifstream(diskPath).good();
+        }
+
+        // Repoint + registration reconcile for the persist head-carrier pool.
+        // Called from ApplyCarrierOverridesImpl on every pass (load + runtime).
+        void ApplyPersistCarrier(const nlohmann::json& a_doc, bool a_refreshChanged)
+        {
+            auto* carrier = LookupPoolPart(kPersistCarrierId);
+            if (!carrier) {
+                return;  // no pool (plugin absent) - persist head path unavailable
+            }
+            const auto pool = PersistPool();
+
+            bool repointChanged = false;
+            const auto repoint = [&](RE::BGSHeadPart* a_part, const std::string& a_file) {
+                std::string path = a_file;  // meshes-relative; engine wants backslashes
+                std::replace(path.begin(), path.end(), '/', '\\');
+                const char* cur = a_part->model.c_str();
+                if (cur && path == cur) {
+                    return;
+                }
+                a_part->model = path.c_str();
+                repointChanged = true;
+                SKSE::log::info("persist carrier: '{}' model -> {}",
+                    a_part->GetFormEditorID(), path);
+            };
+
+            // Desired registration: carrier + assigned proxies while the persist
+            // SMP set is non-empty (fragment count; pre-count fragments assume
+            // non-empty) AND CEF is enabled AND persist contents exist at all.
+            std::vector<RE::BGSHeadPart*> desired;
+            const auto pj = a_doc.find("persist");
+            if (pj != a_doc.end() && pj->is_object()) {
+                const int count = pj->value("count", -1);
+                const bool active = count != 0 && g_cefEnabled && !g_persist.empty();
+                const std::string file = pj->value("file", "");
+                if (!file.empty() && !CarrierFileOnDisk(file)) {
+                    // Fail-safe (mirrors the box carriers): never point a HDPT at
+                    // a missing file, and don't churn the registration on a disk
+                    // hiccup - keep whatever is currently applied.
+                    SKSE::log::warn(
+                        "persist carrier: '{}' missing on disk - keeping current state", file);
+                    return;
+                }
+                if (!file.empty()) {
+                    repoint(carrier, file);
+                    if (active) {
+                        desired.push_back(carrier);
+                    }
+                    for (const auto& pe : pj->value("parts", nlohmann::json::array())) {
+                        const std::string eid = pe.value("editorid", "");
+                        const std::string pfile = pe.value("file", "");
+                        RE::BGSHeadPart* proxy = nullptr;
+                        for (auto* p : pool) {
+                            const char* ped = p->GetFormEditorID();
+                            if (p != carrier && ped && eid == ped) {
+                                proxy = p;
+                                break;
+                            }
+                        }
+                        if (!proxy) {
+                            SKSE::log::warn(
+                                "persist carrier: unknown pool part '{}' - its collision is inert", eid);
+                            continue;
+                        }
+                        if (pfile.empty() || !CarrierFileOnDisk(pfile)) {
+                            SKSE::log::warn(
+                                "persist carrier: part '{}' file '{}' missing - skipped", eid, pfile);
+                            continue;
+                        }
+                        repoint(proxy, pfile);
+                        if (active) {
+                            desired.push_back(proxy);
+                        }
+                    }
+                }
+            }
+            // No persist entry / inactive set -> desired stays empty = deregister.
+
+            const bool regChanged = ReconcilePersistHeadParts(desired, pool);
+            // A model repoint only takes effect through a head rebuild (the engine
+            // caches the loaded part), so rebuild on EITHER change - but only
+            // while parts stay registered (a pure deregister already rebuilt via
+            // regChanged, and repoints with nothing registered can wait).
+            if (regChanged || (repointChanged && !desired.empty())) {
+                RebuildPlayerHead();  // no-op without player 3D (load time)
+                if (a_refreshChanged) {
+                    RE::DebugNotification("Costume persist physics updated");
+                }
+            }
+        }
+
         void ApplyCarrierOverridesImpl(bool a_refreshChanged)
         {
             std::ifstream f(kCarriersJsonPath);
@@ -374,6 +507,9 @@ namespace CostumeFW
             if (a_refreshChanged && anyChanged) {
                 RE::DebugNotification("Costume Box updated - re-equip the box token until the outfit sways");
             }
+            // Persist class (approach C): the head-part pool needs no re-equip -
+            // CEF can fire the facegen rebuild itself, so this is fully automatic.
+            ApplyPersistCarrier(doc, a_refreshChanged);
         }
 
         // --- auto-sync: spawn nifcarrier when the manifest changes ---------------
@@ -618,6 +754,60 @@ namespace CostumeFW
     void ApplyCarrierOverrides(bool a_refreshChanged)
     {
         ApplyCarrierOverridesImpl(a_refreshChanged);
+    }
+
+    void PersistCarrierStatus()
+    {
+        auto* console = RE::ConsoleLog::GetSingleton();
+        const auto say = [&](const std::string& s) {
+            SKSE::log::info("{}", s);
+            if (console) {
+                console->Print(s.c_str());
+            }
+        };
+        const auto pool = PersistPool();
+        if (pool.empty()) {
+            say("[CEF] persist: head-part pool unavailable (carrier plugin absent)");
+            return;
+        }
+        // carriers.json persist entry (if any)
+        std::ifstream f(kCarriersJsonPath);
+        nlohmann::json doc;
+        if (f) {
+            try {
+                f >> doc;
+            } catch (...) {
+                doc = nlohmann::json::object();
+            }
+        }
+        if (const auto pj = doc.find("persist"); pj != doc.end() && pj->is_object()) {
+            say("[CEF] persist entry: rev=" + std::to_string(pj->value("rev", -1)) +
+                " count=" + std::to_string(pj->value("count", -1)) +
+                " file=" + pj->value("file", std::string{ "?" }) +
+                " parts=" + std::to_string(pj->value("parts", nlohmann::json::array()).size()));
+        } else {
+            say("[CEF] persist entry: none (no persist build yet)");
+        }
+        say("[CEF] persist contents: " + std::to_string(g_persist.size()) +
+            std::string(g_cefEnabled ? "" : " (CEF disabled)"));
+        for (auto* part : pool) {
+            const char* ed = part->GetFormEditorID();
+            const bool reg = PlayerHasHeadPart(part);
+            say(std::string("  ") + (ed ? ed : "?") + (reg ? " REGISTERED" : " -") +
+                "  model=" + part->model.c_str());
+        }
+    }
+
+    void PersistCarrierRemove()
+    {
+        const auto pool = PersistPool();
+        if (pool.empty()) {
+            return;
+        }
+        if (ReconcilePersistHeadParts({}, pool)) {
+            SKSE::log::info("persist carrier: pool deregistered (manual remove)");
+            RebuildPlayerHead();
+        }
     }
 
     bool CefEnabled()

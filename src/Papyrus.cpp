@@ -371,6 +371,9 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([] {
                 Reconcile();  // master off hides everything; on re-shows
                 ApplyBoxAbilities();
+                // Persist head carriers follow the master switch: off deregisters
+                // the pool (head physics gone), on re-registers it (stage 3b).
+                ApplyCarrierOverrides(false);
             });
             return CefEnabled();
         }

@@ -146,13 +146,18 @@ namespace
             });
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
+        case SKSE::MessagingInterface::kNewGame:
             // Save loaded: a co-save revert wiped the registry, so re-register the
             // global boxes, then re-apply everything (belt-and-suspenders to Load3D).
             // Synthesized stat abilities are dynamic forms dropped by the save, so
-            // forget the cache and rebuild them fresh.
+            // forget the cache and rebuild them fresh. The carrier pass re-repoints
+            // AND reconciles the persist head-part registration against the loaded
+            // save (a CTD rollback can predate the registration - C §9-18); it
+            // rebuilds the head only when something actually changed.
             SKSE::GetTaskInterface()->AddTask([] {
                 CostumeFW::ClearBoxSpellCache();
                 CostumeFW::ReapplyBoxes();
+                CostumeFW::ApplyCarrierOverrides(false);
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
             });

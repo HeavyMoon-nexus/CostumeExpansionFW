@@ -5,6 +5,11 @@
 #include <string>
 #include <vector>
 
+namespace RE
+{
+    class BGSHeadPart;
+}
+
 namespace CostumeFW
 {
     // One persisted active item: its content id and (for box items) the box
@@ -99,6 +104,32 @@ namespace CostumeFW
     // and injects it with id "test". Logs every step.
     void InjectTestFromFile();
     void DetachTest();
+
+    // --- approach-C persist head carriers (stage 3b) -------------------------
+    // Reconcile the PLAYER base's headParts against the desired persist-pool
+    // set. Adds go through TESNPC::ChangeHeadPart; removals are a direct
+    // headParts array edit (ChangeHeadPart never REPLACES a same-type part -
+    // in-game 2026-07-04, C §9-16 - so there is no engine removal to call).
+    // a_pool is the full pool (carrier + all proxies) so stale members are
+    // detected even when absent from a_desired. Registration is save-persisted
+    // (player appearance); flags the NPC face-changed on any edit. Does NOT
+    // rebuild the head - pair with RebuildPlayerHead(). Returns true if the
+    // registration changed. Main thread only.
+    bool ReconcilePersistHeadParts(const std::vector<RE::BGSHeadPart*>& a_desired,
+        const std::vector<RE::BGSHeadPart*>& a_pool);
+
+    // True if the player base's headParts currently contains a_part (for the
+    // `cef persist` status print).
+    bool PlayerHasHeadPart(RE::BGSHeadPart* a_part);
+
+    // Force a facegen head rebuild (DoReset3D) so the engine loads the current
+    // head-part models and FSMP's facegen path re-fires, then re-inject after a
+    // beat: DoReset3D does NOT fire the Load3D hook (C §9-11(ii)), so the
+    // Reconcile must be explicit; the bind watchdog converges any merge
+    // generation churn after that. No-op while the player has no 3D (load
+    // time: the engine builds the head with the current registration anyway).
+    // Main thread only.
+    void RebuildPlayerHead();
 
     // FSMP approach-C active PoC (stage 1, `cef hair <FormID:Plugin.esp>`): drive
     // a head-part change from CEF code (TESNPC::ChangeHeadPart) + force a facegen
