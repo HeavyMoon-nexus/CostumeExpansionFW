@@ -904,19 +904,25 @@ class Program
         int bones = nif.Blocks.Count(b => b.GetType().Name == "NiNode" && NameOf(b) != null);
         var tree = TreeNodeNames(nif);
 
-        int triggers = 0;
+        int triggers = 0, shaderless = 0;
         var unreachable = new HashSet<string>();
         foreach (var s in nif.GetShapes())
         {
+            // R4: the facegen pipeline breaks on shader-less geometry (collision
+            // proxies like VirtualHead/VirtualGround). The ARMOR path tolerates
+            // them (proven in box carriers); as a HEAD PART geometry they took the
+            // whole actor 3D down (v2 PoC, 2026-07-04: character invisible).
+            bool hasShader = nif.GetShader(s) != null;
+            if (!hasShader) shaderless++;
             if (!s.HasSkinInstance)
-            { Console.WriteLine($"    shape '{NameOf(s)}': UNSKINNED (no merge trigger)"); continue; }
+            { Console.WriteLine($"    shape '{NameOf(s)}': UNSKINNED (no merge trigger){(hasShader ? "" : "  NO-SHADER (facegen-fatal)")}"); continue; }
             var names = nif.GetShapeBoneNames(s);
             var custom = names.Where(n => !LooksLiveSkeletonBone(n)).ToList();
             bool trig = custom.Count > 0;
             if (trig) triggers++;
             foreach (var c in custom)
                 if (!tree.Contains(c)) unreachable.Add(c);
-            Console.WriteLine($"    shape '{NameOf(s)}' verts={(int)s.VertexCount}: skinBones={names.Count} custom={custom.Count}{(trig ? "  TRIGGER" : "  (vanilla-only)")}");
+            Console.WriteLine($"    shape '{NameOf(s)}' verts={(int)s.VertexCount}: skinBones={names.Count} custom={custom.Count}{(trig ? "  TRIGGER" : "  (vanilla-only)")}{(hasShader ? "" : "  NO-SHADER (facegen-fatal)")}");
         }
 
         // §9-10 anchor report: doSkeletonMerge resolves live-named nodes GLOBALLY
@@ -949,8 +955,10 @@ class Program
         Console.WriteLine($"[validatehead] R2 mergeTriggerShapes={triggers} (skinned shape referencing a non-live bone)");
         Console.WriteLine($"[validatehead] R3 unreachableCustomBones={unreachable.Count}"
             + (unreachable.Count > 0 ? $"  ({string.Join(", ", unreachable.Take(5))}{(unreachable.Count > 5 ? ", ..." : "")}) - doSkeletonMerge would never create these" : ""));
+        Console.WriteLine($"[validatehead] R4 shaderlessShapes={shaderless}"
+            + (shaderless > 0 ? "  — facegen-fatal: the head build breaks on shader-less geometry (use headcarrier --keep1)" : ""));
         Console.WriteLine($"[validatehead] bones={bones}  sseSkinnable={ctdOk}{(ctdOk ? "" : " — " + ctdReason)}");
-        bool pass = ctdOk && rootExtra != null && bones > 0 && triggers > 0 && unreachable.Count == 0;
+        bool pass = ctdOk && rootExtra != null && bones > 0 && triggers > 0 && unreachable.Count == 0 && shaderless == 0;
         Console.WriteLine($"[validatehead] VERDICT: {(pass ? "OK (should fire the facegen path)" : "REJECT")}");
         return pass ? 0 : 2;
     }
@@ -968,6 +976,7 @@ class Program
     static int HeadCarrier(string[] args)
     {
         string outPath = null, xmlRel = null, anchorName = null;
+        bool keep1 = false;
         var contents = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
@@ -975,6 +984,7 @@ class Program
             {
                 case "--xml": xmlRel = args[++i]; break;
                 case "--anchor": anchorName = args[++i]; break;
+                case "--keep1": keep1 = true; break;
                 default:
                     if (outPath == null) outPath = args[i];
                     else contents.Add(args[i]);
@@ -982,7 +992,7 @@ class Program
             }
         }
         if (outPath == null || contents.Count == 0)
-        { Console.WriteLine("usage: headcarrier <out.nif> <content.nif> [content2 ...] [--xml <gameRelXml>] [--anchor <liveBoneName>]"); return 1; }
+        { Console.WriteLine("usage: headcarrier <out.nif> <content.nif> [content2 ...] [--xml <gameRelXml>] [--anchor <liveBoneName>] [--keep1]"); return 1; }
 
         // CTD gate per content - loud fail (exclusion policy lives in sync, not here)
         foreach (var c in contents)
@@ -1030,6 +1040,30 @@ class Program
             { Console.WriteLine("[headcarrier] FAILED to reload assembled carrier"); return 1; }
             int orphans = CompleteBoneTree(fin);
             if (orphans > 0) Console.WriteLine($"[headcarrier] R3: re-parented {orphans} skin-only bone(s) into the tree");
+            if (keep1)
+            {
+                // Facegen-safe minimum: keep exactly ONE shape - the smallest
+                // shader-bearing skinned shape referencing a custom bone (the
+                // merge trigger). Everything else - including shader-less
+                // collision proxies (VirtualHead...), which the facegen head
+                // build cannot survive (R4) - is dropped. XML collision refs to
+                // dropped shapes go unresolved; FSMP warns and disables that
+                // collision. Runs AFTER CompleteBoneTree so skin-only bones are
+                // already tree-parented and survive the unreferenced-block sweep.
+                var all = fin.GetShapes().ToList();
+                var keep = all
+                    .Where(s => s.HasSkinInstance && fin.GetShader(s) != null
+                        && fin.GetShapeBoneNames(s).Any(b => !LooksLiveSkeletonBone(b)))
+                    .OrderBy(s => (int)s.VertexCount)
+                    .FirstOrDefault();
+                if (keep == null)
+                { Console.WriteLine("[headcarrier] FAILED: --keep1 found no shader-bearing trigger shape"); return 1; }
+                int dropped = 0;
+                foreach (var s in all)
+                    if (!ReferenceEquals(s, keep)) { fin.RemoveBlock((NiObject)s); dropped++; }
+                fin.RemoveUnreferencedBlocks();
+                Console.WriteLine($"[headcarrier] keep1: kept '{NameOf(keep)}' ({(int)keep.VertexCount} verts), dropped {dropped} shape(s) (collision proxies included - their XML collision goes inert)");
+            }
             if (anchorName != null)
             {
                 var (moved, kept) = AnchorInMemory(fin, anchorName);
