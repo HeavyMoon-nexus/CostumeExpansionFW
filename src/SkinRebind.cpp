@@ -19,6 +19,8 @@
 #include "RE/N/NiSkinData.h"
 #include "RE/N/NiSkinInstance.h"
 #include "RE/P/PlayerCharacter.h"
+
+#include <unordered_set>
 #include "RE/S/Sexes.h"
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESModelTextureSwap.h"
@@ -99,12 +101,25 @@ namespace CostumeFW
         // registry (used to hide a box item whose token is unequipped). Detaches
         // EVERY same-named node on each root (not just the first) so a duplicate
         // holder can't survive and keep rendering.
+        // --- bound-bone pinning --------------------------------------------------
+        // The engine's skin instance holds bones as RAW pointers; normally that's
+        // fine (skeleton bones outlive meshes), but CEF binds to FSMP's transient
+        // merge nodes, and once FSMP releases a retired generation those raw
+        // pointers dangle - the renderer reads freed world matrices, and the
+        // dead-bind sweep crashed reading a freed bone's name (CTD 2026-07-04
+        // 18:23, ucrtbase strlen on 0x2A6, BSDismemberSkinInstance in RBX). Pin
+        // every bone an item is bound to with a NiPointer for as long as the
+        // item is attached; DetachNodes releases the pins.
+        std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> g_boundBoneRefs;
+        std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
+
         void DetachNodes(const std::string& a_id)
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player) {
                 return;
             }
+            g_boundBoneRefs.erase(a_id);  // release the bone pins with the attach
             const std::string nodeName = NodeName(a_id);
             auto detachFrom = [&](RE::NiAVObject* a_root, const char* a_tag) {
                 if (!a_root) {
@@ -356,16 +371,6 @@ namespace CostumeFW
         // generation. Only FSMP-renamed bones can die this way; plain skeleton
         // bones live until the full 3D rebuild, which re-triggers injection
         // anyway (Load3D hook).
-        bool IsAttachedUnder(RE::NiAVObject* a_obj, RE::NiAVObject* a_root)
-        {
-            for (auto* p = a_obj; p; p = p->parent) {
-                if (p == a_root) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         bool HasDeadPhysicsBind(const std::string& a_id, RE::NiAVObject* a_root3p)
         {
             auto* holder = a_root3p ? a_root3p->GetObjectByName(NodeName(a_id)) : nullptr;
@@ -373,10 +378,14 @@ namespace CostumeFW
                 return false;  // not injected on the 3p skeleton - nothing to sweep
             }
 
-            // Newest attached generation per (class, bone suffix). "Attached" is
-            // NOT enough: FSMP keeps the retiring generation on the skeleton for
-            // a few seconds, and a bind that latched onto it during the overlap
-            // window sways wrong / stretches without ever being "detached".
+            // One BFS over the LIVE tree: the set of attached renamed nodes (by
+            // POINTER - liveness is membership, never a parent-chain walk: a
+            // retired node's ->parent can dangle even while the node itself is
+            // pinned alive) and the newest attached generation per (class, bone).
+            // "Attached" alone is NOT enough: FSMP keeps the retiring generation
+            // on the skeleton for a few seconds, and a bind taken in that overlap
+            // window sways wrong without ever being detached.
+            std::unordered_set<const RE::NiAVObject*> attachedRenamed;
             std::unordered_map<std::string, std::uint32_t> maxHead, maxArmor;
             {
                 std::vector<RE::NiAVObject*> stack{ a_root3p };
@@ -390,6 +399,7 @@ namespace CostumeFW
                     std::uint32_t id = 0;
                     std::string_view suffix;
                     if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix)) {
+                        attachedRenamed.insert(obj);
                         auto& m = head ? maxHead : maxArmor;
                         auto [it, inserted] = m.try_emplace(std::string(suffix), id);
                         if (!inserted && id > it->second) {
@@ -417,14 +427,16 @@ namespace CostumeFW
                         if (!bone) {
                             continue;
                         }
+                        // Safe to read: every bound bone is pinned via
+                        // g_boundBoneRefs for as long as the item is attached.
                         bool head = false;
                         std::uint32_t id = 0;
                         std::string_view suffix;
                         if (!ParseRenamedBone(std::string_view(bone->name.c_str()), head, id, suffix)) {
                             continue;
                         }
-                        // Dead: detached from the live skeleton (generation retired).
-                        if (!IsAttachedUnder(bone, a_root3p)) {
+                        // Dead: no longer attached (generation retired).
+                        if (!attachedRenamed.contains(bone)) {
                             dead = true;
                             return RE::BSVisit::BSVisitControl::kStop;
                         }
@@ -537,6 +549,9 @@ namespace CostumeFW
                 a_skin->bones[i] = resolved[i];
                 if (haveWorldXf) {
                     a_skin->boneWorldTransforms[i] = &resolved[i]->world;
+                }
+                if (g_boneRefSink) {
+                    g_boneRefSink->emplace_back(resolved[i]);  // pin (see g_boundBoneRefs)
                 }
             }
             a_skin->rootParent = a_root;  // bind to live actor root (skee)
@@ -719,6 +734,11 @@ namespace CostumeFW
 
             bool any = false;
             g_injectStatic3p = false;
+            // Collect the bones this injection binds to, then APPEND them to the
+            // item's pin set (append, not replace: an idempotent skip on one
+            // skeleton must not drop the pins the other skeleton still uses).
+            std::vector<RE::NiPointer<RE::NiAVObject>> collected;
+            g_boneRefSink = &collected;
             if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap);
             }
@@ -729,6 +749,11 @@ namespace CostumeFW
             }
             if (auto* root1p = player->Get3D(true); root1p && !a_m1p.nifPath.empty()) {
                 any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap);
+            }
+            g_boneRefSink = nullptr;
+            if (!collected.empty()) {
+                auto& refs = g_boundBoneRefs[a_id];
+                refs.insert(refs.end(), collected.begin(), collected.end());
             }
             if (!any) {
                 SKSE::log::warn("InjectInternal: nothing attached for id='{}'", a_id);
