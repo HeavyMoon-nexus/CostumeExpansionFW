@@ -1007,7 +1007,12 @@ namespace CostumeFW
                         ++armorTotal;
                     }
                     const char* parent = obj->parent ? obj->parent->name.c_str() : "<null>";
-                    SKSE::log::info("  headdiag[{}] {} (parent '{}')", a_tag, nm, parent);
+                    // World position: a merged-but-sane bone sits near its anchor
+                    // (head ~ pelvis height); one at the origin / thousands of units
+                    // away is the "stretched everywhere" failure signature.
+                    const auto& wp = obj->world.translate;
+                    SKSE::log::info("  headdiag[{}] {} (parent '{}') world=({:.1f},{:.1f},{:.1f})",
+                        a_tag, nm, parent, wp.x, wp.y, wp.z);
                 }
                 if (auto* node = obj->AsNode()) {
                     for (auto& child : node->GetChildren()) {
@@ -1029,6 +1034,14 @@ namespace CostumeFW
         if (h3 == 0 && h1 == 0) {
             say("[CEF] headdiag: NO _Head_ bones found - facegen head path (2) not "
                 "firing here (apply an SMP hair/head part and retry)");
+        }
+        // Live anchor reference for reading the world= values above.
+        if (auto* third = player->Get3D(false)) {
+            if (auto* headObj = third->GetObjectByName("NPC Head [Head]")) {
+                const auto& hp = headObj->world.translate;
+                SKSE::log::info("  headdiag ref: live 'NPC Head [Head]' world=({:.1f},{:.1f},{:.1f})",
+                    hp.x, hp.y, hp.z);
+            }
         }
     }
 
