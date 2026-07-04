@@ -330,6 +330,15 @@ namespace CostumeFW
         constexpr std::uint32_t kPersistProxyFirstId = 0x00080A;  // CFW_PersistProxy01..08
         constexpr int kMaxPersistProxies = 8;
 
+        // Legacy PoC head-part carriers (C §9-13..§9-18) baked into pre-production
+        // test saves. They live OUTSIDE the production pool, so the normal
+        // reconcile never touches them - yet, once registered on the player, they
+        // keep creating physics systems that collide with the production carrier
+        // (a second PhSVeil system froze the injected veil in-game 2026-07-04).
+        // Misc-type parts can't be removed via RaceMenu, so `cef persist remove`
+        // is the only lever to purge them from a contaminated save.
+        constexpr std::uint32_t kPocLeftoverIds[] = { 0x000806, 0x000807, 0x000808 };
+
         RE::BGSHeadPart* LookupPoolPart(std::uint32_t a_localId)
         {
             auto* dh = RE::TESDataHandler::GetSingleton();
@@ -350,6 +359,18 @@ namespace CostumeFW
                 }
             }
             return pool;
+        }
+
+        // Resolved legacy PoC head parts (subset that exists in the load order).
+        std::vector<RE::BGSHeadPart*> PocLeftovers()
+        {
+            std::vector<RE::BGSHeadPart*> v;
+            for (const auto id : kPocLeftoverIds) {
+                if (auto* p = LookupPoolPart(id)) {
+                    v.push_back(p);
+                }
+            }
+            return v;
         }
 
         bool CarrierFileOnDisk(const std::string& a_file)
@@ -796,17 +817,36 @@ namespace CostumeFW
             say(std::string("  ") + (ed ? ed : "?") + (reg ? " REGISTERED" : " -") +
                 "  model=" + part->model.c_str());
         }
+        // Legacy PoC leftovers still baked into a contaminated save (conflict
+        // source - see kPocLeftoverIds). Flag any that are registered.
+        for (auto* part : PocLeftovers()) {
+            if (PlayerHasHeadPart(part)) {
+                const char* ed = part->GetFormEditorID();
+                say(std::string("  [PoC leftover] ") + (ed ? ed : "?") +
+                    " REGISTERED - run 'cef persist remove' to purge");
+            }
+        }
     }
 
     void PersistCarrierRemove()
     {
-        const auto pool = PersistPool();
-        if (pool.empty()) {
+        // Purge every CEF-owned head part: the production pool AND the legacy PoC
+        // leftovers (the latter are outside the pool, never auto-removed, and
+        // collide with the production carrier). This is the rescue lever for a
+        // contaminated save; the production pool re-registers on the next content
+        // change / `cef persist regen`.
+        auto parts = PersistPool();
+        for (auto* p : PocLeftovers()) {
+            parts.push_back(p);
+        }
+        if (parts.empty()) {
             return;
         }
-        if (ReconcilePersistHeadParts({}, pool)) {
-            SKSE::log::info("persist carrier: pool deregistered (manual remove)");
+        if (ReconcilePersistHeadParts({}, parts)) {
+            SKSE::log::info("persist carrier: production pool + PoC leftovers deregistered (manual remove)");
             RebuildPlayerHead();
+        } else {
+            SKSE::log::info("persist carrier: nothing registered to remove");
         }
     }
 

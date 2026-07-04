@@ -190,7 +190,9 @@ namespace CostumeFW
             //   cef persist regen    - re-read carriers.json, reconcile + FORCE a head
             //                          rebuild (repair lever; sync-complete runs the
             //                          same pass automatically)
-            //   cef persist remove   - deregister the whole pool (cleanup lever)
+            //   cef persist remove   - deregister the production pool AND purge
+            //                          legacy PoC leftovers (000806-808) baked
+            //                          into contaminated saves (rescue lever)
             const std::string arg = Lower(rest);
             if (arg.empty()) {
                 SKSE::GetTaskInterface()->AddTask([] { PersistCarrierStatus(); });
