@@ -279,17 +279,21 @@ namespace CostumeFW
 
         void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
         {
-            auto* tasks = SKSE::GetTaskInterface();
-            if (!tasks) {
-                return;
-            }
-            tasks->AddTask([a_due, fn = std::move(a_fn)]() mutable {
-                if (std::chrono::steady_clock::now() >= a_due) {
-                    fn();
-                } else {
-                    RunAfterDelay(a_due, std::move(fn));
+            // Sleep on a background thread, then hand the payload to the SKSE
+            // task queue ONCE. The previous implementation re-queued itself
+            // through the task pump every cycle until due - safe while the
+            // pump is frame-bound (rebind retry ran that way for days), but
+            // the EARLY loading-screen pump drains tasks INCLUSIVELY, so an
+            // un-due requeue re-ran forever and froze the load at the exact
+            // moment a chain started there (in-game 2026-07-04 17:35, the
+            // bind watchdog's first tick scheduled from the kDataLoaded
+            // Reconcile). AddTask is thread-safe by design.
+            std::thread([a_due, fn = std::move(a_fn)]() mutable {
+                std::this_thread::sleep_until(a_due);
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(std::move(fn));
                 }
-            });
+            }).detach();
         }
 
         void RequestRebindRetry(const std::string& a_id)
@@ -831,21 +835,22 @@ namespace CostumeFW
     // (load sequence, RaceMenu, any mod rebuilding the head) and runs the
     // Reconcile sweep to re-inject into the current generation.
     constexpr int kBindWatchdogMs = 2500;
+    std::atomic<bool> g_watchdogTickPending{ false };
 
     void BindWatchdogTick()
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         RE::NiAVObject* r3 = player ? player->Get3D(false) : nullptr;
-        if (r3) {
-            for (const auto& it : g_active) {
-                if (HasDeadPhysicsBind(it.id, r3)) {
-                    SKSE::log::info("bind watchdog: '{}' holds a dead merge generation - reconciling", it.id);
-                    Reconcile();  // the sweep inside detaches + re-injects
-                    break;
-                }
+        if (!r3) {
+            return;
+        }
+        for (const auto& it : g_active) {
+            if (HasDeadPhysicsBind(it.id, r3)) {
+                SKSE::log::info("bind watchdog: '{}' holds a dead merge generation - reconciling", it.id);
+                Reconcile();  // the sweep inside detaches + re-injects
+                break;
             }
         }
-        RunAfterDelayMs(kBindWatchdogMs, BindWatchdogTick);
     }
 
     void StartBindWatchdogOnce()
@@ -855,7 +860,26 @@ namespace CostumeFW
             return;
         }
         SKSE::log::info("bind watchdog started ({}ms tick)", kBindWatchdogMs);
-        RunAfterDelayMs(kBindWatchdogMs, BindWatchdogTick);
+        // Cadence lives on a dedicated thread; the CHECK runs on the main
+        // thread via one AddTask per tick. The pending flag keeps ticks from
+        // piling up in the queue while the pump is busy (loading screens).
+        std::thread([]() {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kBindWatchdogMs));
+                if (g_watchdogTickPending.exchange(true)) {
+                    continue;  // previous tick not consumed yet
+                }
+                auto* tasks = SKSE::GetTaskInterface();
+                if (!tasks) {
+                    g_watchdogTickPending = false;
+                    continue;
+                }
+                tasks->AddTask([]() {
+                    g_watchdogTickPending = false;
+                    BindWatchdogTick();
+                });
+            }
+        }).detach();
     }
 
     void Reconcile()
