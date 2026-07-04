@@ -188,50 +188,60 @@ namespace CostumeFW
         // name is exactly <known-prefix><8 hex><space><bone>. Returns first BFS
         // match, or null. If found, the injected mesh can bind to the SIMULATED
         // bone and get real SMP sway (instead of the static ancestor remap).
+        // Parse "hdtSSEPhysics_AutoRename_(Armor|Head)_<8hex> <bone>". FSMP merge
+        // ids are per-skeleton sequential counters, so a HIGHER id is a NEWER
+        // generation of the same class.
+        bool ParseRenamedBone(std::string_view a_nm, bool& a_head, std::uint32_t& a_id,
+            std::string_view& a_suffix)
+        {
+            static constexpr std::string_view kArmor = "hdtSSEPhysics_AutoRename_Armor_";
+            static constexpr std::string_view kHead = "hdtSSEPhysics_AutoRename_Head_";
+            std::string_view pfx;
+            if (a_nm.starts_with(kHead)) {
+                a_head = true;
+                pfx = kHead;
+            } else if (a_nm.starts_with(kArmor)) {
+                a_head = false;
+                pfx = kArmor;
+            } else {
+                return false;
+            }
+            if (a_nm.size() < pfx.size() + 8 + 2) {
+                return false;
+            }
+            const std::string_view hex = a_nm.substr(pfx.size(), 8);
+            if (!std::all_of(hex.begin(), hex.end(),
+                    [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+                return false;
+            }
+            if (a_nm[pfx.size() + 8] != ' ') {
+                return false;
+            }
+            a_id = static_cast<std::uint32_t>(std::strtoul(std::string(hex).c_str(), nullptr, 16));
+            a_suffix = a_nm.substr(pfx.size() + 8 + 1);
+            return true;
+        }
+
+        // Selection policy (learned the hard way, 2026-07-04):
+        // - PREFER Head over Armor: an Armor merge comes from a WORN item and
+        //   dies on unequip (a mesh bound there stretches to garbage); box
+        //   contents are hidden while their token is unworn, so Head-first is
+        //   correct for both classes.
+        // - Within a class, PREFER THE HIGHEST id: FSMP keeps the RETIRING
+        //   generation attached for a few seconds after a head rebuild /
+        //   re-equip, so "attached" does not mean "current" - a bind taken in
+        //   that overlap window latches onto never-again-simulated nodes
+        //   (slightly stretched, half-swaying veil at load). The newest id is
+        //   the generation FSMP actually simulates.
         RE::NiAVObject* FindFsmpRenamedBone(RE::NiAVObject* a_root, const char* a_bone)
         {
             if (!a_root || !a_bone || !*a_bone) {
                 return nullptr;
             }
-            // Index 1 = Armor, 2 = Head (see match() return).
-            static constexpr std::string_view kPrefixes[] = {
-                "hdtSSEPhysics_AutoRename_Armor_",
-                "hdtSSEPhysics_AutoRename_Head_",
-            };
             const std::string_view bone{ a_bone };
-            auto match = [&](std::string_view nm) -> int {
-                for (std::size_t p = 0; p < 2; ++p) {
-                    const auto pfx = kPrefixes[p];
-                    if (nm.size() != pfx.size() + 8 + 1 + bone.size()) {
-                        continue;
-                    }
-                    if (nm.substr(0, pfx.size()) != pfx) {
-                        continue;
-                    }
-                    const std::string_view hex = nm.substr(pfx.size(), 8);
-                    if (!std::all_of(hex.begin(), hex.end(),
-                            [](unsigned char c) { return std::isxdigit(c) != 0; })) {
-                        continue;
-                    }
-                    if (nm[pfx.size() + 8] != ' ') {
-                        continue;
-                    }
-                    if (nm.substr(pfx.size() + 8 + 1) != bone) {
-                        continue;
-                    }
-                    return static_cast<int>(p) + 1;
-                }
-                return 0;
-            };
-            // PREFER a _Head_ match over an _Armor_ one when both exist. A Head
-            // merge comes from a registered head part = durable (survives outfit
-            // changes, rebuilt from the save). An Armor merge comes from a WORN
-            // item = transient: unequipping kills its nodes, and a mesh bound
-            // there stretches to garbage (seen in-game 2026-07-04 when the veil
-            // ARMO was worn during MCM capture and then swapped out). Box
-            // contents are hidden while their token is unworn, so preferring
-            // Head never leaves them bound to a dead node either.
-            RE::NiAVObject* armorHit = nullptr;
+            RE::NiAVObject* bestHead = nullptr;
+            RE::NiAVObject* bestArmor = nullptr;
+            std::uint32_t bestHeadId = 0, bestArmorId = 0;
             std::vector<RE::NiAVObject*> stack{ a_root };
             while (!stack.empty()) {
                 auto* obj = stack.back();
@@ -239,12 +249,18 @@ namespace CostumeFW
                 if (!obj) {
                     continue;
                 }
-                const int m = match(std::string_view(obj->name.c_str()));
-                if (m == 2) {
-                    return obj;  // Head match wins immediately
-                }
-                if (m == 1 && !armorHit) {
-                    armorHit = obj;  // remember, but keep looking for a Head match
+                bool head = false;
+                std::uint32_t id = 0;
+                std::string_view suffix;
+                if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix) &&
+                    suffix == bone) {
+                    if (head && (!bestHead || id > bestHeadId)) {
+                        bestHead = obj;
+                        bestHeadId = id;
+                    } else if (!head && (!bestArmor || id > bestArmorId)) {
+                        bestArmor = obj;
+                        bestArmorId = id;
+                    }
                 }
                 if (auto* node = obj->AsNode()) {
                     for (auto& child : node->GetChildren()) {
@@ -252,7 +268,7 @@ namespace CostumeFW
                     }
                 }
             }
-            return armorHit;
+            return bestHead ? bestHead : bestArmor;
         }
 
         // --- rebind retry (FSMP carrier attach race) ---------------------------
@@ -356,6 +372,38 @@ namespace CostumeFW
             if (!holder) {
                 return false;  // not injected on the 3p skeleton - nothing to sweep
             }
+
+            // Newest attached generation per (class, bone suffix). "Attached" is
+            // NOT enough: FSMP keeps the retiring generation on the skeleton for
+            // a few seconds, and a bind that latched onto it during the overlap
+            // window sways wrong / stretches without ever being "detached".
+            std::unordered_map<std::string, std::uint32_t> maxHead, maxArmor;
+            {
+                std::vector<RE::NiAVObject*> stack{ a_root3p };
+                while (!stack.empty()) {
+                    auto* obj = stack.back();
+                    stack.pop_back();
+                    if (!obj) {
+                        continue;
+                    }
+                    bool head = false;
+                    std::uint32_t id = 0;
+                    std::string_view suffix;
+                    if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix)) {
+                        auto& m = head ? maxHead : maxArmor;
+                        auto [it, inserted] = m.try_emplace(std::string(suffix), id);
+                        if (!inserted && id > it->second) {
+                            it->second = id;
+                        }
+                    }
+                    if (auto* node = obj->AsNode()) {
+                        for (auto& child : node->GetChildren()) {
+                            stack.push_back(child.get());
+                        }
+                    }
+                }
+            }
+
             bool dead = false;
             RE::BSVisit::TraverseScenegraphGeometries(holder,
                 [&](RE::BSGeometry* a_geom) {
@@ -369,11 +417,21 @@ namespace CostumeFW
                         if (!bone) {
                             continue;
                         }
-                        const std::string_view nm{ bone->name.c_str() };
-                        if (!nm.starts_with("hdtSSEPhysics_AutoRename_")) {
+                        bool head = false;
+                        std::uint32_t id = 0;
+                        std::string_view suffix;
+                        if (!ParseRenamedBone(std::string_view(bone->name.c_str()), head, id, suffix)) {
                             continue;
                         }
+                        // Dead: detached from the live skeleton (generation retired).
                         if (!IsAttachedUnder(bone, a_root3p)) {
+                            dead = true;
+                            return RE::BSVisit::BSVisitControl::kStop;
+                        }
+                        // Stale: a NEWER generation of the same class exists - only
+                        // the newest is simulated by FSMP.
+                        const auto& m = head ? maxHead : maxArmor;
+                        if (auto it = m.find(std::string(suffix)); it != m.end() && id < it->second) {
                             dead = true;
                             return RE::BSVisit::BSVisitControl::kStop;
                         }
