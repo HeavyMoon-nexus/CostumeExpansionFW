@@ -122,6 +122,19 @@ namespace CostumeFW
     // `cef persist` status print).
     bool PlayerHasHeadPart(RE::BGSHeadPart* a_part);
 
+    // Debounced request for a persist head rebuild: coalesces a burst of
+    // ApplyPersistCarrier-driven rebuilds into ONE DoReset3D ~500ms after the
+    // last request, so FSMP rebuilds the wig physics once (not per settings-write
+    // / sync / load pass) - each FSMP rebuild commits a ~2.5GB SSE Engine Fixes
+    // arena that is retained. Use this from the automatic carrier path; the
+    // manual levers (cef persist regen/remove) call RebuildPlayerHead directly.
+    // Main thread only.
+    void RequestPersistHeadRebuild(const char* a_reason);
+
+    // One-line churn diagnostics (head-rebuild coalescing, reconcile / watchdog /
+    // dead-bind / rebind-retry / body-morph-apply counts) for `cef persist`.
+    std::string PersistDiagString();
+
     // Force a facegen head rebuild (DoReset3D) so the engine loads the current
     // head-part models and FSMP's facegen path re-fires, then re-inject after a
     // beat: DoReset3D does NOT fire the Load3D hook (C §9-11(ii)), so the

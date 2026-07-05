@@ -478,9 +478,12 @@ namespace CostumeFW
             // A model repoint only takes effect through a head rebuild (the engine
             // caches the loaded part), so rebuild on EITHER change - but only
             // while parts stay registered (a pure deregister already rebuilt via
-            // regChanged, and repoints with nothing registered can wait).
+            // regChanged, and repoints with nothing registered can wait). Debounced:
+            // a burst of ApplyPersistCarrier calls (settings writes, sync, load
+            // passes) coalesces into ONE DoReset3D so FSMP rebuilds the wig physics
+            // once, not per call (each rebuild retains a ~2.5GB Engine Fixes arena).
             if (regChanged || (repointChanged && !desired.empty())) {
-                RebuildPlayerHead();  // no-op without player 3D (load time)
+                RequestPersistHeadRebuild(regChanged ? "registration" : "model repoint");
                 if (a_refreshChanged) {
                     RE::DebugNotification("Costume persist physics updated");
                 }
@@ -850,6 +853,9 @@ namespace CostumeFW
                     " REGISTERED - run 'cef persist remove' to purge");
             }
         }
+        // Churn diagnostics (Codex Phase 2): after a fresh load the target is
+        // headRebuild exec ~1 and low reconcile/watchdog counts.
+        say("[CEF] churn: " + PersistDiagString());
     }
 
     void PersistCarrierRemove()

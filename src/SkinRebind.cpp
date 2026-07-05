@@ -306,6 +306,30 @@ namespace CostumeFW
         bool g_injectStatic3p = false;         // set by RebindGeometry, read by InjectInternal
         std::vector<std::string> g_rebindRetryIds;  // items to detach+re-inject on retry
 
+        // --- persist head-rebuild debounce + diagnostics (Codex Phase 2) -------
+        // ApplyPersistCarrier can fire in bursts (settings writes, sync
+        // completion, load passes); each DoReset3D makes FSMP rebuild the wig
+        // physics and SSE Engine Fixes commits (and RETAINS) a ~2.5GB arena per
+        // rebuild. Coalesce a burst into ONE DoReset3D, and give the dead-bind
+        // watchdog a grace window afterwards so it doesn't judge FSMP's
+        // generation-overlap as "dead" and pile on re-injects (each of which can
+        // rebuild again).
+        std::atomic<bool> g_headRebuildQueued{ false };
+        std::atomic<std::uint64_t> g_headRebuildRev{ 0 };
+        std::chrono::steady_clock::time_point g_headRebuildGraceUntil{};  // main thread only
+
+        struct PersistDiag
+        {
+            std::uint64_t headRebuildRequested{ 0 };
+            std::uint64_t headRebuildExecuted{ 0 };
+            std::uint64_t reconcileCalls{ 0 };
+            std::uint64_t watchdogReconciles{ 0 };
+            std::uint64_t deadBindReinjects{ 0 };
+            std::uint64_t rebindRetries{ 0 };
+            std::uint64_t bodyMorphApplies{ 0 };
+        };
+        PersistDiag g_persistDiag;
+
         void DetachNodes(const std::string& a_id);  // fwd (defined below)
 
         void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
@@ -345,6 +369,7 @@ namespace CostumeFW
                 std::chrono::duration_cast<std::chrono::milliseconds>(kRebindRetryDelay).count());
             RunAfterDelay(std::chrono::steady_clock::now() + kRebindRetryDelay, []() {
                 g_rebindRetryQueued = false;
+                ++g_persistDiag.rebindRetries;
                 const auto ids = std::move(g_rebindRetryIds);
                 g_rebindRetryIds.clear();
                 SKSE::log::info("rebind retry: re-injecting {} static item(s)", ids.size());
@@ -733,6 +758,7 @@ namespace CostumeFW
             // clips through a 3BA/CBBE body. No-op if skee is absent. Skipped for
             // hair/head content (a wig must not get body-slider deformation).
             if (a_applyMorph) {
+                ++g_persistDiag.bodyMorphApplies;
                 BodyMorph::ApplyToNode(RE::PlayerCharacter::GetSingleton(), holder);
             }
 
@@ -943,6 +969,12 @@ namespace CostumeFW
 
     void BindWatchdogTick()
     {
+        // Grace after a head rebuild: FSMP's old/new generations overlap for a few
+        // seconds, and judging that as "dead" here would pile on re-injects that
+        // each can trigger another FSMP rebuild (Engine Fixes arena per rebuild).
+        if (std::chrono::steady_clock::now() < g_headRebuildGraceUntil) {
+            return;
+        }
         auto* player = RE::PlayerCharacter::GetSingleton();
         RE::NiAVObject* r3 = player ? player->Get3D(false) : nullptr;
         if (!r3) {
@@ -950,6 +982,7 @@ namespace CostumeFW
         }
         for (const auto& it : g_active) {
             if (HasDeadPhysicsBind(it.id, r3)) {
+                ++g_persistDiag.watchdogReconciles;
                 SKSE::log::info("bind watchdog: '{}' holds a dead merge generation - reconciling", it.id);
                 Reconcile();  // the sweep inside detaches + re-injects
                 break;
@@ -989,6 +1022,7 @@ namespace CostumeFW
     void Reconcile()
     {
         StartBindWatchdogOnce();
+        ++g_persistDiag.reconcileCalls;
         if (g_active.empty()) {
             return;
         }
@@ -1054,6 +1088,7 @@ namespace CostumeFW
                 // first so the injection below rebinds to the CURRENT generation.
                 if (player) {
                     if (auto* r3 = player->Get3D(false); r3 && HasDeadPhysicsBind(it.id, r3)) {
+                        ++g_persistDiag.deadBindReinjects;
                         SKSE::log::info("  '{}': bound FSMP bones are DETACHED (dead merge "
                                         "generation) - re-injecting", it.id);
                         DetachNodes(it.id);
@@ -1269,11 +1304,49 @@ namespace CostumeFW
         if (!player || !player->Get3D(false)) {
             return;  // no 3D yet - the engine builds the head with the current set
         }
+        ++g_persistDiag.headRebuildExecuted;
         SKSE::log::info("persist head: DoReset3D (facegen rebuild)");
         player->DoReset3D(false);
+        // Grace window: FSMP keeps the retiring head generation for a few seconds
+        // (§9-19); suppress the dead-bind watchdog so it doesn't judge the overlap
+        // as dead and pile on re-injects (each can trigger another FSMP rebuild).
+        g_headRebuildGraceUntil = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         // Load3D hook does not fire on DoReset3D (C §9-11(ii)): re-inject
         // explicitly once the rebuild settles; the watchdog converges the rest.
         RunAfterDelayMs(1500, [] { Reconcile(); });
+    }
+
+    void RequestPersistHeadRebuild(const char* a_reason)
+    {
+        // Debounce: coalesce a burst of ApplyPersistCarrier-driven rebuild
+        // requests into ONE DoReset3D ~500ms after the LAST request, so FSMP
+        // rebuilds the wig physics once (not per settings-write / sync / pass).
+        ++g_persistDiag.headRebuildRequested;
+        const auto rev = ++g_headRebuildRev;
+        if (g_headRebuildQueued.exchange(true)) {
+            SKSE::log::debug("persist head: rebuild coalesced ({})", a_reason ? a_reason : "");
+            return;
+        }
+        RunAfterDelayMs(500, [rev]() {
+            g_headRebuildQueued = false;
+            if (rev < g_headRebuildRev.load()) {
+                RequestPersistHeadRebuild("coalesced newer revision");
+                return;  // a newer request superseded this one
+            }
+            RebuildPlayerHead();
+        });
+    }
+
+    std::string PersistDiagString()
+    {
+        const auto& d = g_persistDiag;
+        return "headRebuild(req/exec)=" + std::to_string(d.headRebuildRequested) + "/" +
+               std::to_string(d.headRebuildExecuted) +
+               " reconcile=" + std::to_string(d.reconcileCalls) +
+               " watchdog=" + std::to_string(d.watchdogReconciles) +
+               " deadbind=" + std::to_string(d.deadBindReinjects) +
+               " rebindRetry=" + std::to_string(d.rebindRetries) +
+               " morphApply=" + std::to_string(d.bodyMorphApplies);
     }
 
     bool ChangeHeadPartPoC(const std::string& a_id)
