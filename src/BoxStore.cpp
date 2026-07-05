@@ -475,14 +475,21 @@ namespace CostumeFW
             // No persist entry / inactive set -> desired stays empty = deregister.
 
             const bool regChanged = ReconcilePersistHeadParts(desired, pool);
-            // A model repoint only takes effect through a head rebuild (the engine
-            // caches the loaded part), so rebuild on EITHER change - but only
-            // while parts stay registered (a pure deregister already rebuilt via
-            // regChanged, and repoints with nothing registered can wait). Debounced:
-            // a burst of ApplyPersistCarrier calls (settings writes, sync, load
-            // passes) coalesces into ONE DoReset3D so FSMP rebuilds the wig physics
-            // once, not per call (each rebuild retains a ~2.5GB Engine Fixes arena).
-            if (regChanged || (repointChanged && !desired.empty())) {
+            // Load-time race avoidance (Codex 1-2). The head-part registration is
+            // SAVE-PERSISTED, so on load the ENGINE rebuilds the head (and FSMP the
+            // wig physics) ONCE, naturally, like normal equipment. A CEF-forced
+            // DoReset3D on top of that only adds redundant rebuilds that race the
+            // engine's own multi-pass head build - the non-deterministic 10/27GB
+            // lottery (each extra FSMP build retains a ~2.5GB Engine Fixes arena).
+            // So on the LOAD pass (a_refreshChanged=false) do NOT force a rebuild
+            // for a repoint-only change: the kDataLoaded repoint (which runs before
+            // the engine's build) already points the head part at the current NIF.
+            // Still rebuild when the REGISTRATION actually changed (parts added/
+            // removed - a save predating the registration, a live toggle) and on any
+            // RUNTIME content change; the debounce coalesces bursts either way.
+            const bool needRebuild =
+                regChanged || (a_refreshChanged && repointChanged && !desired.empty());
+            if (needRebuild) {
                 RequestPersistHeadRebuild(regChanged ? "registration" : "model repoint");
                 if (a_refreshChanged) {
                     RE::DebugNotification("Costume persist physics updated");
