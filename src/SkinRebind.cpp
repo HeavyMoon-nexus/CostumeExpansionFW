@@ -203,14 +203,19 @@ namespace CostumeFW
         // name is exactly <known-prefix><8 hex><space><bone>. Returns first BFS
         // match, or null. If found, the injected mesh can bind to the SIMULATED
         // bone and get real SMP sway (instead of the static ancestor remap).
-        // Parse "hdtSSEPhysics_AutoRename_(Armor|Head)_<8hex> <bone>". FSMP merge
-        // ids are per-skeleton sequential counters, so a HIGHER id is a NEWER
-        // generation of the same class.
+        // Parse "hdtSSEPhysics_AutoRename_(Armor|Head|External)_<8hex> <bone>".
+        // FSMP merge ids are per-skeleton sequential counters, so a HIGHER id is
+        // a NEWER generation of the same class.
         bool ParseRenamedBone(std::string_view a_nm, bool& a_head, std::uint32_t& a_id,
             std::string_view& a_suffix)
         {
             static constexpr std::string_view kArmor = "hdtSSEPhysics_AutoRename_Armor_";
             static constexpr std::string_view kHead = "hdtSSEPhysics_AutoRename_Head_";
+            // Future FSMP external-node API (fsmp_patches/): merges would land
+            // under an "External" prefix. Provisionally classed with Armor
+            // (per-item lifecycle, explicit detach) until that API ships - inert
+            // today, no released FSMP emits this prefix.
+            static constexpr std::string_view kExternal = "hdtSSEPhysics_AutoRename_External_";
             std::string_view pfx;
             if (a_nm.starts_with(kHead)) {
                 a_head = true;
@@ -218,6 +223,9 @@ namespace CostumeFW
             } else if (a_nm.starts_with(kArmor)) {
                 a_head = false;
                 pfx = kArmor;
+            } else if (a_nm.starts_with(kExternal)) {
+                a_head = false;
+                pfx = kExternal;
             } else {
                 return false;
             }
