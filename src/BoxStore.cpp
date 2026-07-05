@@ -114,6 +114,35 @@ namespace CostumeFW
 
         void WriteCarrierManifest();  // fwd (defined below)
 
+        // M2 (CEF_STATE_SCOPE.md §3): a persist item is ACTIVE on this save when
+        // it sits in the injection registry token-less (restored from the co-save
+        // or activated live). g_persist is only the shared CATALOG; everything
+        // per-save (manifest persist fragment, head-carrier desired set) keys off
+        // the ACTIVE set, never the catalog.
+        bool AnyPersistActive()
+        {
+            for (const auto& it : ActiveSnapshot()) {
+                if (it.tokenId.empty()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::vector<std::string> ActivePersistIds()
+        {
+            std::vector<std::string> out;
+            for (const auto& it : ActiveSnapshot()) {
+                if (it.tokenId.empty()) {
+                    out.push_back(it.id);
+                }
+            }
+            // Registry order varies with the restore/add sequence; sort so the
+            // manifest is deterministic and nifcarrier's hash-skip stays effective.
+            std::sort(out.begin(), out.end());
+            return out;
+        }
+
         // Write a_data to a_path via a sibling ".tmp" + atomic rename, so a CTD /
         // process kill mid-write can never leave a truncated file at a_path (the
         // old trunc-overwrite could destroy CEF_settings.json - Codex review
@@ -304,9 +333,12 @@ namespace CostumeFW
             // head path. sync builds Persist_carrier/_partNN (+ the per-*-shape
             // renamed physics XML) from these; CEF registers the head-part pool
             // and repoints its models (stage 3b).
+            // M2: the fragment tracks THIS SAVE'S ACTIVE set, not the shared
+            // catalog, so FSMP never builds physics for content this character
+            // doesn't show (CEF_STATE_SCOPE.md §5).
             {
                 auto pcontents = nlohmann::json::array();
-                for (const auto& id : g_persist) {
+                for (const auto& id : ActivePersistIds()) {
                     if (auto c = resolveContent(id); !c.is_null()) {
                         pcontents.push_back(std::move(c));
                     }
@@ -456,7 +488,9 @@ namespace CostumeFW
             const auto pj = a_doc.find("persist");
             if (pj != a_doc.end() && pj->is_object()) {
                 const int count = pj->value("count", -1);
-                const bool active = count != 0 && g_cefEnabled && !g_persist.empty();
+                // M2: keyed off the per-save ACTIVE set (not the catalog) - a
+                // character with nothing activated must not carry the head parts.
+                const bool active = count != 0 && g_cefEnabled && AnyPersistActive();
                 const std::string file = pj->value("file", "");
                 if (!file.empty() && !CarrierFileOnDisk(file)) {
                     // Fail-safe (mirrors the box carriers): never point a HDPT at
@@ -855,11 +889,10 @@ namespace CostumeFW
             }
             SetTokenStats(b);
         }
-        // Persist content: register token-less (always-injected).
-        for (const auto& c : g_persist) {
-            RegisterBoxById(c, {});  // empty token -> tokenForm 0 -> always show
-        }
-        SKSE::log::info("settings: loaded {} box(es) ({} content), {} persist, enabled={}",
+        // Persist is NOT registered from the catalog: the ACTIVE set is per-save
+        // and comes from the co-save restore (M2, CEF_STATE_SCOPE.md §3). A new
+        // character starts with nothing shown.
+        SKSE::log::info("settings: loaded {} box(es) ({} content), {} persist (catalog), enabled={}",
             g_boxes.size(), contentCount, g_persist.size(), g_cefEnabled);
         // Point each token ARMA at its current carrier revision (carriers.json).
         // No refresh here: tokens haven't equipped yet at load time.
@@ -903,7 +936,8 @@ namespace CostumeFW
         } else {
             say("[CEF] persist entry: none (no persist build yet)");
         }
-        say("[CEF] persist contents: " + std::to_string(g_persist.size()) +
+        say("[CEF] persist: catalog=" + std::to_string(g_persist.size()) +
+            " active(this save)=" + std::to_string(ActivePersistIds().size()) +
             std::string(g_cefEnabled ? "" : " (CEF disabled)"));
         for (auto* part : pool) {
             const char* ed = part->GetFormEditorID();
@@ -1032,10 +1066,9 @@ namespace CostumeFW
             }
             SetTokenStats(b);  // token fields revert on load - re-apply
         }
-        for (const auto& c : g_persist) {
-            RegisterBoxById(c, {});  // token-less persist
-        }
-        SKSE::log::info("settings: reapplied {} box(es) + {} persist", g_boxes.size(), g_persist.size());
+        // Persist actives are per-save: the co-save restore (which precedes this
+        // kPostLoadGame pass) already re-registered them (M2, CEF_STATE_SCOPE.md §3).
+        SKSE::log::info("settings: reapplied {} box(es)", g_boxes.size());
     }
 
     std::vector<std::string> PersistContents()
@@ -1045,12 +1078,21 @@ namespace CostumeFW
 
     bool AddPersistContent(const std::string& a_content)
     {
-        if (a_content.empty() ||
-            std::find(g_persist.begin(), g_persist.end(), a_content) != g_persist.end()) {
+        if (a_content.empty()) {
             return false;
         }
-        g_persist.push_back(a_content);
-        WriteJson();
+        // "Already added" means ACTIVE ON THIS SAVE (M2, CEF_STATE_SCOPE.md §3):
+        // capturing a catalog entry on a second character must succeed - only a
+        // same-save duplicate fails (so the MCM never swallows the item).
+        for (const auto& it : ActiveSnapshot()) {
+            if (it.tokenId.empty() && it.id == a_content) {
+                return false;
+            }
+        }
+        if (std::find(g_persist.begin(), g_persist.end(), a_content) == g_persist.end()) {
+            g_persist.push_back(a_content);  // catalog add (shared across saves)
+            WriteJson();
+        }
         return true;
     }
 
@@ -1067,6 +1109,46 @@ namespace CostumeFW
         g_contentEnchants.erase(a_content);  // and its captured enchantment
         WriteJson();
         return true;
+    }
+
+    bool PersistSetActive(const std::string& a_id, bool a_on)
+    {
+        bool active = false;
+        for (const auto& it : ActiveSnapshot()) {
+            if (it.tokenId.empty() && it.id == a_id) {
+                active = true;
+                break;
+            }
+        }
+        if (a_on) {
+            if (std::find(g_persist.begin(), g_persist.end(), a_id) == g_persist.end()) {
+                SKSE::log::warn(
+                    "persist on: '{}' is not in the catalog (capture it via the MCM first)", a_id);
+                return false;
+            }
+            if (active) {
+                return true;  // idempotent
+            }
+            if (!RegisterBoxById(a_id, {})) {
+                return false;
+            }
+        } else {
+            if (!active) {
+                return false;
+            }
+            DetachSkinned(a_id);  // detach + unregister; the catalog is untouched
+        }
+        Reconcile();
+        RebuildPersistAbility();
+        ApplyBoxAbilities();
+        SyncPersistManifest();  // the persist fragment tracks the active set
+        SKSE::log::info("persist {}: '{}' on this save", a_on ? "on" : "off", a_id);
+        return true;
+    }
+
+    void SyncPersistManifest()
+    {
+        WriteCarrierManifest();
     }
 
     std::vector<int> HideSlotsFor(const std::string& a_id)

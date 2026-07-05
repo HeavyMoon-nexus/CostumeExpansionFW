@@ -126,8 +126,24 @@ namespace CostumeFW
 
     // Re-register every box's contents into the active registry after a co-save
     // revert wiped it (the box store's own list survives revert). Does not touch
-    // the json. Call on kPostLoadGame before Reconcile. Main thread.
+    // the json. Persist is NOT reapplied here: its ACTIVE set is per-save and
+    // the co-save restore owns it (M2, CEF_STATE_SCOPE.md §3). Call on
+    // kPostLoadGame before Reconcile. Main thread.
     void ReapplyBoxes();
+
+    // M2 (CEF_STATE_SCOPE.md §3): activate/deactivate a persist item ON THIS
+    // SAVE without touching the shared catalog (`cef persist on|off <id>`).
+    // on: the id must already be in the catalog; registers + reconciles.
+    // off: detaches + unregisters (works for active-but-uncataloged ids too).
+    // Main thread.
+    bool PersistSetActive(const std::string& a_id, bool a_on);
+
+    // Rewrite the carrier manifest so its persist fragment tracks THIS SAVE'S
+    // ACTIVE set. Call after a persist activation change lands in the registry
+    // (post-registration task / co-save restore); compare-skips when unchanged.
+    // The WriteJson path also writes the manifest, but it runs BEFORE the
+    // registration task, so activation changes need this explicit second pass.
+    void SyncPersistManifest();
 
     // --- approach-C persist head carriers (stage 3b) --------------------------
     // The persist class's SMP physics rides the facegen head path: nifcarrier

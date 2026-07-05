@@ -522,6 +522,7 @@ namespace CostumeFW
                 Reconcile();
                 RebuildPersistAbility();  // contents changed -> re-synth persist enchant
                 ApplyBoxAbilities();
+                SyncPersistManifest();  // persist manifest fragment tracks the ACTIVE set (M2)
             });
             return true;
         }
@@ -537,6 +538,7 @@ namespace CostumeFW
                 Reconcile();
                 RebuildPersistAbility();
                 ApplyBoxAbilities();
+                SyncPersistManifest();  // persist manifest fragment tracks the ACTIVE set (M2)
             });
             return true;
         }
@@ -643,6 +645,7 @@ namespace CostumeFW
                 Reconcile();
                 RebuildPersistAbility();  // new contents -> re-synth persist enchant
                 ApplyBoxAbilities();
+                SyncPersistManifest();  // persist manifest fragment tracks the ACTIVE set (M2)
             });
             return true;
         }

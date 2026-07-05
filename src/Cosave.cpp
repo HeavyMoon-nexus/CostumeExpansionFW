@@ -1,4 +1,5 @@
 #include "Cosave.h"
+#include "BoxStore.h"
 #include "SkinRebind.h"
 
 #include <cstdint>
@@ -82,8 +83,14 @@ namespace CostumeFW
                 }
             }
             SKSE::log::info("cosave: restored {} item(s)", restored);
-            // Reconcile once the player 3D is ready (next frame).
-            SKSE::GetTaskInterface()->AddTask([] { Reconcile(); });
+            // Reconcile once the player 3D is ready (next frame), then bring the
+            // carrier manifest's persist fragment in line with THIS save's active
+            // set (M2, CEF_STATE_SCOPE.md §3/§5 - a character switch changes the
+            // set; the compare-skip keeps same-character reloads free).
+            SKSE::GetTaskInterface()->AddTask([] {
+                Reconcile();
+                SyncPersistManifest();
+            });
         }
 
         void RevertCallback(SKSE::SerializationInterface*)

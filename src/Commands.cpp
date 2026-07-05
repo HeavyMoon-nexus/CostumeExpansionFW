@@ -193,6 +193,8 @@ namespace CostumeFW
             //   cef persist remove   - deregister the production pool AND purge
             //                          legacy PoC leftovers (000806-808) baked
             //                          into contaminated saves (rescue lever)
+            //   cef persist on <id>  - M2: activate a CATALOG id on this save
+            //   cef persist off <id> - M2: deactivate on this save (catalog kept)
             const std::string arg = Lower(rest);
             if (arg.empty()) {
                 SKSE::GetTaskInterface()->AddTask([] { PersistCarrierStatus(); });
@@ -205,8 +207,28 @@ namespace CostumeFW
             } else if (arg == "remove") {
                 SKSE::GetTaskInterface()->AddTask([] { PersistCarrierRemove(); });
                 Print("[CEF] persist: deregistering head-carrier pool (see log)");
+            } else if (arg.rfind("on ", 0) == 0 || arg.rfind("off ", 0) == 0) {
+                // M2 per-save activation levers (the MCM catalog UI lands in a
+                // later phase). Use the raw rest for the id - plugin names are
+                // case-sensitive on some filesystems and Lower() mangles them.
+                const bool on = arg.rfind("on ", 0) == 0;
+                const std::string id = Trim(rest.substr(on ? 3 : 4));
+                SKSE::GetTaskInterface()->AddTask([id, on] {
+                    const bool ok = PersistSetActive(id, on);
+                    if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                        std::string msg;
+                        if (ok) {
+                            msg = std::string("[CEF] persist ") +
+                                  (on ? "on: active on this save" : "off: deactivated on this save");
+                        } else {
+                            msg = on ? "[CEF] persist on: failed - not in catalog? (see log)"
+                                     : "[CEF] persist off: not active on this save";
+                        }
+                        c->Print(msg.c_str());
+                    }
+                });
             } else {
-                Print("[CEF] usage: cef persist [regen|remove]");
+                Print("[CEF] usage: cef persist [regen|remove|on <id>|off <id>]");
             }
         } else if (sub == "morph") {
             // Per-content body-morph opt-in (default OFF). Body morph is only
