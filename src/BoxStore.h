@@ -145,6 +145,15 @@ namespace CostumeFW
     // registration task, so activation changes need this explicit second pass.
     void SyncPersistManifest();
 
+    // This save's ACTIVE persist ids (registry token-less entries, sorted).
+    std::vector<std::string> PersistActiveIds();
+
+    // MCM Diagnostics page: compact status lines composed on the C++ side so
+    // the console levers and the MCM share one source of truth (the Papyrus
+    // just renders). Lines starting "# " are section headers. VM-thread
+    // tolerated (read-only snapshots).
+    std::vector<std::string> DiagLines();
+
     // --- approach-C persist head carriers (stage 3b) --------------------------
     // The persist class's SMP physics rides the facegen head path: nifcarrier
     // `sync` builds a head-part POOL (CFW_PersistCarrier = bones + physics XML +

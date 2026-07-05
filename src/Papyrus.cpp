@@ -543,6 +543,84 @@ namespace CostumeFW
             return true;
         }
 
+        // --- C-phase MCM support (Diagnostics / body morph / M2 activation) ----
+
+        std::vector<RE::BSFixedString> GetDiagLinesNative(RE::StaticFunctionTag*)
+        {
+            std::vector<RE::BSFixedString> out;
+            for (const auto& l : DiagLines()) {
+                out.emplace_back(l);
+            }
+            return out;
+        }
+
+        bool GetBodyMorphNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            return BodyMorphOn(a_id.c_str());
+        }
+
+        void SetBodyMorphNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, bool a_on)
+        {
+            const std::string id = a_id.c_str();
+            SKSE::GetTaskInterface()->AddTask([id, a_on] {
+                SetBodyMorphOn(id, a_on);   // def + json
+                HideInjectedNodes(id);      // drop the node so Reconcile re-injects
+                Reconcile();                // with the new decision
+            });
+        }
+
+        std::vector<RE::BSFixedString> GetPersistActiveNative(RE::StaticFunctionTag*)
+        {
+            std::vector<RE::BSFixedString> out;
+            for (const auto& id : PersistActiveIds()) {
+                out.emplace_back(id);
+            }
+            return out;
+        }
+
+        bool IsPersistActiveNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            const std::string id = a_id.c_str();
+            for (const auto& it : ActiveSnapshot()) {
+                if (it.tokenId.empty() && it.id == id) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool SetPersistActiveNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, bool a_on)
+        {
+            const std::string id = a_id.c_str();
+            // Pre-validate on the VM thread so the MCM toggle gets a truthful
+            // return; the scene mutation runs on the main thread like every
+            // other mutator (PersistSetActive re-checks there).
+            bool active = false;
+            for (const auto& it : ActiveSnapshot()) {
+                if (it.tokenId.empty() && it.id == id) {
+                    active = true;
+                    break;
+                }
+            }
+            if (a_on == active) {
+                return true;  // already in the requested state
+            }
+            if (a_on) {
+                bool inCatalog = false;
+                for (const auto& c : PersistContents()) {
+                    if (c == id) {
+                        inCatalog = true;
+                        break;
+                    }
+                }
+                if (!inCatalog) {
+                    return false;
+                }
+            }
+            SKSE::GetTaskInterface()->AddTask([id, a_on] { PersistSetActive(id, a_on); });
+            return true;
+        }
+
         // --- Hide-when-worn (§8.10) -------------------------------------------
         // Slots are a space-separated list of vanilla biped slot numbers (e.g.
         // "30 31 42"); the content is hidden while one of those slots is held by
@@ -748,6 +826,12 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetPersistContents", kClass, GetPersistContents);
         a_vm->RegisterFunction("AddPersist", kClass, AddPersistNative);
         a_vm->RegisterFunction("RemovePersist", kClass, RemovePersistNative);
+        a_vm->RegisterFunction("GetDiagLines", kClass, GetDiagLinesNative);
+        a_vm->RegisterFunction("GetBodyMorph", kClass, GetBodyMorphNative);
+        a_vm->RegisterFunction("SetBodyMorph", kClass, SetBodyMorphNative);
+        a_vm->RegisterFunction("GetPersistActive", kClass, GetPersistActiveNative);
+        a_vm->RegisterFunction("IsPersistActive", kClass, IsPersistActiveNative);
+        a_vm->RegisterFunction("SetPersistActive", kClass, SetPersistActiveNative);
 
         a_vm->RegisterFunction("GetHideSlots", kClass, GetHideSlots);
         a_vm->RegisterFunction("SetHideSlots", kClass, SetHideSlotsNative);

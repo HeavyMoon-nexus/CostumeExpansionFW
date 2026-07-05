@@ -145,10 +145,29 @@ String Function GetBoxPreset(String token) Global Native
 ; The token of the box currently using this preset name ("" if free).
 String Function GetPresetAssignedTo(String name) Global Native
 
-; --- Persist (token-less, always-shown; worn-capture like a box) --------------
+; --- Persist (token-less; worn-capture like a box) ----------------------------
+; M2 (CEF_STATE_SCOPE.md): GetPersistContents = the shared CATALOG (all saves);
+; what actually shows is the per-save ACTIVE set below. AddPersist = catalog add
+; + activate on this save (+ capture); RemovePersist = catalog delete (other
+; saves keep their actives).
 String[] Function GetPersistContents() Global Native
 Bool Function AddPersist(String content) Global Native
 Bool Function RemovePersist(String content) Global Native
+
+; Per-save activation (M2). SetPersistActive is VISUAL-ONLY (never moves items);
+; on requires the id to be in the catalog.
+String[] Function GetPersistActive() Global Native
+Bool Function IsPersistActive(String id) Global Native
+Bool Function SetPersistActive(String id, Bool bOn) Global Native
+
+; Per-content body-morph opt-in (default OFF; the `cef morph` levers). Set
+; queues a re-inject so the change shows immediately.
+Bool Function GetBodyMorph(String id) Global Native
+Function SetBodyMorph(String id, Bool bOn) Global Native
+
+; Diagnostics page: compact status lines composed natively. Lines starting
+; "# " are section headers.
+String[] Function GetDiagLines() Global Native
 
 ; --- Hide-when-worn (§8.10) --------------------------------------------------
 ; A content id is hidden while one of the given vanilla biped slots (space-

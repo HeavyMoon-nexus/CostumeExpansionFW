@@ -1,4 +1,5 @@
 #include "BoxStore.h"
+#include "BodyMorph.h"
 #include "SkinRebind.h"
 
 #include "RE/A/ActorEquipManager.h"
@@ -640,6 +641,10 @@ namespace CostumeFW
         std::atomic<bool> g_syncScheduled{ false };
         std::atomic<bool> g_syncRunning{ false };
         std::atomic<bool> g_syncRerun{ false };  // manifest changed while a sync ran
+        // Last auto-sync outcome for the MCM Diagnostics page: -999 = none this
+        // session, -2 = timed out (child terminated), -3 = failed to start,
+        // otherwise the nifcarrier exit code.
+        std::atomic<int> g_lastSyncExit{ -999 };
 
         std::string ReadSyncCommand()
         {
@@ -696,6 +701,7 @@ namespace CostumeFW
             }
             if (!ok) {
                 SKSE::log::error("auto-sync: CreateProcess failed ({}) for: {}", GetLastError(), cmd);
+                g_lastSyncExit = -3;
                 g_syncRunning = false;
                 return;
             }
@@ -705,6 +711,7 @@ namespace CostumeFW
                 DWORD code = 1;
                 if (WaitForSingleObject(h, kSyncTimeoutMs) == WAIT_OBJECT_0) {
                     GetExitCodeProcess(h, &code);
+                    g_lastSyncExit = static_cast<int>(code);
                 } else {
                     // A wedged child must not outlive the wait: once
                     // g_syncRunning drops, a rerun would race it on the same
@@ -714,6 +721,7 @@ namespace CostumeFW
                     SKSE::log::warn("auto-sync: nifcarrier timed out - terminating child");
                     TerminateProcess(h, 1);
                     WaitForSingleObject(h, 5000);
+                    g_lastSyncExit = -2;
                 }
                 CloseHandle(h);
                 g_syncRunning = false;
@@ -1149,6 +1157,105 @@ namespace CostumeFW
     void SyncPersistManifest()
     {
         WriteCarrierManifest();
+    }
+
+    std::vector<std::string> PersistActiveIds()
+    {
+        return ActivePersistIds();
+    }
+
+    std::vector<std::string> DiagLines()
+    {
+        std::vector<std::string> out;
+        out.push_back("# Status");
+        out.push_back(std::string("CEF master: ") + (g_cefEnabled ? "enabled" : "DISABLED"));
+        out.push_back(std::string("RaceMenu/skee body morph: ") +
+                      (BodyMorph::Available() ? "acquired" : "NOT AVAILABLE"));
+        out.push_back(std::string("FSMP (hdtSMP64.dll): ") +
+                      (GetModuleHandleA("hdtSMP64.dll") ? "loaded" : "NOT LOADED"));
+        {
+            const int sync = g_lastSyncExit.load();
+            std::string s = "carrier auto-sync: ";
+            if (sync == -999) {
+                s += "(none this session)";
+            } else if (sync == -2) {
+                s += "TIMED OUT - see CEF_sync.log";
+            } else if (sync == -3) {
+                s += "FAILED TO START - check CEF_sync_command.txt";
+            } else if (sync == 0) {
+                s += "ok (exit 0)";
+            } else {
+                s += "FAILED (exit " + std::to_string(sync) + ") - see CEF_sync.log";
+            }
+            out.push_back(s);
+        }
+
+        nlohmann::json cj;
+        {
+            std::ifstream f(kCarriersJsonPath);
+            if (f) {
+                try {
+                    f >> cj;
+                } catch (...) {
+                    cj = nlohmann::json::object();
+                }
+            }
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+
+        out.push_back("# Boxes");
+        if (g_boxes.empty()) {
+            out.push_back("(no boxes)");
+        }
+        for (const auto& b : g_boxes) {
+            const int slot = SlotNumberOf(ResolveArmo(b.token));
+            std::string line = "box " + std::to_string(slot) + ": " +
+                               std::to_string(b.contents.size()) + " item(s)";
+            if (!b.enabled) {
+                line += ", disabled";
+            }
+            const std::uint32_t tf = ResolveFormId(b.token);
+            if (player && tf && player->GetWornArmor(tf)) {
+                line += ", WORN";
+            }
+            const std::string key = std::to_string(slot);
+            if (cj.contains(key) && cj[key].is_object()) {
+                line += ", carrier r" + std::to_string(cj[key].value("rev", 0));
+                const std::string file = cj[key].value("file", std::string{});
+                if (!file.empty() && !CarrierFileOnDisk(file)) {
+                    line += " (FILE MISSING)";
+                }
+            } else {
+                line += ", carrier: none built";
+            }
+            out.push_back(line);
+        }
+
+        out.push_back("# Persist");
+        out.push_back("catalog=" + std::to_string(g_persist.size()) +
+                      "  active(this save)=" + std::to_string(ActivePersistIds().size()));
+        if (const auto pj = cj.find("persist"); pj != cj.end() && pj->is_object()) {
+            out.push_back("carrier r" + std::to_string(pj->value("rev", -1)) +
+                          ", smp content=" + std::to_string(pj->value("count", -1)) +
+                          ", proxy parts=" +
+                          std::to_string(pj->value("parts", nlohmann::json::array()).size()));
+        } else {
+            out.push_back("carrier: none built");
+        }
+        {
+            const auto pool = PersistPool();
+            int reg = 0;
+            for (auto* p : pool) {
+                if (PlayerHasHeadPart(p)) {
+                    ++reg;
+                }
+            }
+            out.push_back("head parts registered: " + std::to_string(reg) + "/" +
+                          std::to_string(pool.size()));
+        }
+        out.push_back("# Churn (this session)");
+        out.push_back(PersistDiagString());
+        return out;
     }
 
     std::vector<int> HideSlotsFor(const std::string& a_id)

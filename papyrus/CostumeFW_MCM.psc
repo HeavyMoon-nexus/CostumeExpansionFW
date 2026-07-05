@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 13 autoReadonly
+int property CURRENT_VERSION = 14 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -26,6 +26,10 @@ int[]    _persistRemoveOpts
 int[]    _persistHideOpts
 string[] _persistRemoveContents
 string[] _persistWornIdsCache
+int[]    _persistActiveOpts   ; per-catalog-entry "active on this save" toggle (M2)
+int[]    _persistMorphOpts    ; per-catalog-entry body-morph toggle
+int[]    _persistUncatOpts    ; active-but-not-in-catalog [deactivate] rows (M2)
+string[] _persistUncatIds
 
 ; --- Boxes page state ---
 ; Each box now has its OWN page (scroll-limit fix); "Boxes" is a short overview.
@@ -41,6 +45,7 @@ int[]    _deleteOpts
 string[] _deleteTokens
 int[]    _removeOpts
 int[]    _hideOpts
+int[]    _morphOpts          ; per-content body-morph toggle (single box page)
 string[] _removeTokens
 string[] _removeContents
 int[]    _distribOpts
@@ -92,6 +97,10 @@ function SetupConfig()
     _persistHideOpts       = new int[1]
     _persistRemoveContents = new string[1]
     _persistWornIdsCache   = new string[1]
+    _persistActiveOpts     = new int[1]
+    _persistMorphOpts      = new int[1]
+    _persistUncatOpts      = new int[1]
+    _persistUncatIds       = new string[1]
     _equipOpts     = new int[1]
     _equipBoxIdx   = new int[1]
     _addWornOpts   = new int[1]
@@ -100,6 +109,7 @@ function SetupConfig()
     _deleteTokens  = new string[1]
     _removeOpts     = new int[1]
     _hideOpts       = new int[1]
+    _morphOpts      = new int[1]
     _removeTokens   = new string[1]
     _removeContents = new string[1]
     _distribOpts    = new int[1]
@@ -129,7 +139,7 @@ endFunction
 ; after closing + reopening the MCM).
 function BuildPages()
     int n = CFW_Native.GetBoxCount()
-    string[] p = Utility.CreateStringArray(n + 4, "")
+    string[] p = Utility.CreateStringArray(n + 5, "")
     p[0] = "Main"
     p[1] = "Persist"
     p[2] = "Boxes"
@@ -145,6 +155,7 @@ function BuildPages()
         i += 1
     endWhile
     p[3 + n] = "Presets"
+    p[4 + n] = "Diagnostics"
     Pages = p
 endFunction
 
@@ -159,6 +170,8 @@ event OnPageReset(string a_page)
         ResetPersistPage()
     elseIf a_page == "Presets"
         ResetPresetsPage()
+    elseIf a_page == "Diagnostics"
+        ResetDiagnosticsPage()
     elseIf a_page == "Main" || a_page == ""
         ResetMainPage()
     else
@@ -292,26 +305,64 @@ function ResetPersistPage()
     _persistPresetOpt = AddMenuOption("Preset", ppreset)
     _persistExportOpt = AddInputOption("Export as preset", "")
 
+    ; M2 (CEF_STATE_SCOPE.md): the catalog is GLOBAL (shared by every save /
+    ; character); the toggle on each row is what THIS save actually shows.
     string[] contents = CFW_Native.GetPersistContents()
-    AddHeaderOption("Persist (" + contents.Length + ")")
+    AddHeaderOption("Catalog (" + contents.Length + ") - shared across saves")
     if contents.Length == 0
         AddTextOption("(none - use + Add worn item)", "", OPTION_FLAG_DISABLED)
+        _persistActiveOpts     = new int[1]
+        _persistMorphOpts      = new int[1]
         _persistRemoveOpts     = new int[1]
         _persistHideOpts       = new int[1]
         _persistRemoveContents = new string[1]
     else
+        _persistActiveOpts     = Utility.CreateIntArray(contents.Length, -1)
+        _persistMorphOpts      = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistHideOpts       = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveContents = Utility.CreateStringArray(contents.Length, "")
         int i = 0
         while i < contents.Length
-            _persistRemoveOpts[i] = AddTextOption(CFW_Native.GetItemName(contents[i]), "[remove]")
+            _persistActiveOpts[i] = AddToggleOption(CFW_Native.GetItemName(contents[i]), CFW_Native.IsPersistActive(contents[i]))
+            _persistMorphOpts[i] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[i]))
             _persistHideOpts[i] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[i]))
+            _persistRemoveOpts[i] = AddTextOption("  Remove from catalog", "[remove]")
             _persistRemoveContents[i] = contents[i]
             i += 1
         endWhile
         AddHeaderOption("Actions")
         _optRemoveAllPersist = AddTextOption("Remove all persist", "")
+    endIf
+
+    ; Active on this save but no longer in the shared catalog (another character
+    ; removed the entry). Deactivating returns the item.
+    string[] act = CFW_Native.GetPersistActive()
+    int uncat = 0
+    int ai = 0
+    while ai < act.Length
+        if contents.Find(act[ai]) < 0
+            uncat += 1
+        endIf
+        ai += 1
+    endWhile
+    if uncat > 0
+        AddHeaderOption("Active but not in catalog (" + uncat + ")")
+        _persistUncatOpts = Utility.CreateIntArray(uncat, -1)
+        _persistUncatIds  = Utility.CreateStringArray(uncat, "")
+        int uidx = 0
+        ai = 0
+        while ai < act.Length
+            if contents.Find(act[ai]) < 0
+                _persistUncatOpts[uidx] = AddTextOption(CFW_Native.GetItemName(act[ai]), "[deactivate]")
+                _persistUncatIds[uidx] = act[ai]
+                uidx += 1
+            endIf
+            ai += 1
+        endWhile
+    else
+        _persistUncatOpts = new int[1]
+        _persistUncatIds  = new string[1]
     endIf
 endFunction
 
@@ -385,6 +436,7 @@ function ResetSingleBoxPage(int a_idx)
     _deleteTokens  = Utility.CreateStringArray(1, token)
     _removeOpts     = Utility.CreateIntArray(cn, -1)
     _hideOpts       = Utility.CreateIntArray(cn, -1)
+    _morphOpts      = Utility.CreateIntArray(cn, -1)
     _removeTokens   = Utility.CreateStringArray(cn, "")
     _removeContents = Utility.CreateStringArray(cn, "")
 
@@ -406,6 +458,7 @@ function ResetSingleBoxPage(int a_idx)
     int ci = 0
     while ci < contents.Length
         _removeOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[ci]), "[remove]")
+        _morphOpts[ci] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[ci]))
         _hideOpts[ci] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[ci]))
         _removeTokens[ci] = token
         _removeContents[ci] = contents[ci]
@@ -441,6 +494,39 @@ function ResetPresetsPage()
         _presetAssignFiles[i] = files[i]
         i += 1
     endWhile
+endFunction
+
+; -----------------------------------------------------------------------------
+; Diagnostics page (read-only; lines composed natively so console + MCM agree)
+; -----------------------------------------------------------------------------
+function ResetDiagnosticsPage()
+    SetCursorFillMode(TOP_TO_BOTTOM)
+    string[] lines = CFW_Native.GetDiagLines()
+    int i = 0
+    while i < lines.Length
+        string l = lines[i]
+        if StringUtil.Find(l, "# ") == 0
+            AddHeaderOption(StringUtil.Substring(l, 2))
+        else
+            AddTextOption(l, "", OPTION_FLAG_DISABLED)
+        endIf
+        i += 1
+    endWhile
+    AddEmptyOption()
+    AddTextOption("(reopen this page to refresh)", "", OPTION_FLAG_DISABLED)
+endFunction
+
+; Per-content body-morph toggle (default OFF). Body morph is only for BodySlide
+; body-conforming meshes; on hair/jewelry/accessories it is wasted work and
+; drove a severe memory balloon (skee ApplyVertexDiff allocations retained by
+; SSE Engine Fixes' allocator - HANDOVER §8).
+function ToggleBodyMorph(int a_option, string contentId)
+    bool nowOn = !CFW_Native.GetBodyMorph(contentId)
+    if nowOn
+        ShowMessage("CostumeFW: Body morph ON for '" + CFW_Native.GetItemName(contentId) + "'. Use ONLY for BodySlide body-conforming meshes (costumes/underwear). Hair, jewelry and accessories should stay OFF (wasted memory).", false)
+    endIf
+    CFW_Native.SetBodyMorph(contentId, nowOn)
+    SetToggleOptionValue(a_option, nowOn)
 endFunction
 
 ; -----------------------------------------------------------------------------
@@ -481,6 +567,38 @@ event OnOptionSelect(int a_option)
         ReturnItem(CFW_Native.ResolveForm(_persistRemoveContents[p]))
         CFW_Native.RemovePersist(_persistRemoveContents[p])
         ForcePageReset()
+        return
+    endIf
+
+    ; M2: [active on this save] toggle - VISUAL ONLY (items move only on
+    ; capture / remove / uncataloged-deactivate, so toggle cycling can never
+    ; duplicate an item).
+    p = _persistActiveOpts.Find(a_option)
+    if p >= 0
+        string cid = _persistRemoveContents[p]
+        bool nowActive = !CFW_Native.IsPersistActive(cid)
+        if CFW_Native.SetPersistActive(cid, nowActive)
+            SetToggleOptionValue(a_option, nowActive)
+        else
+            ShowMessage("CostumeFW: could not change the active state (see log).", false)
+        endIf
+        return
+    endIf
+    p = _persistMorphOpts.Find(a_option)
+    if p >= 0
+        ToggleBodyMorph(a_option, _persistRemoveContents[p])
+        return
+    endIf
+    p = _persistUncatOpts.Find(a_option)
+    if p >= 0
+        ReturnItem(CFW_Native.ResolveForm(_persistUncatIds[p]))
+        CFW_Native.SetPersistActive(_persistUncatIds[p], false)
+        ForcePageReset()
+        return
+    endIf
+    p = _morphOpts.Find(a_option)
+    if p >= 0
+        ToggleBodyMorph(a_option, _removeContents[p])
         return
     endIf
 
@@ -953,9 +1071,15 @@ event OnOptionHighlight(int a_option)
     elseIf _deleteOpts.Find(a_option) >= 0
         SetInfoText("Delete this box (its token becomes free; items returned).")
     elseIf _removeOpts.Find(a_option) >= 0
-        SetInfoText("Remove this item from the box (returned to you).")
+        SetInfoText("Remove this item from the box (returned to you). Box contents are shared across saves.")
     elseIf _persistRemoveOpts.Find(a_option) >= 0
-        SetInfoText("Remove this persist item (returned to you).")
+        SetInfoText("Remove from the SHARED catalog (all saves). Deactivates here and returns the item; other characters keep it active until they deactivate.")
+    elseIf _persistActiveOpts.Find(a_option) >= 0
+        SetInfoText("Show this catalog item on THIS save. The catalog is shared; each save picks what it shows. No items are moved by this toggle.")
+    elseIf _persistMorphOpts.Find(a_option) >= 0 || _morphOpts.Find(a_option) >= 0
+        SetInfoText("Apply your RaceMenu body sliders to this mesh. ON only for BodySlide body-conforming meshes; keep OFF for hair/jewelry (memory cost).")
+    elseIf _persistUncatOpts.Find(a_option) >= 0
+        SetInfoText("Active on this save but removed from the shared catalog elsewhere. Deactivate to stop showing it and get the item back.")
     elseIf _hideOpts.Find(a_option) >= 0 || _persistHideOpts.Find(a_option) >= 0
         SetInfoText("Hide this item while a real item holds a slot. Enter slot numbers (e.g. 37 = feet/boots, or 30 31 42 = helmet/hair/circlet). Blank = never hide.")
     elseIf _presetAssignOpts.Find(a_option) >= 0
