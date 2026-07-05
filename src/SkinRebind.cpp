@@ -777,7 +777,7 @@ namespace CostumeFW
             const std::string nodeName = NodeName(a_id);
             const bool applyMorph = ShouldApplyBodyMorph(a_id);
             SKSE::log::info("  bodymorph gate '{}' -> {}",
-                a_id, applyMorph ? "apply" : "SKIP (hair/head)");
+                a_id, applyMorph ? "apply (opted in)" : "SKIP (not opted in)");
 
             bool any = false;
             g_injectStatic3p = false;
