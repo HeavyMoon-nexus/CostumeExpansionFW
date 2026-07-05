@@ -101,7 +101,7 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | detach | clear | list");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | recover | headdiag | hair");
             return;
         }
 
@@ -273,8 +273,23 @@ namespace CostumeFW
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
+        } else if (sub == "recover") {
+            // Deliberate escape hatch for the STORE-ONLY return rule: the MCM
+            // return flows never fabricate an item (a store miss on this save
+            // means the copy lives on another character - CEF_STATE_SCOPE.md §4).
+            if (rest.find(':') == std::string::npos) {
+                Print("[CEF] usage: cef recover <FormID:Plugin.esp>");
+                return;
+            }
+            SKSE::GetTaskInterface()->AddTask([rest] {
+                const bool ok = RecoverContentItem(rest);
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print(ok ? "[CEF] recover: granted 1 copy (see log)"
+                                : "[CEF] recover: id does not resolve to an item");
+                }
+            });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | recover | headdiag | hair");
         }
     }
 }

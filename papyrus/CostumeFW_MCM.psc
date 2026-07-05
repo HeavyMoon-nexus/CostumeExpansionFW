@@ -468,7 +468,7 @@ event OnOptionSelect(int a_option)
         string[] pc = CFW_Native.GetPersistContents()
         int pi = 0
         while pi < pc.Length
-            ReturnItem(CFW_Native.ResolveForm(pc[pi]))
+            ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
             CFW_Native.RemovePersist(pc[pi])
             pi += 1
         endWhile
@@ -502,7 +502,7 @@ event OnOptionSelect(int a_option)
         string[] cont = CFW_Native.GetBoxContents(_curBoxIndex)
         int ci = 0
         while ci < cont.Length
-            ReturnItem(CFW_Native.ResolveForm(cont[ci]))
+            ReturnItem(CFW_Native.ResolveForm(cont[ci]), false)
             ci += 1
         endWhile
         Form tkn = CFW_Native.GetBoxTokenForm(_curBoxIndex)
@@ -537,15 +537,21 @@ ObjectReference Function GetStore()
     return _store
 endFunction
 
-function ReturnItem(Form akItem)
+; Return ONE captured copy of akItem from this save's hidden store to the
+; player. STORE-ONLY (CEF_STATE_SCOPE.md §4): if this character's store has no
+; copy (captured on another character / already returned), do NOT fabricate one
+; - the old AddItem fallback duplicated items across saves. Deliberate re-grant
+; lives in console `cef recover <id>`. aNotify=false silences the miss message
+; inside bulk loops (remove-all / delete box / uninstall).
+function ReturnItem(Form akItem, bool aNotify = true)
     if !akItem
         return
     endIf
     ObjectReference store = GetStore()
     if store && store.GetItemCount(akItem) > 0
         store.RemoveItem(akItem, 1, true, Game.GetPlayer())
-    else
-        Game.GetPlayer().AddItem(akItem, 1, true)
+    elseIf aNotify
+        Debug.Notification("CostumeFW: no stored copy on this character - nothing returned")
     endIf
 endFunction
 
@@ -561,7 +567,7 @@ function UninstallCleanup()
         string[] cont = CFW_Native.GetBoxContents(i)
         int ci = 0
         while ci < cont.Length
-            ReturnItem(CFW_Native.ResolveForm(cont[ci]))
+            ReturnItem(CFW_Native.ResolveForm(cont[ci]), false)
             ci += 1
         endWhile
         Form tkn = CFW_Native.GetBoxTokenForm(i)
@@ -575,7 +581,7 @@ function UninstallCleanup()
     string[] pc = CFW_Native.GetPersistContents()
     int pi = 0
     while pi < pc.Length
-        ReturnItem(CFW_Native.ResolveForm(pc[pi]))
+        ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
         pi += 1
     endWhile
 
@@ -729,11 +735,17 @@ event OnOptionMenuAccept(int a_option, int a_index)
         string contentId = _wornIdsCache[a_index]
         CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
         CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
+        ; Transaction order (review A-2): register FIRST, move the item only on
+        ; success. A duplicate add must not swallow a second physical copy.
+        if !CFW_Native.AddPersist(contentId)
+            Debug.Notification("CostumeFW: already in persist - item not moved")
+            ForcePageReset()
+            return
+        endIf
         Form contentForm = CFW_Native.ResolveForm(contentId)
         if contentForm
             Game.GetPlayer().RemoveItem(contentForm, 1, true, GetStore())
         endIf
-        CFW_Native.AddPersist(contentId)
         Debug.Notification("CostumeFW: persist added " + CFW_Native.GetItemName(contentId))
         WarnIfScripted(contentId)
         ForcePageReset()
@@ -752,7 +764,13 @@ event OnOptionMenuAccept(int a_option, int a_index)
 
         CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
         CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
-        CFW_Native.AddBox("", token, contentId)
+        ; Transaction order (review A-2): register FIRST, move the item only on
+        ; success (false = duplicate/bad input; do not swallow another copy).
+        if !CFW_Native.AddBox("", token, contentId)
+            Debug.Notification("CostumeFW: already in this box - item not moved")
+            ForcePageReset()
+            return
+        endIf
         Form contentForm = CFW_Native.ResolveForm(contentId)
         Actor player = Game.GetPlayer()
         if contentForm

@@ -1797,6 +1797,21 @@ namespace CostumeFW
         return out.empty() ? "(no stats)" : out;
     }
 
+    bool RecoverContentItem(const std::string& a_id)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t formId = ResolveFormId(a_id);
+        auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!player || !obj) {
+            SKSE::log::warn("recover: '{}' does not resolve to an inventory item", a_id);
+            return false;
+        }
+        player->AddObjectToContainer(obj, nullptr, 1, nullptr);
+        SKSE::log::info("recover: granted 1x '{}' ({})", ItemDisplayName(a_id), a_id);
+        return true;
+    }
+
     int BoxCount()
     {
         return static_cast<int>(g_boxes.size());
@@ -1848,8 +1863,15 @@ namespace CostumeFW
         }
 
         auto& box = g_boxes[idx];
-        if (!a_content.empty() &&
-            std::find(box.contents.begin(), box.contents.end(), a_content) == box.contents.end()) {
+        if (!a_content.empty()) {
+            if (std::find(box.contents.begin(), box.contents.end(), a_content) !=
+                box.contents.end()) {
+                // Duplicate: report failure so the MCM capture flow does NOT move
+                // the physical item into the store (a swallowed extra copy could
+                // never be returned - review A-2 / CEF_STATE_SCOPE.md §4).
+                SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", a_content, a_token);
+                return false;
+            }
             box.contents.push_back(a_content);  // caller registers + reconciles
         }
 

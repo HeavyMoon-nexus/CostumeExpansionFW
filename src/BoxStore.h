@@ -185,6 +185,13 @@ namespace CostumeFW
     // Resolve a colon-form id to its in-game item name (falls back to the id).
     std::string ItemDisplayName(const std::string& a_colonId);
 
+    // `cef recover <id>`: deliberately grant ONE copy of a content item to the
+    // player. The MCM return flows are STORE-ONLY (they never fabricate items;
+    // a store miss means the copy lives on another character's save -
+    // CEF_STATE_SCOPE.md §4); this is the explicit, logged escape hatch.
+    // Main thread (touches the player inventory).
+    bool RecoverContentItem(const std::string& a_id);
+
     // --- Box abilities (Phase C) ---------------------------------------------
     // The shipped ability-spell catalog (CostumeFW_Boxes.esp SPEL named
     // "Costume:*"), as {name, colon-id}; used by the MCM ability picker.
