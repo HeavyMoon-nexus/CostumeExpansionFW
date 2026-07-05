@@ -232,8 +232,21 @@ namespace CostumeFW
             WriteCarrierManifest();
         }
 
-        // Plugin that ships the box-token pool (Costume Box 1..N ARMOs).
+        // Plugin that ships the box-token pool (Costume Box 1..N ARMOs). Newer
+        // pool tokens (slot-31 wig token, B-armor route) live in the carrier
+        // patch plugin instead - houseCARL writes new records to the patch, not
+        // the base esp. Fold them into the base esp at release.
         constexpr std::string_view kTokenPlugin = "CostumeFW_Boxes.esp";
+        constexpr std::string_view kTokenPluginPatch = "CostumeFW_Boxes_FSMPCarrier_001.esp";
+
+        bool IsTokenPluginFile(const RE::TESFile* a_file)
+        {
+            if (!a_file) {
+                return false;
+            }
+            const auto fn = a_file->GetFilename();
+            return fn == kTokenPlugin || fn == kTokenPluginPatch;
+        }
 
         // Build the project's colon-form id "XXXXXX:Plugin.esp" from a form: its
         // plugin-local FormID (ESL-masked) + defining plugin filename.
@@ -1344,9 +1357,9 @@ namespace CostumeFW
             if (!armo) {
                 continue;
             }
-            // Exclude our own box tokens (they live in CostumeFW_Boxes.esp).
+            // Exclude our own box tokens (base pool esp + the carrier patch).
             auto* file = armo->GetFile(0);
-            if (file && file->GetFilename() == kTokenPlugin) {
+            if (IsTokenPluginFile(file)) {
                 continue;
             }
             const char* nm = armo->GetFullName();
@@ -1369,7 +1382,7 @@ namespace CostumeFW
                 continue;
             }
             auto* file = armo->GetFile(0);
-            if (!file || file->GetFilename() != kTokenPlugin) {
+            if (!IsTokenPluginFile(file)) {
                 continue;
             }
             const char* nm = armo->GetFullName();

@@ -201,7 +201,9 @@ string Function ArmorTypeName(int a_type)
 endFunction
 
 string Function SlotName(int a_slot)
-    if a_slot == 44
+    if a_slot == 31
+        return "Hair (Wig)"
+    elseIf a_slot == 44
         return "Face/Eyes"
     elseIf a_slot == 45
         return "Neck"
