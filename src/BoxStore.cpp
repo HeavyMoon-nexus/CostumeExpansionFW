@@ -49,6 +49,9 @@ namespace CostumeFW
         // Resolved through MO2's VFS as Data\SKSE\Plugins\...; runtime writes land
         // in the MO2 overwrite folder and read back through the same path.
         constexpr const char* kSettingsPath = "Data\\SKSE\\Plugins\\CEF_settings.json";
+        // Last-known-good copy, snapshotted ONLY after a successful parse at load
+        // (never touched by WriteJson, so a corrupt main file can't clobber it).
+        constexpr const char* kSettingsBakPath = "Data\\SKSE\\Plugins\\CEF_settings.json.bak";
         constexpr const char* kOldBoxesPath = "Data\\SKSE\\Plugins\\costume_boxes.json";  // migrated
         constexpr const char* kSchema = "cef.settings/1";
 
@@ -111,6 +114,34 @@ namespace CostumeFW
 
         void WriteCarrierManifest();  // fwd (defined below)
 
+        // Write a_data to a_path via a sibling ".tmp" + atomic rename, so a CTD /
+        // process kill mid-write can never leave a truncated file at a_path (the
+        // old trunc-overwrite could destroy CEF_settings.json - Codex review
+        // 2026-07-05 A-1). MoveFileEx(REPLACE_EXISTING) is atomic on NTFS and is
+        // hooked by MO2's usvfs like the rest of the Win32 file API.
+        bool WriteFileAtomic(const char* a_path, const std::string& a_data)
+        {
+            const std::string tmp = std::string(a_path) + ".tmp";
+            {
+                std::ofstream f(tmp, std::ios::trunc | std::ios::binary);
+                if (!f) {
+                    return false;
+                }
+                f << a_data;
+                f.flush();
+                if (!f.good()) {
+                    return false;
+                }
+            }
+            if (!MoveFileExA(tmp.c_str(), a_path, MOVEFILE_REPLACE_EXISTING)) {
+                SKSE::log::error("atomic write: MoveFileEx failed ({}) for {}",
+                    GetLastError(), a_path);
+                DeleteFileA(tmp.c_str());
+                return false;
+            }
+            return true;
+        }
+
         void WriteJson()
         {
             nlohmann::json doc;
@@ -163,12 +194,10 @@ namespace CostumeFW
             }
             doc["enchants"] = std::move(enchants);
 
-            std::ofstream f(kSettingsPath, std::ios::trunc);
-            if (!f) {
+            if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
                 SKSE::log::error("settings: cannot write {}", kSettingsPath);
                 return;
             }
-            f << doc.dump(2);
             SKSE::log::info("settings: wrote {} box def(s) (enabled={})", g_boxes.size(), g_cefEnabled);
             WriteCarrierManifest();
         }
@@ -296,12 +325,10 @@ namespace CostumeFW
                     }
                 }
             }
-            std::ofstream f(kManifestPath, std::ios::trunc);
-            if (!f) {
+            if (!WriteFileAtomic(kManifestPath, out)) {
                 SKSE::log::error("carrier manifest: cannot write {}", kManifestPath);
                 return;
             }
-            f << out;
             SKSE::log::info(
                 "carrier manifest updated ({} box(es)) - rebuilding FSMP carriers",
                 g_boxes.size());
@@ -705,11 +732,37 @@ namespace CostumeFW
             migrated = true;
         }
         nlohmann::json doc;
+        bool fromBackup = false;
         try {
             f >> doc;
         } catch (const std::exception& e) {
             SKSE::log::error("settings: JSON parse error: {}", e.what());
-            return;
+            if (migrated) {
+                return;  // legacy file was corrupt; nothing else to try
+            }
+            // Corrupt main file: fall back to the last-known-good backup taken at
+            // the previous successful load. Without this, the cleared state above
+            // would look like "no settings" and the next WriteJson would make the
+            // loss permanent (Codex review 2026-07-05 A-1).
+            std::ifstream bak(kSettingsBakPath);
+            if (!bak) {
+                return;
+            }
+            try {
+                bak >> doc;
+            } catch (const std::exception& e2) {
+                SKSE::log::error("settings: backup parse error: {}", e2.what());
+                return;
+            }
+            fromBackup = true;
+            SKSE::log::warn("settings: recovered from {} (main file corrupt; "
+                            "it is rewritten on the next settings change)",
+                kSettingsBakPath);
+        }
+        if (!migrated && !fromBackup) {
+            // Snapshot the just-parsed good file as the recovery backup. Best
+            // effort - a failed copy only means no fallback, not a load failure.
+            CopyFileA(kSettingsPath, kSettingsBakPath, FALSE);
         }
 
         g_cefEnabled = doc.value("enabled", true);
