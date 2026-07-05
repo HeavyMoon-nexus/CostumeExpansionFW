@@ -537,12 +537,13 @@ ObjectReference Function GetStore()
     return _store
 endFunction
 
-; Return ONE captured copy of akItem from this save's hidden store to the
-; player. STORE-ONLY (CEF_STATE_SCOPE.md §4): if this character's store has no
-; copy (captured on another character / already returned), do NOT fabricate one
-; - the old AddItem fallback duplicated items across saves. Deliberate re-grant
-; lives in console `cef recover <id>`. aNotify=false silences the miss message
-; inside bulk loops (remove-all / delete box / uninstall).
+; Return ONE captured copy of akItem to the player: from this save's hidden
+; store when it has one, else as a NEW copy. The new-copy fallback DUPLICATES
+; across characters (the original stays in the capturing save's store) - that
+; is ACCEPTED BY DESIGN: losing the item is worse, and an uncataloged stored
+; copy cannot be returned from the MCM until the catalog/activate UI lands
+; (in-game decision 2026-07-06, CEF_STATE_SCOPE.md §4). aNotify=false keeps
+; bulk loops (remove-all / delete box / uninstall) quiet.
 function ReturnItem(Form akItem, bool aNotify = true)
     if !akItem
         return
@@ -550,8 +551,11 @@ function ReturnItem(Form akItem, bool aNotify = true)
     ObjectReference store = GetStore()
     if store && store.GetItemCount(akItem) > 0
         store.RemoveItem(akItem, 1, true, Game.GetPlayer())
-    elseIf aNotify
-        Debug.Notification("CostumeFW: no stored copy on this character - nothing returned")
+    else
+        Game.GetPlayer().AddItem(akItem, 1, true)
+        if aNotify
+            Debug.Notification("CostumeFW: returned as a new copy (none stored on this character)")
+        endIf
     endIf
 endFunction
 
@@ -738,7 +742,9 @@ event OnOptionMenuAccept(int a_option, int a_index)
         ; Transaction order (review A-2): register FIRST, move the item only on
         ; success. A duplicate add must not swallow a second physical copy.
         if !CFW_Native.AddPersist(contentId)
-            Debug.Notification("CostumeFW: already in persist - item not moved")
+            ; Modal: a Debug.Notification is easy to miss while the MCM stays
+            ; open (in-game feedback 2026-07-06).
+            ShowMessage("CostumeFW: already in persist - item not moved.", false)
             ForcePageReset()
             return
         endIf
@@ -767,7 +773,9 @@ event OnOptionMenuAccept(int a_option, int a_index)
         ; Transaction order (review A-2): register FIRST, move the item only on
         ; success (false = duplicate/bad input; do not swallow another copy).
         if !CFW_Native.AddBox("", token, contentId)
-            Debug.Notification("CostumeFW: already in this box - item not moved")
+            ; Modal: a Debug.Notification is easy to miss while the MCM stays
+            ; open (in-game feedback 2026-07-06).
+            ShowMessage("CostumeFW: already in this box - item not moved.", false)
             ForcePageReset()
             return
         endIf
