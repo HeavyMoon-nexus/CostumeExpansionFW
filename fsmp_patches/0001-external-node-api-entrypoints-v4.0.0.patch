@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CostumeExpansionFW <cef@example.invalid>
+Date: Mon, 6 Jul 2026 00:00:00 +0900
+Subject: [PATCH] Add external node physics plugin API entry points
+
+This is a deliberately small API-surface patch for DaymareOn/hdtSMP64 v4.0.0.
+It adds version-gated PluginInterface entry points for attaching/detaching SMP
+physics to a caller-owned scene node.
+
+The implementation is intentionally conservative: attachPhysics returns false
+until ActorManager is wired to own external physics items. This lets consumers
+feature-detect the ABI shape and safely fall back without pretending the feature
+is functional.
+
+diff --git a/src/PluginAPI.h b/src/PluginAPI.h
+index 0000000..0000000 100644
+--- a/src/PluginAPI.h
++++ b/src/PluginAPI.h
+@@ -19,7 +19,13 @@
+ template <typename T>
+ class btAlignedObjectArray;
+ class btCollisionObject;
+ 
++namespace RE
++{
++	class Actor;
++	class NiAVObject;
++}
++
+ namespace hdt
+ {
+ 	//Sent right before the physics simulation begins updating.
+@@ -67,7 +73,7 @@ namespace hdt
+ 		};
+ 
+ 	public:
+-		constexpr static Version INTERFACE_VERSION{ 2, 0, 0 };
++		constexpr static Version INTERFACE_VERSION{ 2, 1, 0 };
+ 		constexpr static Version BULLET_VERSION{ 3, 24, 0 };
+ 
+ 	public:
+@@ -78,5 +84,18 @@ namespace hdt
+ 
+ 		virtual void addListener(IPostStepListener*) = 0;
+ 		virtual void removeListener(IPostStepListener*) = 0;
++
++		// Build or rebuild an SMP physics system for a caller-managed node that is
++		// already attached under the actor's 3D. If physicsXmlPath is null or empty,
++		// FSMP should discover the physics file from the node just like equipped armor.
++		//
++		// Returns false if the actor has no tracked 3rd-person skeleton, the node is
++		// invalid, no physics file is found, or the implementation does not yet
++		// support external nodes.
++		virtual bool attachPhysics(RE::Actor* actor, RE::NiAVObject* node, const char* physicsXmlPath = nullptr) = 0;
++
++		// Tear down a physics system previously created by attachPhysics for this
++		// node. Safe to call when no matching external system exists.
++		virtual void detachPhysics(RE::NiAVObject* node) = 0;
+ 	};
+ }
+diff --git a/src/PluginInterfaceImpl.h b/src/PluginInterfaceImpl.h
+index 0000000..0000000 100644
+--- a/src/PluginInterfaceImpl.h
++++ b/src/PluginInterfaceImpl.h
+@@ -18,6 +18,9 @@ namespace hdt
+ 		virtual void addListener(IPostStepListener* l) override;
+ 		virtual void removeListener(IPostStepListener* l) override;
+ 
++		virtual bool attachPhysics(RE::Actor* actor, RE::NiAVObject* node, const char* physicsXmlPath = nullptr) override;
++		virtual void detachPhysics(RE::NiAVObject* node) override;
++
+ 		void onPostPostLoad();
+ 
+ 		void onPreStep(const PreStepEvent& e) { m_preStepDispatcher.SendEvent(std::addressof(e)); }
+diff --git a/src/PluginInterfaceImpl.cpp b/src/PluginInterfaceImpl.cpp
+index 0000000..0000000 100644
+--- a/src/PluginInterfaceImpl.cpp
++++ b/src/PluginInterfaceImpl.cpp
+@@ -26,6 +26,20 @@ void hdt::PluginInterfaceImpl::removeListener(IPostStepListener* l)
+ 	}
+ }
+ 
++bool hdt::PluginInterfaceImpl::attachPhysics(RE::Actor*, RE::NiAVObject*, const char*)
++{
++	// API entry point only. A follow-up patch should route this through
++	// ActorManager::attachExternalPhysics and store the result as a Skeleton
++	// external PhysicsItem. Returning false lets consumers safely fall back to
++	// equip/carrier based compatibility paths.
++	return false;
++}
++
++void hdt::PluginInterfaceImpl::detachPhysics(RE::NiAVObject*)
++{
++	// Safe no-op until external PhysicsItems are implemented.
++}
++
+ void hdt::PluginInterfaceImpl::onPostPostLoad()
+ {
+ 	// Send ourselves to any plugin that registered during the PostLoad event
+-- 
+2.45.0
