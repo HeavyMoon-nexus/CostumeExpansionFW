@@ -672,7 +672,14 @@ namespace CostumeFW
                 if (WaitForSingleObject(h, kSyncTimeoutMs) == WAIT_OBJECT_0) {
                     GetExitCodeProcess(h, &code);
                 } else {
-                    SKSE::log::warn("auto-sync: nifcarrier timed out");
+                    // A wedged child must not outlive the wait: once
+                    // g_syncRunning drops, a rerun would race it on the same
+                    // carrier slots + sync log (review A-3). nifcarrier
+                    // publishes atomically, so a mid-build kill cannot leave a
+                    // partial carrier behind.
+                    SKSE::log::warn("auto-sync: nifcarrier timed out - terminating child");
+                    TerminateProcess(h, 1);
+                    WaitForSingleObject(h, 5000);
                 }
                 CloseHandle(h);
                 g_syncRunning = false;
