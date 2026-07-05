@@ -172,7 +172,12 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     CostumeFW::SetupLog();
     SKSE::Init(skse);
-    SKSE::log::info("CostumeExpansionFW loaded");
+    // Build stamp: proves WHICH dll the game actually loaded. If this timestamp
+    // is older than your last build, MO2's usvfs served a stale cached copy
+    // (rebuilding a dll while MO2 is running does NOT refresh it - fully close
+    // AND reopen MO2, not just the game). __DATE__/__TIME__ update whenever this
+    // file recompiles.
+    SKSE::log::info("CostumeExpansionFW loaded (build " __DATE__ " " __TIME__ ")");
 
     // Honor the external kill-switch as early as possible. When disabled we return
     // true (so the DLL still loads and its ESP masters resolve) but register

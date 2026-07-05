@@ -61,7 +61,18 @@ namespace CostumeFW
     // body show the other body's mesh on demand. GLOBAL config (CEF_settings.json),
     // keyed by content id (box + persist alike). 0 = clear the entry.
     int GenderModeFor(const std::string& a_id);
-    bool SetGenderMode(const std::string& a_id, int a_mode);  // def + json
+    bool SetGenderMode(const std::string& a_id, int a_mode);
+
+    // --- Body-morph opt-in (per content) -------------------------------------
+    // Whether a content id's injected mesh receives the player's skee body morph
+    // (RaceMenu body sliders). Default OFF: body morph is only needed for
+    // BodySlide/body-conforming meshes, and applying it to accessories drove a
+    // severe memory balloon (skee ApplyVertexDiff allocations retained by SSE
+    // Engine Fixes' allocator). CEF's custom-slot content can't be auto-classified
+    // (nails/piercings use arbitrary slots), so the user opts in per content
+    // ("turn it on if the mesh looks wrong"). GLOBAL config (CEF_settings.json).
+    bool BodyMorphOn(const std::string& a_id);
+    bool SetBodyMorphOn(const std::string& a_id, bool a_on);  // def + json  // def + json
 
     // --- LoreBox tooltip integration (soft dependency) -----------------------
     // The comma-joined in-game names of the contents of the box on biped slot

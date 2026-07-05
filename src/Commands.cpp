@@ -208,6 +208,53 @@ namespace CostumeFW
             } else {
                 Print("[CEF] usage: cef persist [regen|remove]");
             }
+        } else if (sub == "morph") {
+            // Per-content body-morph opt-in (default OFF). Body morph is only
+            // needed for BodySlide/body-conforming meshes; it is off for everything
+            // by default (accessories don't need it and it drove a memory balloon
+            // via skee ApplyVertexDiff + SSE Engine Fixes arena retention).
+            //   cef morph                 - list active items + their state
+            //   cef morph <id> on|off     - set, then re-inject the item
+            if (rest.empty()) {
+                SKSE::GetTaskInterface()->AddTask([] {
+                    auto* c = RE::ConsoleLog::GetSingleton();
+                    if (c) {
+                        c->Print("[CEF] body morph (ON = applied; default off):");
+                    }
+                    for (const auto& it : ActiveSnapshot()) {
+                        const std::string line =
+                            std::string("  ") + (BodyMorphOn(it.id) ? "ON  " : "off ") + it.id;
+                        SKSE::log::info("{}", line);
+                        if (c) {
+                            c->Print(line.c_str());
+                        }
+                    }
+                });
+                return;
+            }
+            const std::string low = Lower(rest);
+            std::string id;
+            bool on = false;
+            if (low.size() > 3 && low.compare(low.size() - 3, 3, " on") == 0) {
+                on = true;
+                id = Trim(rest.substr(0, rest.size() - 3));
+            } else if (low.size() > 4 && low.compare(low.size() - 4, 4, " off") == 0) {
+                on = false;
+                id = Trim(rest.substr(0, rest.size() - 4));
+            } else {
+                Print("[CEF] usage: cef morph [<FormID:Plugin.esp> on|off]");
+                return;
+            }
+            SKSE::GetTaskInterface()->AddTask([id, on] {
+                SetBodyMorphOn(id, on);
+                HideInjectedNodes(id);  // drop the node so Reconcile re-injects with the new decision
+                Reconcile();
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print((std::string("[CEF] body morph ") + (on ? "ON" : "off") +
+                              " for " + id + " (re-injected)")
+                                 .c_str());
+                }
+            });
         } else if (sub == "headdiag") {
             // FSMP approach-C passive PoC: enumerate FSMP-renamed physics bones on
             // the live skeleton(s). Apply an SMP hair first to see "_Head_" bones.
@@ -227,7 +274,7 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | headdiag | hair");
         }
     }
 }

@@ -622,9 +622,26 @@ namespace CostumeFW
                 });
         }
 
+        // Body morph (skee body-slider vertex diff) is OPT-IN per content, default
+        // OFF (BodyMorphOn). It is only needed for BodySlide/body-conforming meshes;
+        // applying it to accessories (hair/nails/piercings/veil) is unnecessary and
+        // drove a severe memory balloon - skee ApplyVertexDiff makes huge
+        // allocations that SSE Engine Fixes' allocator commits into 2.5GB arenas
+        // and retains (memory dump 2026-07-05: 6x2.5GB EngineFixes arenas). CEF's
+        // custom-slot content can't be auto-classified (nails/piercings use
+        // arbitrary modder-chosen slots), so the user turns it on per content when
+        // a mesh actually looks wrong (`cef morph <id> on` / MCM checkbox).
+        bool ShouldApplyBodyMorph(const std::string& a_id)
+        {
+            return BodyMorphOn(a_id);
+        }
+
         // Inject onto one skeleton root (3D root). Returns true on attach.
+        // a_applyMorph gates skee body morph (off for hair/head content, which
+        // must not receive body-slider deformation).
         bool InjectOnRoot(RE::NiAVObject* a_root3D, const std::string& a_relPath,
-            const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap)
+            const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap,
+            bool a_applyMorph)
         {
             if (!a_root3D) {
                 return false;
@@ -713,8 +730,11 @@ namespace CostumeFW
             // Match the morphed body: apply the player's skee BodyMorph (RaceMenu
             // sliders) vertex diff to the injected shapes. The equip system never
             // sees this mesh, so without this it keeps its un-morphed shape and
-            // clips through a 3BA/CBBE body. No-op if skee is absent.
-            BodyMorph::ApplyToNode(RE::PlayerCharacter::GetSingleton(), holder);
+            // clips through a 3BA/CBBE body. No-op if skee is absent. Skipped for
+            // hair/head content (a wig must not get body-slider deformation).
+            if (a_applyMorph) {
+                BodyMorph::ApplyToNode(RE::PlayerCharacter::GetSingleton(), holder);
+            }
 
             SKSE::log::debug("  attached {} ({} skinned shape(s))", a_nodeName, geoms.size());
             return true;
@@ -729,8 +749,9 @@ namespace CostumeFW
                 return false;
             }
             const std::string nodeName = NodeName(a_id);
-            SKSE::log::debug("InjectInternal id='{}' 3p='{}' 1p='{}'",
-                a_id, a_m3p.nifPath, a_m1p.nifPath);
+            const bool applyMorph = ShouldApplyBodyMorph(a_id);
+            SKSE::log::info("  bodymorph gate '{}' -> {}",
+                a_id, applyMorph ? "apply" : "SKIP (hair/head)");
 
             bool any = false;
             g_injectStatic3p = false;
@@ -740,7 +761,7 @@ namespace CostumeFW
             std::vector<RE::NiPointer<RE::NiAVObject>> collected;
             g_boneRefSink = &collected;
             if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
-                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap);
+                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap, applyMorph);
             }
             if (g_injectStatic3p) {
                 // This item's 3p rebind fell to the static fallback - the carrier
@@ -748,7 +769,7 @@ namespace CostumeFW
                 RequestRebindRetry(a_id);
             }
             if (auto* root1p = player->Get3D(true); root1p && !a_m1p.nifPath.empty()) {
-                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap);
+                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap, applyMorph);
             }
             g_boneRefSink = nullptr;
             if (!collected.empty()) {

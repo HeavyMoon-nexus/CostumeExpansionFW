@@ -74,6 +74,17 @@ namespace CostumeFW
         // Absent entry = 0 (follow player). GLOBAL config, content-keyed.
         std::unordered_map<std::string, int> g_genderModes;
 
+        // Body-morph OPT-IN: content colon-ids whose injected mesh should receive
+        // the player's skee body morph (RaceMenu body sliders). Default is OFF
+        // (absent = off): body morph is only needed for BodySlide/body-conforming
+        // meshes, and applying it to accessories (hair/nails/piercings/veil) is
+        // unnecessary AND drove a severe memory balloon (skee ApplyVertexDiff makes
+        // huge allocations that SSE Engine Fixes' allocator retains - dump
+        // 2026-07-05). CEF's custom-slot content can't be auto-classified (nails/
+        // piercings use arbitrary modder-chosen slots), so the user opts in per
+        // content. GLOBAL config, content-keyed.
+        std::unordered_set<std::string> g_bodyMorphOn;
+
         // Captured worn enchantment per content: content colon-id -> effect list
         // (MGEF colon-id + magnitude). Snapshots the EFFECTIVE enchantment at
         // capture (base OR player/instance), since the base ARMO alone misses
@@ -134,6 +145,13 @@ namespace CostumeFW
                 genders[id] = mode;
             }
             doc["genderModes"] = std::move(genders);
+
+            // Body-morph opt-in: store the ON content-ids (default off = absent).
+            auto morphs = nlohmann::json::array();
+            for (const auto& id : g_bodyMorphOn) {
+                morphs.push_back(id);
+            }
+            doc["bodyMorph"] = std::move(morphs);
 
             auto enchants = nlohmann::json::object();
             for (const auto& [id, effs] : g_contentEnchants) {
@@ -657,6 +675,7 @@ namespace CostumeFW
         g_persist.clear();
         g_hideRules.clear();
         g_genderModes.clear();
+        g_bodyMorphOn.clear();
         g_contentEnchants.clear();
         g_persistPreset.clear();
         g_cefEnabled = true;
@@ -731,6 +750,11 @@ namespace CostumeFW
                 if (m >= 1 && m <= 2) {
                     g_genderModes[it.key()] = m;
                 }
+            }
+        }
+        for (const auto& id : doc.value("bodyMorph", nlohmann::json::array())) {
+            if (id.is_string()) {
+                g_bodyMorphOn.insert(id.get<std::string>());
             }
         }
         const auto enchants = doc.value("enchants", nlohmann::json::object());
@@ -966,6 +990,7 @@ namespace CostumeFW
         g_persist.erase(it);
         g_hideRules.erase(a_content);       // drop any hide rule for the removed content
         g_genderModes.erase(a_content);     // and its gender override
+        g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
         g_contentEnchants.erase(a_content);  // and its captured enchantment
         WriteJson();
         return true;
@@ -1014,6 +1039,25 @@ namespace CostumeFW
             g_genderModes[a_id] = a_mode;
         } else {
             g_genderModes.erase(a_id);  // 0 (or invalid) = follow player
+        }
+        WriteJson();
+        return true;
+    }
+
+    bool BodyMorphOn(const std::string& a_id)
+    {
+        return g_bodyMorphOn.contains(a_id);
+    }
+
+    bool SetBodyMorphOn(const std::string& a_id, bool a_on)
+    {
+        if (a_id.empty()) {
+            return false;
+        }
+        if (a_on) {
+            g_bodyMorphOn.insert(a_id);
+        } else {
+            g_bodyMorphOn.erase(a_id);
         }
         WriteJson();
         return true;
@@ -1763,6 +1807,7 @@ namespace CostumeFW
         box.contents.erase(it);  // caller detaches the node
         g_hideRules.erase(a_content);       // drop any hide rule for the removed content
         g_genderModes.erase(a_content);     // and its gender override
+        g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
         g_contentEnchants.erase(a_content);  // and its captured enchantment
         WriteJson();
         SetTokenStats(box);  // recompute token armor/weight
