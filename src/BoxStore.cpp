@@ -234,20 +234,19 @@ namespace CostumeFW
             WriteCarrierManifest();
         }
 
-        // Plugin that ships the box-token pool (Costume Box 1..N ARMOs). Newer
-        // pool tokens (slot-31 wig token, B-armor route) live in the carrier
-        // patch plugin instead - houseCARL writes new records to the patch, not
-        // the base esp. Fold them into the base esp at release.
-        constexpr std::string_view kTokenPlugin = "CostumeFW_Boxes.esp";
-        constexpr std::string_view kTokenPluginPatch = "CostumeFW_Boxes_FSMPCarrier_001.esp";
+        // The single plugin that ships every CEF record (v1.2.1: the old
+        // CostumeFW_Boxes.esp + CostumeFW_Boxes_FSMPCarrier_001.esp pair was
+        // merged into ESL-flagged CostumeFW.esp by tools/espmerge). houseCARL
+        // still writes new records to fresh patch plugins during development -
+        // fold those in with tools/espmerge at release.
+        constexpr std::string_view kTokenPlugin = "CostumeFW.esp";
 
         bool IsTokenPluginFile(const RE::TESFile* a_file)
         {
             if (!a_file) {
                 return false;
             }
-            const auto fn = a_file->GetFilename();
-            return fn == kTokenPlugin || fn == kTokenPluginPatch;
+            return a_file->GetFilename() == kTokenPlugin;
         }
 
         // Build the project's colon-form id "XXXXXX:Plugin.esp" from a form: its
@@ -259,6 +258,38 @@ namespace CostumeFW
             auto* file = a_form->GetFile(0);
             const std::string plugin = file ? std::string(file->GetFilename()) : std::string{};
             return std::string(buf) + ":" + plugin;
+        }
+
+        // v1.2.1 plugin consolidation: CostumeFW_Boxes.esp and
+        // CostumeFW_Boxes_FSMPCarrier_001.esp were merged into CostumeFW.esp
+        // (espfe). Base-plugin local ids were kept verbatim; the patch plugin's
+        // NEW records were renumbered +0x100 (0x8xx -> 0x9xx) - the rule lives
+        // in tools/espmerge, keep the two in sync. Colon-ids persisted by
+        // pre-merge builds (settings JSON) are healed here so existing box /
+        // persist definitions survive the merge.
+        bool MigrateLegacyColonId(std::string& a_id)
+        {
+            constexpr std::string_view kOldBase = ":CostumeFW_Boxes.esp";
+            constexpr std::string_view kOldPatch = ":CostumeFW_Boxes_FSMPCarrier_001.esp";
+            const auto endsWithCI = [](std::string_view s, std::string_view suffix) {
+                return s.size() >= suffix.size() &&
+                       ::_strnicmp(s.data() + (s.size() - suffix.size()),
+                           suffix.data(), static_cast<size_t>(suffix.size())) == 0;
+            };
+            if (endsWithCI(a_id, kOldBase)) {
+                a_id = a_id.substr(0, a_id.size() - kOldBase.size()) + ":" +
+                       std::string(kTokenPlugin);
+                return true;
+            }
+            if (endsWithCI(a_id, kOldPatch)) {
+                const auto lid = static_cast<std::uint32_t>(std::strtoul(
+                    a_id.substr(0, a_id.size() - kOldPatch.size()).c_str(), nullptr, 16));
+                char buf[8]{};
+                std::snprintf(buf, sizeof(buf), "%06X", lid + 0x100u);
+                a_id = std::string(buf) + ":" + std::string(kTokenPlugin);
+                return true;
+            }
+            return false;
         }
 
         // The biped slot number (30-61) of a single-slot ARMO (the lowest set
@@ -418,19 +449,10 @@ namespace CostumeFW
         // CEF repoints the assigned models and registers exactly those parts on
         // the player. Registration itself is save-persisted (player appearance);
         // the model repoints are volatile form edits reapplied on every pass.
-        constexpr const char* kCarrierPlugin = "CostumeFW_Boxes_FSMPCarrier_001.esp";
-        constexpr std::uint32_t kPersistCarrierId = 0x000809;    // CFW_PersistCarrier
-        constexpr std::uint32_t kPersistProxyFirstId = 0x00080A;  // CFW_PersistProxy01..08
+        constexpr const char* kCarrierPlugin = "CostumeFW.esp";
+        constexpr std::uint32_t kPersistCarrierId = 0x000909;    // CFW_PersistCarrier
+        constexpr std::uint32_t kPersistProxyFirstId = 0x00090A;  // CFW_PersistProxy01..08
         constexpr int kMaxPersistProxies = 8;
-
-        // Legacy PoC head-part carriers (C §9-13..§9-18) baked into pre-production
-        // test saves. They live OUTSIDE the production pool, so the normal
-        // reconcile never touches them - yet, once registered on the player, they
-        // keep creating physics systems that collide with the production carrier
-        // (a second PhSVeil system froze the injected veil in-game 2026-07-04).
-        // Misc-type parts can't be removed via RaceMenu, so `cef persist remove`
-        // is the only lever to purge them from a contaminated save.
-        constexpr std::uint32_t kPocLeftoverIds[] = { 0x000806, 0x000807, 0x000808 };
 
         RE::BGSHeadPart* LookupPoolPart(std::uint32_t a_localId)
         {
@@ -452,18 +474,6 @@ namespace CostumeFW
                 }
             }
             return pool;
-        }
-
-        // Resolved legacy PoC head parts (subset that exists in the load order).
-        std::vector<RE::BGSHeadPart*> PocLeftovers()
-        {
-            std::vector<RE::BGSHeadPart*> v;
-            for (const auto id : kPocLeftoverIds) {
-                if (auto* p = LookupPoolPart(id)) {
-                    v.push_back(p);
-                }
-            }
-            return v;
         }
 
         bool CarrierFileOnDisk(const std::string& a_file)
@@ -551,7 +561,11 @@ namespace CostumeFW
             }
             // No persist entry / inactive set -> desired stays empty = deregister.
 
-            const bool regChanged = ReconcilePersistHeadParts(desired, pool);
+            // One-shot migration sweep (v1.2.1 merge): old-plugin CFW_* parts
+            // still registered on the save are removed here; the merged pool is
+            // reconciled right after. Both feed the same rebuild request.
+            const bool legacySwept = SweepLegacyCfwHeadParts(pool);
+            const bool regChanged = ReconcilePersistHeadParts(desired, pool) || legacySwept;
             // Load-time race avoidance (Codex 1-2). The head-part registration is
             // SAVE-PERSISTED, so on load the ENGINE rebuilds the head (and FSMP the
             // wig physics) ONCE, naturally, like normal equipment. A CEF-forced
@@ -925,21 +939,28 @@ namespace CostumeFW
             CopyFileA(kSettingsPath, kSettingsBakPath, FALSE);
         }
 
+        // Heal pre-merge colon-ids (v1.2.1 plugin consolidation) wherever the
+        // settings persist them; a healed file is rewritten once below.
+        bool healed = false;
         g_cefEnabled = doc.value("enabled", true);
         const auto boxes = doc.value("boxes", nlohmann::json::array());
         for (const auto& jb : boxes) {
             BoxDefInfo b;
             b.label = jb.value("label", std::string{});
             b.token = jb.value("token", std::string{});
+            healed |= MigrateLegacyColonId(b.token);
             if (b.token.empty()) {
                 continue;
             }
             for (const auto& c : jb.value("contents", nlohmann::json::array())) {
                 if (c.is_string()) {
-                    b.contents.push_back(c.get<std::string>());
+                    auto id = c.get<std::string>();
+                    healed |= MigrateLegacyColonId(id);
+                    b.contents.push_back(std::move(id));
                 }
             }
             b.ability = jb.value("ability", std::string{});
+            healed |= MigrateLegacyColonId(b.ability);
             b.enabled = jb.value("enabled", true);
             b.armorType = jb.value("armorType", 0);
             b.preset = jb.value("preset", std::string{});
@@ -950,7 +971,9 @@ namespace CostumeFW
         const auto persist = doc.value("persist", nlohmann::json::object());
         for (const auto& c : persist.value("contents", nlohmann::json::array())) {
             if (c.is_string()) {
-                g_persist.push_back(c.get<std::string>());
+                auto id = c.get<std::string>();
+                healed |= MigrateLegacyColonId(id);
+                g_persist.push_back(std::move(id));
             }
         }
         g_persistPreset = persist.value("preset", std::string{});
@@ -963,7 +986,9 @@ namespace CostumeFW
                 }
             }
             if (!slots.empty()) {
-                g_hideRules[it.key()] = std::move(slots);
+                std::string key = it.key();
+                healed |= MigrateLegacyColonId(key);
+                g_hideRules[std::move(key)] = std::move(slots);
             }
         }
         const auto genders = doc.value("genderModes", nlohmann::json::object());
@@ -971,13 +996,17 @@ namespace CostumeFW
             if (it.value().is_number_integer()) {
                 const int m = it.value().get<int>();
                 if (m >= 1 && m <= 2) {
-                    g_genderModes[it.key()] = m;
+                    std::string key = it.key();
+                    healed |= MigrateLegacyColonId(key);
+                    g_genderModes[std::move(key)] = m;
                 }
             }
         }
         for (const auto& id : doc.value("bodyMorph", nlohmann::json::array())) {
             if (id.is_string()) {
-                g_bodyMorphOn.insert(id.get<std::string>());
+                auto s = id.get<std::string>();
+                healed |= MigrateLegacyColonId(s);
+                g_bodyMorphOn.insert(std::move(s));
             }
         }
         const auto enchants = doc.value("enchants", nlohmann::json::object());
@@ -990,10 +1019,17 @@ namespace CostumeFW
                 }
             }
             if (!effs.empty()) {
-                g_contentEnchants[it.key()] = std::move(effs);
+                std::string key = it.key();
+                healed |= MigrateLegacyColonId(key);
+                g_contentEnchants[std::move(key)] = std::move(effs);
             }
         }
-        if (migrated) {
+        if (healed) {
+            SKSE::log::info(
+                "settings: healed pre-merge plugin ids -> {} (v1.2.1 consolidation)",
+                kTokenPlugin);
+        }
+        if (migrated || healed) {
             WriteJson();  // persist into CEF_settings.json (legacy file left as-is)
         }
 
@@ -1064,15 +1100,6 @@ namespace CostumeFW
             say(std::string("  ") + (ed ? ed : "?") + (reg ? " REGISTERED" : " -") +
                 "  model=" + part->model.c_str());
         }
-        // Legacy PoC leftovers still baked into a contaminated save (conflict
-        // source - see kPocLeftoverIds). Flag any that are registered.
-        for (auto* part : PocLeftovers()) {
-            if (PlayerHasHeadPart(part)) {
-                const char* ed = part->GetFormEditorID();
-                say(std::string("  [PoC leftover] ") + (ed ? ed : "?") +
-                    " REGISTERED - run 'cef persist remove' to purge");
-            }
-        }
         // Churn diagnostics (Codex Phase 2): after a fresh load the target is
         // headRebuild exec ~1 and low reconcile/watchdog counts.
         say("[CEF] churn: " + PersistDiagString());
@@ -1080,15 +1107,12 @@ namespace CostumeFW
 
     void PersistCarrierRemove()
     {
-        // Purge every CEF-owned head part: the production pool AND the legacy PoC
-        // leftovers (the latter are outside the pool, never auto-removed, and
-        // collide with the production carrier). This is the rescue lever for a
-        // contaminated save; the production pool re-registers on the next content
-        // change / `cef persist regen`.
+        // Deregister the whole production pool - the rescue lever for a
+        // contaminated save; the pool re-registers on the next content change /
+        // `cef persist regen`. (The PoC-leftover purge is gone with the v1.2.1
+        // plugin merge: the PoC records were not carried into CostumeFW.esp, so
+        // purge PoC-era saves on a pre-merge build BEFORE switching plugins.)
         auto parts = PersistPool();
-        for (auto* p : PocLeftovers()) {
-            parts.push_back(p);
-        }
         if (parts.empty()) {
             return;
         }

@@ -30,7 +30,8 @@ worn gear.
 - [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
 - [RaceMenu](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee — required for body-morph follow and the SkyUI MCM SDK)
 - SkyUI (MCM)
-- `CostumeFW_Boxes.esp` (ships with the mod — provides the box tokens)
+- `CostumeFW.esp` (ships with the mod — ESL-flagged, no load-order slot; box
+  tokens, persist head-part pool, MCM quest)
 - *(optional)* [Faster HDT-SMP (FSMP)](https://www.nexusmods.com/skyrimspecialedition/mods/57339)
   — custom-bone SMP cloth physics on injected content (3.5.0 tested)
 

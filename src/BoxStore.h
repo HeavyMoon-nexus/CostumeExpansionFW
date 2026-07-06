@@ -185,7 +185,7 @@ namespace CostumeFW
     // and SkyUI's menu dialog degrades past ~128 rows).
     std::vector<WornItem> InventoryArmors();
 
-    // The shipped slot-token pool (CostumeFW_Boxes.esp ARMOs named "Costume Box*"),
+    // The shipped slot-token pool (CostumeFW.esp ARMOs named "Costume Box*"),
     // as colon-form ids, sorted by their biped slot number. FreeTokens = those not
     // yet bound to a box def (for the MCM "new box" slot picker).
     std::vector<std::string> TokenPool();
@@ -225,7 +225,7 @@ namespace CostumeFW
     bool RecoverContentItem(const std::string& a_id);
 
     // --- Box abilities (Phase C) ---------------------------------------------
-    // The shipped ability-spell catalog (CostumeFW_Boxes.esp SPEL named
+    // The shipped ability-spell catalog (CostumeFW.esp SPEL named
     // "Costume:*"), as {name, colon-id}; used by the MCM ability picker.
     std::vector<WornItem> AbilityCatalog();
 

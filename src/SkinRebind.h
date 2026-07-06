@@ -122,6 +122,14 @@ namespace CostumeFW
     // `cef persist` status print).
     bool PlayerHasHeadPart(RE::BGSHeadPart* a_part);
 
+    // v1.2.1 plugin-merge migration: deregister every "CFW_*" head part that is
+    // NOT a member of the merged plugin's pool - i.e. old-pool / PoC parts of the
+    // pre-merge plugins, resolvable while those plugins are still enabled for the
+    // one transition load (disabled old plugins never reach the runtime array, so
+    // this is a no-op then). Returns true if something was removed (the caller
+    // pairs it with a head rebuild). Main thread only.
+    bool SweepLegacyCfwHeadParts(const std::vector<RE::BGSHeadPart*>& a_currentPool);
+
     // Debounced request for a persist head rebuild: coalesces a burst of
     // ApplyPersistCarrier-driven rebuilds into ONE DoReset3D ~500ms after the
     // last request, so FSMP rebuilds the wig physics once (not per settings-write

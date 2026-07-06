@@ -13,7 +13,7 @@ namespace CostumeFW
 {
     namespace
     {
-        // Our LoreBox keyword family: "LoreBox_CEFBox<slot>" (see CostumeFW_Boxes_KID.ini).
+        // Our LoreBox keyword family: "LoreBox_CEFBox<slot>" (see CostumeFW_KID.ini).
         constexpr wchar_t kKeyPrefix[] = L"LoreBox_CEFBox";
 
         std::wstring Utf8ToWide(const std::string& a_utf8)

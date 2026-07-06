@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 15 autoReadonly
+int property CURRENT_VERSION = 16 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -286,10 +286,10 @@ function ResetMainPage()
     endIf
     AddTextOption("RaceMenu / skee (body morph)", skee, OPTION_FLAG_DISABLED)
     string boxesEsp = "MISSING"
-    if Game.GetFormFromFile(0x00080D, "CostumeFW_Boxes.esp")
+    if Game.GetFormFromFile(0x00080D, "CostumeFW.esp")
         boxesEsp = "OK"
     endIf
-    AddTextOption("CostumeFW_Boxes.esp", boxesEsp, OPTION_FLAG_DISABLED)
+    AddTextOption("CostumeFW.esp", boxesEsp, OPTION_FLAG_DISABLED)
 
     AddHeaderOption("Maintenance")
     _optUninstall = AddTextOption("Prepare for uninstall", "")
@@ -656,7 +656,7 @@ endEvent
 
 ObjectReference Function GetStore()
     if _store == None
-        Form base = Game.GetFormFromFile(0x00080D, "CostumeFW_Boxes.esp")
+        Form base = Game.GetFormFromFile(0x00080D, "CostumeFW.esp")
         if base
             _store = Game.GetPlayer().PlaceAtMe(base)
             if _store

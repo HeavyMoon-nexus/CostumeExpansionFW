@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased (v1.2.1)
+
+### Changed
+- **One ESL-flagged plugin.** `CostumeFW_Boxes.esp` and
+  `CostumeFW_Boxes_FSMPCarrier_001.esp` were merged into a single espfe plugin,
+  **`CostumeFW.esp`** (52 records, no load-order slot consumed; built by
+  `tools/espmerge`). Base-plugin FormIDs are unchanged; the carrier-patch's own
+  records were renumbered +0x100 (persist head-part pool `0x909`-`0x911`,
+  slot-31 wig token `0x913`). Box/persist definitions, ability assignments and
+  per-content settings stored in `CEF_settings.json` migrate automatically on
+  first load (ids are healed to the new plugin and written back). The three
+  approach-C PoC head parts were dropped instead of carried over. A `SEQ` file
+  now ships so the MCM quest starts when the plugin joins an existing save.
+  The LoreBox KID ini was renamed to `CostumeFW_KID.ini` and now also covers
+  the slot-31 wig token.
+- **Upgrading mid-save:** the old plugins vanish from the load order, so box
+  tokens disappear from the inventory once (CEF re-distributes them) and
+  captured originals held by the old hidden container are returned as fresh
+  copies on demand. A save that ever used persist on a pre-merge DEV build
+  should do one TRANSITION load (new plugin enabled, old plugins still
+  enabled): a one-shot sweep deregisters the old plugins' head parts
+  automatically; save, then disable the old plugins.
+
 ## v1.2.0 (2026-07-07)
 
 ### Changed

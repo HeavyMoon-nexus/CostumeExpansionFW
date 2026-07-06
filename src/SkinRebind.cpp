@@ -1306,6 +1306,47 @@ namespace CostumeFW
         return base && a_part && HasHeadPart(base, a_part);
     }
 
+    bool SweepLegacyCfwHeadParts(const std::vector<RE::BGSHeadPart*>& a_currentPool)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* base = player ? player->GetActorBase() : nullptr;
+        if (!base || !base->headParts) {
+            return false;
+        }
+        // Collect first (removal shifts the array). HDPT retains its editorID at
+        // runtime (facegen addresses parts by editorID), so prefix matching works.
+        std::vector<RE::BGSHeadPart*> legacy;
+        for (std::int8_t i = 0; i < base->numHeadParts; ++i) {
+            auto* part = base->headParts[i];
+            if (!part) {
+                continue;
+            }
+            const char* ed = part->GetFormEditorID();
+            if (!ed || !std::string_view(ed).starts_with("CFW_")) {
+                continue;
+            }
+            if (std::find(a_currentPool.begin(), a_currentPool.end(), part) !=
+                a_currentPool.end()) {
+                continue;  // merged-plugin pool member - the reconcile owns it
+            }
+            if (std::find(legacy.begin(), legacy.end(), part) == legacy.end()) {
+                legacy.push_back(part);
+            }
+        }
+        bool changed = false;
+        for (auto* part : legacy) {
+            while (RemoveHeadPartDirect(base, part)) {
+                SKSE::log::info("persist head: - legacy '{}' ({:08X}) [pre-merge sweep]",
+                    part->GetFormEditorID(), part->GetFormID());
+                changed = true;
+            }
+        }
+        if (changed) {
+            base->AddChange(RE::TESNPC::ChangeFlags::kFace);
+        }
+        return changed;
+    }
+
     void RebuildPlayerHead()
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
