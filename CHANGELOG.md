@@ -20,6 +20,13 @@
   the current in-memory state (review P2-5).
 - **The Armor type menu opens on the box's current value** instead of always
   box 0's (option-index mixup).
+- **The "has attached scripts" capture warning fires only for real scripts.**
+  Passing a form through the MCM's own Papyrus flow binds a plain VM wrapper
+  object ("Armor"/"Form") to the form's handle, which the check misread as an
+  attached script - so EVERY capture warned. Native wrapper classes are now
+  filtered out (the real script's class name is logged when one is found), and
+  the message is phrased as a heads-up ("appears to have ... may not run")
+  rather than a verdict.
 
 ### Changed
 - **One ESL-flagged plugin.** `CostumeFW_Boxes.esp` and

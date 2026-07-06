@@ -261,11 +261,13 @@ string Function BoxContentsSummary(int a_boxIndex)
     return out
 endFunction
 
-; If the captured item has attached scripts, warn that its script-driven behavior
-; won't run under CEF (the mesh is injected but the item is stored, not worn).
+; If the captured item appears to carry attached scripts, give a heads-up that
+; script-driven behavior would not run under CEF (the mesh is injected but the
+; item is stored, not worn). Phrased as a caution, not a verdict - the check is
+; best-effort (base-form scripts only).
 function WarnIfScripted(string contentId)
     if CFW_Native.ContentHasScript(contentId)
-        Debug.MessageBox("CostumeFW: '" + CFW_Native.GetItemName(contentId) + "' has attached scripts. Its equip- or possession-driven behavior may not work when captured (CEF injects the mesh, but the item is stored - not worn). Enchantment effects and keywords are still applied.")
+        Debug.MessageBox("CostumeFW: note - '" + CFW_Native.GetItemName(contentId) + "' appears to have attached scripts. If its behavior is script-driven (equip/possession effects), that part may not run under CEF: the mesh is injected, but the item itself is stored - not worn. Enchantments and keywords still apply.")
     endIf
 endFunction
 

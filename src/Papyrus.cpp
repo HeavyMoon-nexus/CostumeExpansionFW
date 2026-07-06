@@ -770,10 +770,14 @@ namespace CostumeFW
             return CaptureEnchant(a_content.c_str());  // sync def + json (inventory read)
         }
 
-        // True if the content's base form has any Papyrus script attached (VMAD).
-        // Used to warn at capture: CEF injects the mesh but never actually equips
-        // the item (and removes it from the inventory), so equip-/possession-driven
-        // scripts won't run. Best-effort (base-form scripts; a plain heads-up).
+        // True if the content's base form has a REAL Papyrus script attached
+        // (VMAD user script). A bare attachedScripts existence check is wrong:
+        // merely passing a form through a Papyrus variable binds a plain
+        // wrapper object of the form's NATIVE class ("Armor"/"Form") to the
+        // same VM handle - and the MCM capture flow itself does that via
+        // ResolveForm(), so EVERY capture warned (2026-07-07, all captured
+        // contents verified VMAD-less). Count only script classes that are not
+        // native wrappers. Best-effort (base-form scripts; a plain heads-up).
         bool ContentHasScriptNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
         {
             const std::uint32_t formId = ResolveFormId(a_content.c_str());
@@ -796,7 +800,24 @@ namespace CostumeFW
                 return false;
             }
             RE::BSSpinLockGuard lock(vm->attachedScriptsLock);
-            return vm->attachedScripts.find(handle) != vm->attachedScripts.end();
+            const auto it = vm->attachedScripts.find(handle);
+            if (it == vm->attachedScripts.end()) {
+                return false;
+            }
+            for (auto& attached : it->second) {
+                auto* obj = attached.get();
+                auto* info = obj ? obj->GetTypeInfo() : nullptr;
+                const char* name = info ? info->GetName() : nullptr;
+                if (!name || !*name) {
+                    continue;
+                }
+                if (::_stricmp(name, "Armor") != 0 && ::_stricmp(name, "Form") != 0) {
+                    SKSE::log::info("capture: '{}' carries attached script '{}'",
+                        a_content.c_str(), name);
+                    return true;
+                }
+            }
+            return false;
         }
 
         bool ClearPersistPresetNative(RE::StaticFunctionTag*)

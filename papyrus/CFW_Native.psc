@@ -221,4 +221,6 @@ Bool Function CaptureContentEnchant(String content) Global Native
 ; injects the mesh but never actually equips the item (and removes it from the
 ; inventory), so equip-/possession-driven scripts won't run - used to warn at
 ; capture. Best-effort (base-form scripts).
+; True only for REAL attached scripts (native VM wrapper objects - which every
+; form passed through Papyrus acquires - are filtered out).
 Bool Function ContentHasScript(String content) Global Native
