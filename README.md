@@ -130,4 +130,9 @@ PapyrusCompiler CostumeFW_MCM -import="<SkyUI SDK + base scripts>" -output="Scri
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+- **Source code of this project**: MIT — see [LICENSE](LICENSE).
+- **Distributed plugin binary (`CostumeExpansionFW.dll`)**: **GPLv3**, because it
+  statically links [nifly](https://github.com/ousnius/nifly) (GPLv3) for the
+  in-process carrier build. Corresponding source is this repository. See
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full component list
+  and the packaging checklist.
