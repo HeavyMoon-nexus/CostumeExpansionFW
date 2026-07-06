@@ -64,6 +64,12 @@ Bool Function SetBoxLabel(String token, String label) Global Native
 String[] Function GetWornItemNames() Global Native
 String[] Function GetWornItemIds() Global Native
 
+; ALL carried player armors (worn included; box tokens excluded), name-sorted and
+; natively capped at 40. The "+ Add from inventory" capture flow - no equip
+; needed, so no transient FSMP physics build happens.
+String[] Function GetInventoryItemNames() Global Native
+String[] Function GetInventoryItemIds() Global Native
+
 ; Create a new empty box auto-assigning the next free pool token. False if the
 ; shipped token pool (Costume Box 1..N) is exhausted.
 Bool Function NewBox(String label) Global Native

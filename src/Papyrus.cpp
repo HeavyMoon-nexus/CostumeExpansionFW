@@ -240,6 +240,24 @@ namespace CostumeFW
             return out;
         }
 
+        std::vector<RE::BSFixedString> GetInventoryItemNames(RE::StaticFunctionTag*)
+        {
+            std::vector<RE::BSFixedString> out;
+            for (const auto& w : InventoryArmors()) {
+                out.emplace_back(w.name);
+            }
+            return out;
+        }
+
+        std::vector<RE::BSFixedString> GetInventoryItemIds(RE::StaticFunctionTag*)
+        {
+            std::vector<RE::BSFixedString> out;
+            for (const auto& w : InventoryArmors()) {
+                out.emplace_back(w.id);
+            }
+            return out;
+        }
+
         // Create an empty box auto-assigning the next free pool token (def-only,
         // synchronous so the MCM reflects it on ForcePageReset). False if the pool
         // is exhausted.
@@ -795,6 +813,8 @@ namespace CostumeFW
 
         a_vm->RegisterFunction("GetWornItemNames", kClass, GetWornItemNames);
         a_vm->RegisterFunction("GetWornItemIds", kClass, GetWornItemIds);
+        a_vm->RegisterFunction("GetInventoryItemNames", kClass, GetInventoryItemNames);
+        a_vm->RegisterFunction("GetInventoryItemIds", kClass, GetInventoryItemIds);
         a_vm->RegisterFunction("NewBox", kClass, NewBoxNative);
         a_vm->RegisterFunction("GetItemName", kClass, GetItemName);
 

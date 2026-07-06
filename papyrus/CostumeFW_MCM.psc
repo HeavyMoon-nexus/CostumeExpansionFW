@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 14 autoReadonly
+int property CURRENT_VERSION = 15 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -19,6 +19,7 @@ int _optUninstall
 
 ; --- Persist page state ---
 int      _optAddPersist
+int      _optAddInvPersist  ; "+ Add from inventory" (no equip needed)
 int      _optRemoveAllPersist
 int      _persistPresetOpt   ; persist "Preset" menu (assign/clear)
 int      _persistExportOpt   ; persist "Export as preset" input
@@ -41,6 +42,8 @@ int[]    _equipOpts
 int[]    _equipBoxIdx
 int[]    _addWornOpts
 int[]    _addWornBoxIdx
+int[]    _addInvOpts        ; "+ Add from inventory" (single box page)
+int[]    _addInvBoxIdx
 int[]    _deleteOpts
 string[] _deleteTokens
 int[]    _removeOpts
@@ -93,6 +96,7 @@ function SetupConfig()
     ; Init every option-map array so a Find() before a page is built is safe.
     _persistPresetOpt = -1
     _persistExportOpt = -1
+    _optAddInvPersist = -1
     _persistRemoveOpts     = new int[1]
     _persistHideOpts       = new int[1]
     _persistRemoveContents = new string[1]
@@ -105,6 +109,8 @@ function SetupConfig()
     _equipBoxIdx   = new int[1]
     _addWornOpts   = new int[1]
     _addWornBoxIdx = new int[1]
+    _addInvOpts    = new int[1]
+    _addInvBoxIdx  = new int[1]
     _deleteOpts    = new int[1]
     _deleteTokens  = new string[1]
     _removeOpts     = new int[1]
@@ -299,6 +305,7 @@ function ResetPersistPage()
     SetCursorFillMode(TOP_TO_BOTTOM)
 
     _optAddPersist = AddMenuOption("+ Add worn item", "")
+    _optAddInvPersist = AddMenuOption("+ Add from inventory", "")
 
     string ppreset = CFW_Native.GetPersistPreset()
     if ppreset == ""
@@ -426,6 +433,8 @@ function ResetSingleBoxPage(int a_idx)
     _equipBoxIdx   = Utility.CreateIntArray(1, a_idx)
     _addWornOpts   = Utility.CreateIntArray(1, -1)
     _addWornBoxIdx = Utility.CreateIntArray(1, a_idx)
+    _addInvOpts    = Utility.CreateIntArray(1, -1)
+    _addInvBoxIdx  = Utility.CreateIntArray(1, a_idx)
     _distribOpts   = Utility.CreateIntArray(1, -1)
     _distribTokens = Utility.CreateStringArray(1, token)
     _armorTypeOpts   = Utility.CreateIntArray(1, -1)
@@ -446,6 +455,7 @@ function ResetSingleBoxPage(int a_idx)
     _distribOpts[0] = AddToggleOption("Distribute token", CFW_Native.GetBoxEnabled(a_idx))
     _equipOpts[0] = AddToggleOption("Wear (show contents)", CFW_Native.IsBoxWorn(a_idx))
     _addWornOpts[0] = AddMenuOption("+ Add worn item", "")
+    _addInvOpts[0] = AddMenuOption("+ Add from inventory", "")
     _armorTypeOpts[0] = AddMenuOption("Armor type", ArmorTypeName(CFW_Native.GetBoxArmorType(a_idx)))
     string presetName = CFW_Native.GetBoxPreset(token)
     if presetName == ""
@@ -769,11 +779,22 @@ event OnOptionMenuOpen(int a_option)
         return
     endIf
 
-    if a_option == _optAddPersist || _addWornOpts.Find(a_option) >= 0
+    bool fromInv = (a_option == _optAddInvPersist || _addInvOpts.Find(a_option) >= 0)
+    if fromInv || a_option == _optAddPersist || _addWornOpts.Find(a_option) >= 0
         ; One in-MCM SkyUI dialog that asks item AND gender NIF in a single pick:
-        ; each worn item is listed three times (player / Male / Female).
-        string[] names = CFW_Native.GetWornItemNames()
-        string[] ids = CFW_Native.GetWornItemIds()
+        ; each item is listed three times (player / Male / Female). The inventory
+        ; variant lists ALL carried armors (name-sorted, natively capped at 40) so
+        ; an item can be captured without ever being equipped = no transient FSMP
+        ; physics build.
+        string[] names
+        string[] ids
+        if fromInv
+            names = CFW_Native.GetInventoryItemNames()
+            ids = CFW_Native.GetInventoryItemIds()
+        else
+            names = CFW_Native.GetWornItemNames()
+            ids = CFW_Native.GetWornItemIds()
+        endIf
         int n = names.Length
         _wornIdsCache    = Utility.CreateStringArray(n * 3, "")
         _wornGenderCache = Utility.CreateIntArray(n * 3, 0)
@@ -853,8 +874,8 @@ event OnOptionMenuAccept(int a_option, int a_index)
         return
     endIf
 
-    ; --- Persist "+ Add worn item" capture ---
-    if a_option == _optAddPersist
+    ; --- Persist "+ Add worn item" / "+ Add from inventory" capture ---
+    if a_option == _optAddPersist || a_option == _optAddInvPersist
         if a_index < 0 || a_index >= _wornIdsCache.Length
             return
         endIf
@@ -880,13 +901,22 @@ event OnOptionMenuAccept(int a_option, int a_index)
         return
     endIf
 
-    ; --- Box "+ Add worn item" capture ---
+    ; --- Box "+ Add worn item" / "+ Add from inventory" capture ---
     int k = _addWornOpts.Find(a_option)
+    int capBoxIdx = -1
     if k >= 0
+        capBoxIdx = _addWornBoxIdx[k]
+    else
+        k = _addInvOpts.Find(a_option)
+        if k >= 0
+            capBoxIdx = _addInvBoxIdx[k]
+        endIf
+    endIf
+    if capBoxIdx >= 0
         if a_index < 0 || a_index >= _wornIdsCache.Length
             return
         endIf
-        int boxIdx = _addWornBoxIdx[k]
+        int boxIdx = capBoxIdx
         string token = CFW_Native.GetBoxToken(boxIdx)
         string contentId = _wornIdsCache[a_index]
 
@@ -1084,6 +1114,8 @@ event OnOptionHighlight(int a_option)
         SetInfoText("Apply your RaceMenu body sliders to this mesh. ON only for BodySlide body-conforming meshes; keep OFF for hair/jewelry (memory cost).")
     elseIf _persistUncatOpts.Find(a_option) >= 0
         SetInfoText("Active on this save but removed from the shared catalog elsewhere. Deactivate to stop showing it and get the item back.")
+    elseIf a_option == _optAddInvPersist || _addInvOpts.Find(a_option) >= 0
+        SetInfoText("Capture straight from your inventory - no need to equip first (skips the transient physics build). Player-enchanted items keep their enchantment. Lists the first 40 armors by name; for others, equip and use + Add worn item.")
     elseIf _hideOpts.Find(a_option) >= 0 || _persistHideOpts.Find(a_option) >= 0
         SetInfoText("Hide this item while a real item holds a slot. Enter slot numbers (e.g. 37 = feet/boots, or 30 31 42 = helmet/hair/circlet). Blank = never hide.")
     elseIf _presetAssignOpts.Find(a_option) >= 0

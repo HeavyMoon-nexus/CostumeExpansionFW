@@ -178,6 +178,13 @@ namespace CostumeFW
     // Currently-equipped player ARMOs (excluding our own box tokens), for capture.
     std::vector<WornItem> WornArmors();
 
+    // ALL carried player ARMOs (worn included; our box tokens excluded), for the
+    // "+ Add from inventory" capture flow - the item never has to be equipped,
+    // so no transient FSMP armor build happens. Sorted by name and capped
+    // natively (the MCM menu lists each entry three times for the gender pick,
+    // and SkyUI's menu dialog degrades past ~128 rows).
+    std::vector<WornItem> InventoryArmors();
+
     // The shipped slot-token pool (CostumeFW_Boxes.esp ARMOs named "Costume Box*"),
     // as colon-form ids, sorted by their biped slot number. FreeTokens = those not
     // yet bound to a box def (for the MCM "new box" slot picker).
@@ -228,13 +235,14 @@ namespace CostumeFW
     // Set/clear a box's ability (def + json only; caller applies on main thread).
     bool SetBoxAbility(const std::string& a_token, const std::string& a_ability);
 
-    // Snapshot a content's EFFECTIVE worn enchantment (base OR player/instance
+    // Snapshot a content's EFFECTIVE enchantment (base OR player/instance
     // enchantment) into the store, keyed by content id, so the synthesized ability
     // can reproduce it later (the base ARMO alone misses instance enchantments).
-    // Reads the currently-WORN player item matching the content's base form, so it
-    // must be called while that item is still equipped (at capture time). Stores
-    // the effect list (MGEF colon-id + magnitude); def + json. Returns true if an
-    // enchantment was found and stored. Main/VM thread (inventory read only).
+    // Prefers the WORN player item matching the content's base form; falls back
+    // to any carried entry, so the inventory-capture flow (item never equipped)
+    // still snapshots player enchantments. Stores the effect list (MGEF colon-id
+    // + magnitude); def + json. Returns true if an enchantment was found and
+    // stored. Main/VM thread (inventory read only).
     bool CaptureEnchant(const std::string& a_content);
 
     // Sync every box's abilities to the player: token worn -> AddSpell, else

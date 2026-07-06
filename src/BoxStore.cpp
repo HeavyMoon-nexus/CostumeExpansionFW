@@ -1402,6 +1402,48 @@ namespace CostumeFW
         return out;
     }
 
+    std::vector<WornItem> InventoryArmors()
+    {
+        std::vector<WornItem> out;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            return out;
+        }
+        auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
+            return a_obj.Is(RE::FormType::Armor);
+        });
+        for (auto& [obj, data] : inv) {
+            const auto& [count, entry] = data;
+            if (count <= 0) {
+                continue;
+            }
+            auto* armo = obj->As<RE::TESObjectARMO>();
+            if (!armo) {
+                continue;
+            }
+            // Exclude our own box tokens (base pool esp + the carrier patch).
+            auto* file = armo->GetFile(0);
+            if (IsTokenPluginFile(file)) {
+                continue;
+            }
+            const char* nm = armo->GetFullName();
+            out.push_back({ (nm && *nm) ? std::string(nm) : MakeColonId(armo), MakeColonId(armo) });
+        }
+        std::sort(out.begin(), out.end(),
+            [](const WornItem& a, const WornItem& b) { return a.name < b.name; });
+        // The MCM lists each entry three times (player / Male / Female gender
+        // pick); SkyUI's menu dialog degrades past ~128 rows, so cap the item
+        // count. The worn-capture menu remains the escape hatch for the rest.
+        constexpr std::size_t kMaxItems = 40;
+        if (out.size() > kMaxItems) {
+            SKSE::log::info(
+                "boxes: inventory capture list truncated {} -> {} (alphabetical)",
+                out.size(), kMaxItems);
+            out.resize(kMaxItems);
+        }
+        return out;
+    }
+
     std::vector<std::string> TokenPool()
     {
         std::vector<std::pair<int, std::string>> pairs;
@@ -1875,10 +1917,13 @@ namespace CostumeFW
         if (!player || baseId == 0) {
             return false;
         }
-        // Find the currently-worn player item matching this content's base form and
-        // read its EFFECTIVE enchantment (instance/player enchantment if present,
-        // else the base enchantment). Must run while the item is still equipped.
+        // Find the player item matching this content's base form and read its
+        // EFFECTIVE enchantment (instance/player enchantment if present, else the
+        // base enchantment). Prefer the WORN entry; fall back to any carried
+        // entry so the inventory-capture flow (item never equipped) still
+        // snapshots player enchantments.
         RE::EnchantmentItem* ench = nullptr;
+        RE::EnchantmentItem* carried = nullptr;
         auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
             return a_obj.Is(RE::FormType::Armor);
         });
@@ -1887,11 +1932,19 @@ namespace CostumeFW
                 continue;
             }
             const auto& [count, entry] = data;
-            if (count <= 0 || !entry || !entry->IsWorn()) {
+            if (count <= 0 || !entry) {
                 continue;
             }
-            ench = entry->GetEnchantment();
-            break;
+            if (entry->IsWorn()) {
+                ench = entry->GetEnchantment();
+                break;
+            }
+            if (!carried) {
+                carried = entry->GetEnchantment();
+            }
+        }
+        if (!ench) {
+            ench = carried;
         }
         std::vector<EnchEffect> effs;
         if (ench) {
