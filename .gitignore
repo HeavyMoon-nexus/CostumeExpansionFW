@@ -51,3 +51,4 @@ NEXUS_CHANGELOG_v*.txt
 
 # Release staging output
 dist/
+NIFCARRIER_INPROC.md
