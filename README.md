@@ -37,15 +37,16 @@ worn gear.
 ## Usage (MCM: "Costume Expansion FW")
 
 - **Main** — master on/off, dependency status, version.
-- **Persist** — `+ Add worn item` captures a worn accessory into the shared catalog and
-  activates it on this save. Per row: **active-on-this-save** toggle (visual only —
-  never moves items), **Body morph** toggle, hide-when-worn slots, and remove from
-  catalog. Entries another character removed from the catalog stay active here until
-  you deactivate them (which returns the item).
+- **Persist** — `+ Add worn item` / `+ Add from inventory` capture an accessory (from
+  your equipped items, or straight from your inventory — no need to equip first) into
+  the shared catalog and activate it on this save. Per row: **active-on-this-save**
+  toggle (visual only — never moves items), **Body morph** toggle, hide-when-worn
+  slots, and remove from catalog. Entries another character removed from the catalog
+  stay active here until you deactivate them (which returns the item).
 - **Boxes** — `+ New box` picks a free slot; per box: Distribute token, Wear (show/hide),
-  `+ Add worn item` (capture into the box), Armor type, **Preset** (assign a preset's
-  contents), **Export as preset**, Stats, Delete, and per-item remove / Body morph /
-  hide-when-worn.
+  `+ Add worn item` / `+ Add from inventory` (capture into the box), Armor type,
+  **Preset** (assign a preset's contents), **Export as preset**, Stats, Delete, and
+  per-item remove / Body morph / hide-when-worn.
 - **Presets** — lists installed `CEFP_*.json` presets; assign one to a box.
 - **Diagnostics** — read-only status: dependencies, last carrier auto-sync result,
   per-box carrier revisions, persist registration, churn counters.

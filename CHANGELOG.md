@@ -67,6 +67,12 @@
   run) so the `[sync]`/`[merge]` decisions are visible instead of discarded.
 
 ### Added
+- **Capture from inventory:** the persist page and every box page gain
+  **"+ Add from inventory"** — pick any carried armor (name-sorted, first 40)
+  without equipping it first, so no throwaway FSMP physics build happens just
+  to capture the item. Player-enchanted items keep their enchantment (the
+  snapshot now reads the carried entry too). "+ Add worn item" remains for
+  reaching items past the list cap.
 - **Custom-bone SMP cloth physics on persist items (head-carrier pool):** persist
   accessories with outfit-specific SMP bones (veils, dangling jewelry) now sway:
   nifcarrier builds an invisible head-part carrier pool from the active persist
