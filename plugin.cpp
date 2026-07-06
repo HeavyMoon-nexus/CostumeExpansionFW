@@ -172,12 +172,33 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     CostumeFW::SetupLog();
     SKSE::Init(skse);
-    // Build stamp: proves WHICH dll the game actually loaded. If this timestamp
-    // is older than your last build, MO2's usvfs served a stale cached copy
-    // (rebuilding a dll while MO2 is running does NOT refresh it - fully close
-    // AND reopen MO2, not just the game). __DATE__/__TIME__ update whenever this
-    // file recompiles.
-    SKSE::log::info("CostumeExpansionFW loaded (build " __DATE__ " " __TIME__ ")");
+    // Build stamp: proves WHICH dll the game actually loaded. If the FILE
+    // timestamp is older than your last build, MO2's usvfs served a stale
+    // cached copy (rebuilding a dll while MO2 is running does NOT refresh it -
+    // fully close AND reopen MO2, not just the game). Two stamps because
+    // __DATE__/__TIME__ only refresh when THIS file recompiles - an
+    // incremental build that links new objects elsewhere keeps the old string
+    // (bit us 2026-07-07) - while the file mtime identifies the binary itself.
+    {
+        std::string fileStamp = "unknown";
+        try {
+            // Same game-CWD-relative path convention CEF uses everywhere; the
+            // read goes through usvfs, so this is the exact file the game got.
+            const auto ft =
+                std::filesystem::last_write_time("Data\\SKSE\\Plugins\\CostumeExpansionFW.dll");
+            const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(ft);
+            const std::time_t tt = std::chrono::system_clock::to_time_t(sys);
+            std::tm tm{};
+            if (localtime_s(&tm, &tt) == 0) {
+                char buf[32]{};
+                std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+                fileStamp = buf;
+            }
+        } catch (...) {
+        }
+        SKSE::log::info("CostumeExpansionFW loaded (file {} / compile " __DATE__ " " __TIME__ ")",
+            fileStamp);
+    }
 
     // Honor the external kill-switch as early as possible. When disabled we return
     // true (so the DLL still loads and its ESP masters resolve) but register
