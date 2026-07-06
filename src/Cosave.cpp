@@ -23,15 +23,20 @@ namespace CostumeFW
             }
         }
 
-        std::string ReadString(SKSE::SerializationInterface* a_intfc)
+        // Corrupt-cosave guards: a damaged record must fail small, never drive
+        // a giant allocation or a near-endless restore loop. Ids are
+        // "XXXXXX:Plugin.esp" strings, so these bounds are generous.
+        constexpr std::uint32_t kMaxStringLen = 1024;
+        constexpr std::uint32_t kMaxItemCount = 4096;
+
+        bool ReadStringChecked(SKSE::SerializationInterface* a_intfc, std::string& a_out)
         {
             std::uint32_t len = 0;
-            a_intfc->ReadRecordData(len);
-            std::string s(len, '\0');
-            if (len > 0) {
-                a_intfc->ReadRecordData(s.data(), len);
+            if (a_intfc->ReadRecordData(len) != sizeof(len) || len > kMaxStringLen) {
+                return false;
             }
-            return s;
+            a_out.assign(len, '\0');
+            return len == 0 || a_intfc->ReadRecordData(a_out.data(), len) == len;
         }
 
         void SaveCallback(SKSE::SerializationInterface* a_intfc)
@@ -69,10 +74,18 @@ namespace CostumeFW
                     continue;
                 }
                 std::uint32_t count = 0;
-                a_intfc->ReadRecordData(count);
+                if (a_intfc->ReadRecordData(count) != sizeof(count) || count > kMaxItemCount) {
+                    SKSE::log::error("cosave: corrupt record (count={}) - record skipped", count);
+                    continue;
+                }
                 for (std::uint32_t i = 0; i < count; ++i) {
-                    const std::string id = ReadString(a_intfc);
-                    const std::string tokenId = (version >= 2) ? ReadString(a_intfc) : std::string{};
+                    std::string id;
+                    std::string tokenId;
+                    if (!ReadStringChecked(a_intfc, id) ||
+                        (version >= 2 && !ReadStringChecked(a_intfc, tokenId))) {
+                        SKSE::log::error("cosave: corrupt record at item {}/{} - rest skipped", i, count);
+                        break;
+                    }
                     const bool ok = tokenId.empty() ? RegisterArmaById(id)
                                                      : RegisterBoxById(id, tokenId);
                     if (ok) {

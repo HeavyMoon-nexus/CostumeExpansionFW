@@ -2047,10 +2047,13 @@ namespace CostumeFW
         }
 
         // Get (build + cache) the persist class's aggregate enchant ability.
+        // Built from THIS SAVE'S ACTIVE set, not the shared catalog (M2) - a
+        // non-active entry another character cataloged must not grant effects
+        // here. Activation changes invalidate via RebuildPersistAbility().
         RE::SpellItem* PersistAbilityFor()
         {
             if (!g_persistSpellBuilt) {
-                g_persistSpell = BuildEnchantSpell(g_persist, "Costume Stats (Persist)");
+                g_persistSpell = BuildEnchantSpell(ActivePersistIds(), "Costume Stats (Persist)");
                 g_persistSpellBuilt = true;
             }
             return g_persistSpell;

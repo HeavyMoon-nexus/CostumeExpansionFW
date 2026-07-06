@@ -22,6 +22,12 @@
   validate-or-bones-only safety gate remains in place.
 
 ### Fixed
+- **Persist enchant effects now come from this save's ACTIVE set,** not the
+  shared catalog — you no longer get the effects of persist entries another
+  character cataloged but this save never activated.
+- **Corrupt co-save data fails small:** record reads are bounds-checked
+  (string/count caps, short-read detection), so a damaged co-save logs and
+  skips instead of driving a huge allocation or a near-endless restore loop.
 - **Carrier publish is failure-checked end to end:** every publish write
   (carrier, revision slot, physics XML, `carriers.json`) is verified, and the
   input hash is recorded only after a successful slot publish — a copy that
