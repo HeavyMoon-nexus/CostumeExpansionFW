@@ -44,3 +44,6 @@ CODEX_WIG_INVESTIGATION.md
 NEXUS_DESCRIPTION.txt
 CEF_REVIEW_2026-07-05.md
 CEF_STATE_SCOPE.md
+
+# ETW traces (memory investigation)
+*.etl
