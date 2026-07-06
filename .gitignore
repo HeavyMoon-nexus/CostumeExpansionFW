@@ -52,3 +52,4 @@ NEXUS_CHANGELOG_v*.txt
 # Release staging output
 dist/
 NIFCARRIER_INPROC.md
+tools/nifcarrier/sync_carriers.local.cmd
