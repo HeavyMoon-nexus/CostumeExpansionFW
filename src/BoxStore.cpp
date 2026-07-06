@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -683,7 +684,38 @@ namespace CostumeFW
                 g_syncRerun = true;  // coalesce: rerun once the current child exits
                 return;
             }
-            std::string full = "cmd /c \"" + cmd + "\"";
+            // Review C (sync hardening): an .exe target runs DIRECTLY - no shell
+            // between the game and the child. .cmd/.bat wrappers still need
+            // cmd.exe (CreateProcess cannot exec batch files); that shell layer
+            // is a local-dev convenience - distribute exe-form commands.
+            std::string full = cmd;
+            {
+                std::string first = cmd;
+                if (!first.empty() && first.front() == '"') {
+                    const auto q = first.find('"', 1);
+                    first = (q == std::string::npos) ? first.substr(1) : first.substr(1, q - 1);
+                } else {
+                    const auto sp = first.find_first_of(" \t");
+                    if (sp != std::string::npos) {
+                        first = first.substr(0, sp);
+                    }
+                }
+                const auto endsWithNoCase = [](std::string_view s, std::string_view suf) {
+                    if (s.size() < suf.size()) {
+                        return false;
+                    }
+                    for (std::size_t i = 0; i < suf.size(); ++i) {
+                        if (std::tolower(static_cast<unsigned char>(s[s.size() - suf.size() + i])) !=
+                            std::tolower(static_cast<unsigned char>(suf[i]))) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                if (!endsWithNoCase(first, ".exe")) {
+                    full = "cmd /c \"" + cmd + "\"";
+                }
+            }
             STARTUPINFOA si{};
             si.cb = sizeof(si);
             PROCESS_INFORMATION pi{};

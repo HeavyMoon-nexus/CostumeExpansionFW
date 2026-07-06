@@ -680,9 +680,10 @@ function ReturnItem(Form akItem, bool aNotify = true)
 endFunction
 
 ; Clean-uninstall helper: return every captured item (box + persist) to the
-; player, unequip + remove all box tokens, and detach all injected meshes. After
-; this it is safe to remove the mod. (Defs in CEF_settings.json are left as-is;
-; if you keep playing, a reload re-applies them.)
+; player, unequip + remove all box tokens, detach all injected meshes, and
+; write enabled=false so a reload does NOT re-apply anything (review C: the
+; old behavior kept enabled=true, so playing on re-applied everything). Defs
+; stay in CEF_settings.json; re-enable from MCM Main to restore them.
 function UninstallCleanup()
     Actor player = Game.GetPlayer()
     int n = CFW_Native.GetBoxCount()
@@ -710,7 +711,8 @@ function UninstallCleanup()
     endWhile
 
     CFW_Native.Clear()  ; detach + unregister all injected meshes
-    Debug.Notification("CostumeFW: items returned, tokens removed - safe to uninstall.")
+    CFW_Native.SetEnabled(false)  ; persist the OFF state (no re-apply on reload)
+    Debug.Notification("CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall.")
     ForcePageReset()
 endFunction
 
