@@ -92,6 +92,9 @@ Save, then remove the mod.
   **works on injected content when FSMP is installed**: CEF auto-builds an invisible
   physics *carrier* from a box's contents (rebuilt on change — re-equip the token until
   the outfit sways) and a head-part carrier pool for persist items (fully automatic).
+  The carrier builder is **built into the plugin** (v1.2+) — no external tool or .NET
+  runtime required. (Power users: a `Data\SKSE\Plugins\CEF_sync_command.txt` hands the
+  build to an external command instead — legacy compat mode.)
   Without FSMP — or for content the carrier validator excludes (legacy `NiTriShape`
   meshes) — such parts render **statically** on their nearest real ancestor bone instead
   of vanishing. Full wigs belong in the slot-31 box, not in Persist (the facegen path

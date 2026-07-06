@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.2.0 (2026-07-07)
+
+### Changed
+- **The carrier builder now runs inside the plugin — no external tool.** The FSMP
+  physics-carrier build (the former external C# `nifcarrier`) was ported to C++
+  ([nifly](https://github.com/ousnius/nifly)) and statically linked into the DLL.
+  Everything that setup used to need is gone: no .NET runtime, no
+  `sync_carriers.cmd` path editing, no `CEF_sync_command.txt` — install the mod
+  and auto-sync just works. Box/persist changes rebuild carriers in-process (2 s
+  debounce, background thread), and content paths resolve through the same VFS
+  the game sees — so any mod manager works, with no per-mod path maintenance.
+  Power users: a present `CEF_sync_command.txt` still hands the build to the
+  external tool (compat mode, kept for one release). This also retires the
+  "plugin executes a command line read from a text file" surface by default.
+- **Veil-class contents keep their collision shapes in merged carriers.** The
+  C# tool's NIF library corrupted some contents' SSE vertex data during
+  cross-file shape cloning, so such contents were baked bones-only (physics
+  moved, collision inert). Upstream C++ nifly does not have that bug — those
+  contents now carry their collision meshes. The per-content
+  validate-or-bones-only safety gate remains in place.
+
+### Fixed
+- **Carrier publish is failure-checked end to end:** every publish write
+  (carrier, revision slot, physics XML, `carriers.json`) is verified, and the
+  input hash is recorded only after a successful slot publish — a copy that
+  fails (file locks, antivirus, VFS quirks) can no longer strand a box in a
+  "hash says up-to-date, files say otherwise" state that never rebuilds. A
+  wedged in-proc build is surfaced in MCM Diagnostics (code -2) after 120 s.
+
+### License
+- The distributed `CostumeExpansionFW.dll` binary is now **GPLv3** (it
+  statically links nifly, GPL-3.0). The project's own source stays MIT. See
+  `THIRD-PARTY-NOTICES.md` (component list) and the bundled GPLv3 text.
+
+### Dependencies
+- **.NET Runtime is no longer needed.** The optional `CEF-nifcarrier` download
+  is legacy — only for the external-tool compat mode or development.
+
 ## v1.1.0 (2026-07-06)
 
 ### Changed

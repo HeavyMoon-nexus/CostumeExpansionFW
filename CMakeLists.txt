@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # The project name becomes the name of the produced SKSE .dll.
-project(CostumeExpansionFW VERSION 1.1.0 LANGUAGES CXX)
+project(CostumeExpansionFW VERSION 1.2.0 LANGUAGES CXX)
 
 # --- Optional auto-deploy --------------------------------------------------
 # If SKYRIM_MODS_FOLDER is set, the built .dll is copied to
