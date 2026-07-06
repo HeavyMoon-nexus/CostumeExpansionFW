@@ -1,6 +1,7 @@
 #include "BoxStore.h"
 #include "BodyMorph.h"
 #include "SkinRebind.h"
+#include "nifcarrier/NifCarrierCore.h"
 
 #include "RE/A/ActorEquipManager.h"
 #include "RE/B/BGSBipedObjectForm.h"
@@ -637,13 +638,13 @@ namespace CostumeFW
             ApplyPersistCarrier(doc, a_refreshChanged);
         }
 
-        // --- auto-sync: spawn nifcarrier when the manifest changes ---------------
+        // --- auto-sync: rebuild carriers when the manifest changes ---------------
         // Full hands-off loop: manifest change (the exact "box content set changed"
-        // signal) -> debounce -> spawn the sync command as a child process -> wait
-        // for it on a background thread -> ApplyCarrierOverridesImpl(true) on the
-        // main thread (slot repoint + two-phase re-equip). Enabled by the presence
-        // of CEF_sync_command.txt (one line: the command to run); absent = manual
-        // mode (run sync_carriers.cmd + `cef carriers` yourself).
+        // signal) -> debounce -> rebuild -> ApplyCarrierOverridesImpl(true) on the
+        // main thread (slot repoint + two-phase re-equip). Default is the IN-PROC
+        // nifcarrier_core build (v1.2, NIFCARRIER_INPROC.md); a present
+        // CEF_sync_command.txt (one line: the command to run) keeps the external
+        // C# tool in charge instead - compat mode for one release.
         constexpr const char* kSyncCommandPath = "Data\\SKSE\\Plugins\\CEF_sync_command.txt";
         // nifcarrier's stdout/stderr is captured here (truncated each run) so the
         // [sync]/[merge] decisions - e.g. a content excluded, veil kept bones-only -
@@ -785,17 +786,66 @@ namespace CostumeFW
             }).detach();
         }
 
+        // In-proc sync (NIFCARRIER_INPROC.md Phase 5): nifcarrier_core on a
+        // detached background thread. The sync body is pure file I/O + nifly -
+        // no engine API; the only engine call is the completion AddTask. Reuses
+        // the external path's g_syncRunning/g_syncRerun coalescing. No hard
+        // timeout: unlike a child process, a wedged thread cannot be killed -
+        // containment is the validate gates + try/catch inside Sync().
+        void RunInProcSync()
+        {
+            if (g_syncRunning.exchange(true)) {
+                g_syncRerun = true;  // coalesce: rerun once the current sync ends
+                return;
+            }
+            SKSE::log::info("auto-sync: rebuilding carriers (in-proc nifcarrier)");
+            std::thread([]() {
+                nifcarrier::SyncResult sr;
+                try {
+                    nifcarrier::SyncOptions opts;
+                    opts.manifestPath = "Data\\SKSE\\Plugins\\CEF_carrier_manifest.json";
+                    opts.dataRoots = { "Data" };  // usvfs resolves like the engine
+                    opts.outRoot = "Data";
+                    opts.emptyNif = "Data\\meshes\\CostumeFW\\boxtoken.nif";
+                    sr = nifcarrier::Sync(opts);
+                } catch (...) {
+                    sr.ok = false;
+                    sr.log += "[sync] FAILED: unhandled exception\n";
+                }
+                {
+                    // Diagnostics parity: same log file the external tool wrote.
+                    std::ofstream f(kSyncLogPath, std::ios::binary | std::ios::trunc);
+                    f << sr.log;
+                }
+                g_lastSyncExit = sr.ok ? 0 : 2;
+                g_syncRunning = false;
+                if (g_syncRerun.exchange(false)) {
+                    RunInProcSync();
+                    return;
+                }
+                if (sr.ok) {
+                    SKSE::GetTaskInterface()->AddTask([]() {
+                        SKSE::log::info("auto-sync: done - applying carrier revisions");
+                        ApplyCarrierOverridesImpl(true);
+                    });
+                } else {
+                    SKSE::log::error("auto-sync: in-proc sync failed - carriers unchanged (see CEF_sync.log)");
+                }
+            }).detach();
+        }
+
         void ScheduleAutoSync()
         {
-            if (ReadSyncCommand().empty()) {
-                return;  // manual mode
-            }
             if (g_syncScheduled.exchange(true)) {
-                return;  // a debounced spawn is already pending
+                return;  // a debounced run is already pending
             }
             RunAfterDelayMs(kSyncDebounceMs, []() {
                 g_syncScheduled = false;
-                SpawnSyncProcess();
+                if (ReadSyncCommand().empty()) {
+                    RunInProcSync();  // v1.2 default
+                } else {
+                    SpawnSyncProcess();  // external tool keeps priority (compat)
+                }
             });
         }
     }

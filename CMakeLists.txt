@@ -17,6 +17,26 @@ endif()
 # --- The SKSE plugin -------------------------------------------------------
 find_package(CommonLibSSE CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(nifly CONFIG REQUIRED)
+find_package(pugixml CONFIG REQUIRED)
+
+# --- nifcarrier core (in-proc carrier builder; NIFCARRIER_INPROC.md) --------
+# Engine-free static lib linked into BOTH the SKSE DLL and nifcarrier_cli.exe
+# so the T0-T3 offline checks keep running outside the game (I-7).
+# nifly 1.0.0 headers do not compile as C++20/23 (non-const Matrix operator==
+# turns ambiguous against its own reversed candidate), so this lib is the
+# C++17 firewall: nifly headers appear ONLY in nifcarrier/*.cpp, never in the
+# public header, never in a DLL translation unit.
+add_library(nifcarrier_core STATIC
+    src/nifcarrier/NifCarrierCore.cpp
+)
+target_include_directories(nifcarrier_core PUBLIC src)
+target_link_libraries(nifcarrier_core PRIVATE nifly pugixml::pugixml nlohmann_json::nlohmann_json bcrypt)
+target_compile_features(nifcarrier_core PUBLIC cxx_std_17)
+
+add_executable(nifcarrier_cli tools/nifcarrier_cli/main.cpp)
+target_link_libraries(nifcarrier_cli PRIVATE nifcarrier_core)
+
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     plugin.cpp
     src/SkinRebind.cpp
@@ -27,9 +47,10 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/BodyMorph.cpp
     src/Preset.cpp
     src/LoreBox.cpp
+    src/NifCarrierBridge.cpp
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)
-target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json nifcarrier_core)
 target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_precompile_headers(${PROJECT_NAME} PRIVATE PCH.h)
 
