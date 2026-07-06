@@ -1,4 +1,8 @@
 @echo off
+REM LEGACY / FALLBACK (v1.2+): the carrier build runs in-proc inside the CEF DLL
+REM by default. This script is only needed when CEF_sync_command.txt exists
+REM (external-tool compat mode) or for running the C# oracle outside the game.
+REM
 REM Rebuild CEF's FSMP physics carriers from the in-game manifest.
 REM Run AFTER changing box contents in-game (MCM), BEFORE the next game start -
 REM or let CEF's auto-sync run this for you (Data\SKSE\Plugins\CEF_sync_command.txt

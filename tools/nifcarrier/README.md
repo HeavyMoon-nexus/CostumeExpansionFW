@@ -1,5 +1,15 @@
 # nifcarrier
 
+> **LEGACY / FALLBACK (v1.2+).** The carrier build now runs **in-proc inside the
+> CEF DLL** (`nifcarrier_core`, C++ nifly) — end users need NO .NET runtime and
+> NO `CEF_sync_command.txt`. This C# tool remains for two purposes only:
+> 1. **golden oracle** for the C++ port's offline tests (`verifytree`/`validate`/`dump`),
+> 2. **fallback**: a present `CEF_sync_command.txt` makes CEF prefer this external
+>    tool over the in-proc build (compat mode, kept for one release).
+>
+> Do NOT ship this exe in the mod package — it is GPL-3.0 (NiflySharp) and the
+> in-proc build replaces it. See NIFCARRIER_INPROC.md (internal).
+
 Headless authoring of **FSMP physics-carrier NIFs** for CEF — no NifSkope / Blender
 GUI required. This is the tool that unblocks the shared B/C blocker documented in
 [FSMP_APPROACH_B.md](../../FSMP_APPROACH_B.md) §9-4 and

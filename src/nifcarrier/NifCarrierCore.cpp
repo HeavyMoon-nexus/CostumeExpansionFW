@@ -1990,12 +1990,21 @@ namespace nifcarrier {
                 }
             }
 
-            CopyOverwrite(tXml, slotXmlDisk);
+            // Failed copies must surface (review P1-3). Old slot files (rev-1)
+            // are untouched, so keeping the old fragment stays consistent even
+            // after a partial publish of the NEW slot.
+            bool pubOk = CopyOverwrite(tXml, slotXmlDisk);
             for (const auto& p : partFiles) {
-                CopyOverwrite(p.tmp, p.slotDisk);
+                pubOk = CopyOverwrite(p.tmp, p.slotDisk) && pubOk;
             }
-            CopyOverwrite(carrierPart.tmp, basePath);
-            WriteTextFile(hashPath, hash);
+            pubOk = CopyOverwrite(carrierPart.tmp, basePath) && pubOk;
+            if (!pubOk) {
+                Log(log, "[persist] FAILED to publish part files - previous artifacts kept");
+                return failKeepOld();
+            }
+            if (!WriteTextFile(hashPath, hash)) {
+                Log(log, "[persist] WARNING failed to write hash file - persist rebuilds next run");
+            }
             ++built;
             ensurePool();
 
@@ -2181,10 +2190,15 @@ namespace nifcarrier {
                     continue;
                 }
 
-                // Publish the validated build, record the hash, rotate slots.
-                CopyOverwrite(outTmp, carrierPath);
-                WriteTextFile(hashPath, hash);
-                ++res.built;
+                // Publish the validated build, rotate slots, then record the
+                // hash LAST - a failed copy (usvfs, locks, AV) must surface as
+                // a failure and must NOT leave a hash claiming success, or the
+                // box would never rebuild (review P1-3).
+                if (!CopyOverwrite(outTmp, carrierPath)) {
+                    ++res.failed;
+                    Log(res.log, "%s FAILED to publish carrier to %s", tag.c_str(), carrierPath.string().c_str());
+                    continue;
+                }
                 ensurePool();
 
                 const int rev = carriers.count(slotStr) ? carriers[slotStr].first + 1 : 1;
@@ -2197,15 +2211,27 @@ namespace nifcarrier {
                     const auto slotXmlDisk = xmlDir / ("Box" + slotStr + "_physics_r" + std::to_string(slotIdx) + ".xml");
                     const std::string slotXmlRel =
                         "meshes\\CostumeFW\\XML\\Box" + slotStr + "_physics_r" + std::to_string(slotIdx) + ".xml";
-                    CopyOverwrite(mergedXmlDisk, slotXmlDisk);
+                    if (!CopyOverwrite(mergedXmlDisk, slotXmlDisk)) {
+                        ++res.failed;
+                        Log(res.log, "%s FAILED to publish slot xml - revision NOT bumped", tag.c_str());
+                        continue;
+                    }
                     const auto sx = SetXml(carrierPath, slotNifDisk, slotXmlRel);
                     res.log += sx.log;
                     if (!sx.ok) {
                         Log(res.log, "%s WARNING slot carrier setxml failed", tag.c_str());
                     }
                 } else {
-                    CopyOverwrite(carrierPath, slotNifDisk);
+                    if (!CopyOverwrite(carrierPath, slotNifDisk)) {
+                        ++res.failed;
+                        Log(res.log, "%s FAILED to publish slot carrier - revision NOT bumped", tag.c_str());
+                        continue;
+                    }
                 }
+                if (!WriteTextFile(hashPath, hash)) {
+                    Log(res.log, "%s WARNING failed to write hash file - box rebuilds next run", tag.c_str());
+                }
+                ++res.built;
                 carriers[slotStr] = { rev, slotNifRel };
                 Log(res.log, "%s rev=%d -> %s", tag.c_str(), rev, slotNifRel.c_str());
             }
@@ -2237,7 +2263,10 @@ namespace nifcarrier {
                 jsonOut += " \"persist\": " + *persistFragment;
             }
             jsonOut += "\n}\n";
-            WriteTextFile(carriersJsonPath, jsonOut);
+            if (!WriteTextFile(carriersJsonPath, jsonOut)) {
+                Log(res.log, "[sync] FAILED to write carriers.json - new revisions are invisible to CEF");
+                ++res.failed;
+            }
 
             {
                 std::error_code ec;

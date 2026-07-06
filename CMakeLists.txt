@@ -34,8 +34,13 @@ target_include_directories(nifcarrier_core PUBLIC src)
 target_link_libraries(nifcarrier_core PRIVATE nifly pugixml::pugixml nlohmann_json::nlohmann_json bcrypt)
 target_compile_features(nifcarrier_core PUBLIC cxx_std_17)
 
-add_executable(nifcarrier_cli tools/nifcarrier_cli/main.cpp)
-target_link_libraries(nifcarrier_cli PRIVATE nifcarrier_core)
+# Offline test host - a DEV tool, never part of the mod package. Nexus zips
+# are staged from the deployed mod folder only; keep it that way (review P1-2).
+option(CEF_BUILD_NIFCARRIER_CLI "Build the nifcarrier_cli.exe offline test host" ON)
+if(CEF_BUILD_NIFCARRIER_CLI)
+    add_executable(nifcarrier_cli tools/nifcarrier_cli/main.cpp)
+    target_link_libraries(nifcarrier_cli PRIVATE nifcarrier_core)
+endif()
 
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     plugin.cpp

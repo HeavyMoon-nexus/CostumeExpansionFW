@@ -657,8 +657,9 @@ namespace CostumeFW
         std::atomic<bool> g_syncRunning{ false };
         std::atomic<bool> g_syncRerun{ false };  // manifest changed while a sync ran
         // Last auto-sync outcome for the MCM Diagnostics page: -999 = none this
-        // session, -2 = timed out (child terminated), -3 = failed to start,
-        // otherwise the nifcarrier exit code.
+        // session, -2 = timed out (external: child terminated; in-proc: wedged,
+        // auto-sync blocked until restart), -3 = failed to start, otherwise the
+        // nifcarrier exit code (in-proc: 0 ok / 2 failed).
         std::atomic<int> g_lastSyncExit{ -999 };
 
         std::string ReadSyncCommand()
@@ -791,7 +792,12 @@ namespace CostumeFW
         // no engine API; the only engine call is the completion AddTask. Reuses
         // the external path's g_syncRunning/g_syncRerun coalescing. No hard
         // timeout: unlike a child process, a wedged thread cannot be killed -
-        // containment is the validate gates + try/catch inside Sync().
+        // containment is the validate gates + try/catch inside Sync(). A
+        // watchdog only SURFACES the wedge (log + Diagnostics -2); it must not
+        // clear g_syncRunning - a rerun would race the zombie thread on the
+        // same slot files (the review A-3 hazard the child-kill used to avoid).
+        std::atomic<std::uint64_t> g_syncGen{ 0 };
+
         void RunInProcSync()
         {
             if (g_syncRunning.exchange(true)) {
@@ -799,6 +805,16 @@ namespace CostumeFW
                 return;
             }
             SKSE::log::info("auto-sync: rebuilding carriers (in-proc nifcarrier)");
+            const std::uint64_t gen = ++g_syncGen;
+            std::thread([gen]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kSyncTimeoutMs));
+                if (g_syncRunning.load() && g_syncGen.load() == gen) {
+                    SKSE::log::error(
+                        "auto-sync: in-proc sync still running after {}s - likely wedged; auto-sync is blocked until restart",
+                        kSyncTimeoutMs / 1000);
+                    g_lastSyncExit = -2;
+                }
+            }).detach();
             std::thread([]() {
                 nifcarrier::SyncResult sr;
                 try {
