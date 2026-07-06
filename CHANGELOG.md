@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.0 (2026-07-06)
 
 ### Changed
 - **Body morph is now per-content OPT-IN (default OFF).** It used to be applied to

@@ -47,3 +47,7 @@ CEF_STATE_SCOPE.md
 
 # ETW traces (memory investigation)
 *.etl
+NEXUS_CHANGELOG_v*.txt
+
+# Release staging output
+dist/
