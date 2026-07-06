@@ -1214,6 +1214,36 @@ namespace CostumeFW
         SKSE::log::info("settings: reapplied {} box(es)", g_boxes.size());
     }
 
+    void ReloadSettingsFromDisk()
+    {
+        // Snapshot this save's persist actives BEFORE the registry is wiped -
+        // they are co-save state, invisible to the settings JSON.
+        const auto actives = ActivePersistIds();
+        for (const auto& it : ActiveSnapshot()) {
+            DetachSkinned(it.id);
+        }
+        ClearRegistry();
+        // Full clear + JSON re-read + box content re-register + token stats.
+        // Its trailing carrier pass sees an empty active set (deregisters the
+        // persist pool); the re-reconcile below re-registers - both requests
+        // coalesce into ONE debounced head rebuild.
+        LoadBoxes();
+        int restored = 0;
+        for (const auto& id : actives) {
+            if (std::find(g_persist.begin(), g_persist.end(), id) != g_persist.end()) {
+                if (RegisterBoxById(id, {})) {
+                    ++restored;
+                }
+            }
+        }
+        Reconcile();
+        RebuildPersistAbility();
+        ApplyBoxAbilities();
+        ApplyCarrierOverrides(false);  // persist pool reconcile with actives back
+        SKSE::log::info("settings: reloaded from disk (MCM) - {} box(es), {}/{} persist active restored",
+            g_boxes.size(), restored, actives.size());
+    }
+
     std::vector<std::string> PersistContents()
     {
         return g_persist;
@@ -2234,6 +2264,23 @@ namespace CostumeFW
     {
         const int idx = FindBox(a_token);
         return idx < 0 ? std::vector<std::string>{} : g_boxes[idx].contents;
+    }
+
+    std::string ContentHolder(const std::string& a_content)
+    {
+        if (a_content.empty()) {
+            return {};
+        }
+        for (const auto& b : g_boxes) {
+            if (std::find(b.contents.begin(), b.contents.end(), a_content) !=
+                b.contents.end()) {
+                return b.token;
+            }
+        }
+        if (std::find(g_persist.begin(), g_persist.end(), a_content) != g_persist.end()) {
+            return "persist";
+        }
+        return {};
     }
 
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content)

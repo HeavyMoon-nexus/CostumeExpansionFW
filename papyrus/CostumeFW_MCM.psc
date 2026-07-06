@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 16 autoReadonly
+int property CURRENT_VERSION = 17 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -552,8 +552,8 @@ event OnOptionSelect(int a_option)
         SetToggleOptionValue(a_option, now)
         return
     elseIf a_option == _optReload
-        CFW_Native.SetEnabled(CFW_Native.IsEnabled())  ; no-op write; reconcile re-reads scene
-        Debug.Notification("CostumeFW: settings reload requested (restart for full re-read)")
+        CFW_Native.ReloadSettings()  ; full re-read of CEF_settings.json (queued)
+        Debug.Notification("CostumeFW: reloading settings from disk...")
         ForcePageReset()
         return
     elseIf a_option == _optUninstall
@@ -566,7 +566,12 @@ event OnOptionSelect(int a_option)
         string[] pc = CFW_Native.GetPersistContents()
         int pi = 0
         while pi < pc.Length
-            ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
+            ; Return only what THIS save shows (P1-4): a non-active entry's
+            ; original lives on the capturing character's save - fabricating a
+            ; copy here would duplicate it for every character that bulk-removes.
+            if CFW_Native.IsPersistActive(pc[pi])
+                ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
+            endIf
             CFW_Native.RemovePersist(pc[pi])
             pi += 1
         endWhile
@@ -654,6 +659,15 @@ event OnOptionSelect(int a_option)
     endIf
 endEvent
 
+; Human label for a FindContentHolder() result: the persist class, or the
+; holding box's token name + slot.
+string Function HolderLabel(string holder)
+    if holder == "persist"
+        return "Persist"
+    endIf
+    return CFW_Native.GetItemName(holder) + " (" + SlotName(CFW_Native.GetTokenSlot(holder)) + ")"
+endFunction
+
 ObjectReference Function GetStore()
     if _store == None
         Form base = Game.GetFormFromFile(0x00080D, "CostumeFW.esp")
@@ -716,7 +730,11 @@ function UninstallCleanup()
     string[] pc = CFW_Native.GetPersistContents()
     int pi = 0
     while pi < pc.Length
-        ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
+        ; Active-set only (P1-4): same reasoning as Remove-all - do not fabricate
+        ; copies of entries this character never activated.
+        if CFW_Native.IsPersistActive(pc[pi])
+            ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
+        endIf
         pi += 1
     endWhile
 
@@ -823,7 +841,9 @@ event OnOptionMenuOpen(int a_option)
         types[1] = "Light Armor"
         types[2] = "Heavy Armor"
         SetMenuDialogOptions(types)
-        SetMenuDialogStartIndex(CFW_Native.GetBoxArmorType(ai))
+        ; _curBoxIndex, not ai: ai is the option-array slot (always 0 - one
+        ; armor-type row per single-box page), which pre-selected box 0's type.
+        SetMenuDialogStartIndex(CFW_Native.GetBoxArmorType(_curBoxIndex))
         return
     endIf
 
@@ -880,8 +900,15 @@ event OnOptionMenuAccept(int a_option, int a_index)
             return
         endIf
         string contentId = _wornIdsCache[a_index]
-        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
-        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
+        ; Cross-holder guard (P1-1): the injection registry is one-entry-per-id,
+        ; so an id already in a BOX must not also enter persist. A persist->
+        ; persist duplicate stays AddPersist's own same-save check below.
+        string holder = CFW_Native.FindContentHolder(contentId)
+        if holder != "" && holder != "persist"
+            ShowMessage("CostumeFW: already captured in " + HolderLabel(holder) + " - item not moved.", false)
+            ForcePageReset()
+            return
+        endIf
         ; Transaction order (review A-2): register FIRST, move the item only on
         ; success. A duplicate add must not swallow a second physical copy.
         if !CFW_Native.AddPersist(contentId)
@@ -891,6 +918,11 @@ event OnOptionMenuAccept(int a_option, int a_index)
             ForcePageReset()
             return
         endIf
+        ; Per-content settings only AFTER the add succeeded (P1-3): a failed
+        ; duplicate capture must not overwrite the existing entry's gender /
+        ; enchant snapshot. Still before the move - the item is owned/worn here.
+        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
+        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
         Form contentForm = CFW_Native.ResolveForm(contentId)
         if contentForm
             Game.GetPlayer().RemoveItem(contentForm, 1, true, GetStore())
@@ -920,8 +952,14 @@ event OnOptionMenuAccept(int a_option, int a_index)
         string token = CFW_Native.GetBoxToken(boxIdx)
         string contentId = _wornIdsCache[a_index]
 
-        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
-        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
+        ; Cross-holder guard (P1-1): block capture into a SECOND box, or when
+        ; persist holds the id. Same-box duplicates stay AddBox's own check.
+        string holder = CFW_Native.FindContentHolder(contentId)
+        if holder != "" && holder != token
+            ShowMessage("CostumeFW: already captured in " + HolderLabel(holder) + " - item not moved.", false)
+            ForcePageReset()
+            return
+        endIf
         ; Transaction order (review A-2): register FIRST, move the item only on
         ; success (false = duplicate/bad input; do not swallow another copy).
         if !CFW_Native.AddBox("", token, contentId)
@@ -931,6 +969,10 @@ event OnOptionMenuAccept(int a_option, int a_index)
             ForcePageReset()
             return
         endIf
+        ; Per-content settings only AFTER the add succeeded (P1-3) - see the
+        ; persist flow above.
+        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
+        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
         Form contentForm = CFW_Native.ResolveForm(contentId)
         Actor player = Game.GetPlayer()
         if contentForm

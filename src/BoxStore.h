@@ -100,6 +100,14 @@ namespace CostumeFW
     // caller Reconciles afterward. Main thread (mutates the registry).
     void LoadBoxes();
 
+    // MCM "Reload settings from disk": drop every injected node + the whole
+    // registry, re-run LoadBoxes() against the CURRENT CEF_settings.json, then
+    // re-register this save's persist actives (which are co-save-owned - the
+    // JSON knows nothing about them; survivors = still in the reloaded catalog)
+    // and reconcile. The transient empty-actives window coalesces into one
+    // debounced head rebuild. Main thread.
+    void ReloadSettingsFromDisk();
+
     // True if the FormID is any defined box's token - so the equip sink fires even
     // for ability-only boxes, and hide-when-worn treats it as "our own".
     bool IsBoxToken(std::uint32_t a_form);
@@ -282,6 +290,14 @@ namespace CostumeFW
     // feedback). The caller separately queues RegisterBoxById/DetachSkinned/
     // Reconcile on the main thread to apply the visual change.
     //
+    // Where a content id is already held: "" if free, "persist" if in the
+    // shared persist catalog, else the holding box's token. The injection
+    // registry is keyed per content id (a second registration silently steals
+    // the first, and removing either holder wipes the shared per-content
+    // settings), so capture flows must block while ANY box or the persist
+    // catalog holds the id (review 2026-07-07 P1-1).
+    std::string ContentHolder(const std::string& a_content);
+
     // AddBox: create the box for a_token if absent (with a_label), then append
     // a_content if non-empty and not already present. Returns false on bad input.
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content);

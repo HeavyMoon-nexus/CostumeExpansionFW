@@ -2,6 +2,25 @@
 
 ## Unreleased (v1.2.1)
 
+### Fixed
+- **Capture is guarded across holders:** capturing an item that another box
+  (or persist) already holds is rejected with "already captured in ..." —
+  previously the second registration silently stole the display, and deleting
+  either holder wiped the shared per-content settings (review P1-1).
+- **A failed duplicate capture no longer overwrites settings:** the gender-mode
+  pick and the enchant snapshot are written only after the capture actually
+  succeeded (review P1-3).
+- **Bulk persist returns are active-set only:** "Remove all persist" and
+  "Prepare for uninstall" return items only for entries active on THIS save —
+  catalog entries another character captured are no longer fabricated as fresh
+  copies by bulk flows (review P1-4).
+- **"Reload settings from disk" actually reloads:** the button re-reads
+  CEF_settings.json and re-applies it live (boxes, catalog, hide/gender/morph/
+  enchants; this save's persist actives survive). It previously only rewrote
+  the current in-memory state (review P2-5).
+- **The Armor type menu opens on the box's current value** instead of always
+  box 0's (option-index mixup).
+
 ### Changed
 - **One ESL-flagged plugin.** `CostumeFW_Boxes.esp` and
   `CostumeFW_Boxes_FSMPCarrier_001.esp` were merged into a single espfe plugin,

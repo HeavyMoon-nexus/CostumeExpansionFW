@@ -545,6 +545,21 @@ namespace CostumeFW
             return true;
         }
 
+        // Def-only read (no scene touch) - synchronous is fine, the MCM needs the
+        // answer BEFORE it decides to move the physical item (P1-1 capture guard).
+        RE::BSFixedString FindContentHolderNative(RE::StaticFunctionTag*,
+            RE::BSFixedString a_content)
+        {
+            return ContentHolder(a_content.c_str());
+        }
+
+        // MCM "Reload settings from disk". Queued: the reload rebuilds the
+        // registry and touches the scene graph (main thread only).
+        void ReloadSettingsNative(RE::StaticFunctionTag*)
+        {
+            SKSE::GetTaskInterface()->AddTask([] { ReloadSettingsFromDisk(); });
+        }
+
         bool RemovePersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
         {
             const std::string content = a_content.c_str();
@@ -846,6 +861,8 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetPersistContents", kClass, GetPersistContents);
         a_vm->RegisterFunction("AddPersist", kClass, AddPersistNative);
         a_vm->RegisterFunction("RemovePersist", kClass, RemovePersistNative);
+        a_vm->RegisterFunction("FindContentHolder", kClass, FindContentHolderNative);
+        a_vm->RegisterFunction("ReloadSettings", kClass, ReloadSettingsNative);
         a_vm->RegisterFunction("GetDiagLines", kClass, GetDiagLinesNative);
         a_vm->RegisterFunction("GetBodyMorph", kClass, GetBodyMorphNative);
         a_vm->RegisterFunction("SetBodyMorph", kClass, SetBodyMorphNative);

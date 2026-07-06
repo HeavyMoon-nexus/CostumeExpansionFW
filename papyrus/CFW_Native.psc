@@ -160,6 +160,17 @@ String[] Function GetPersistContents() Global Native
 Bool Function AddPersist(String content) Global Native
 Bool Function RemovePersist(String content) Global Native
 
+; Where a content id is already held: "" if free, "persist" if in the persist
+; catalog, else the holding box's token. Capture flows check this BEFORE moving
+; the physical item - the injection registry is one-entry-per-id, so a second
+; box/persist holding the same id would silently steal the display (P1-1).
+String Function FindContentHolder(String content) Global Native
+
+; Re-read CEF_settings.json NOW (boxes/catalog/hide/gender/morph/enchants) and
+; re-apply. Per-save persist actives survive (co-save state). Queued to the
+; main thread - the MCM page shows the new state on the next open.
+Function ReloadSettings() Global Native
+
 ; Per-save activation (M2). SetPersistActive is VISUAL-ONLY (never moves items);
 ; on requires the id to be in the catalog.
 String[] Function GetPersistActive() Global Native
