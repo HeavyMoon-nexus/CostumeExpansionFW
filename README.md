@@ -10,9 +10,13 @@ slots (30–61).
 Two display classes:
 
 - **Persist** — always-on accessories (nails, piercings). No token, no slot gate.
+  The persist list is a **catalog shared across saves**; each save activates the
+  entries it wants to show (per-row MCM toggle) — a new character starts clean.
 - **Box** — token-gated costumes. Equipping a box's invisible token shows its packed
   contents; a strip mod unequipping the token hides them (automatic compatibility).
-  Multiple contents can ride on a single box token (one slot).
+  Multiple contents can ride on a single box token (one slot). A slot-31 box
+  (**"Costume Box 31: Hair (Wig)"**) masks your real hair while worn — put an
+  equipment wig in it.
 
 Captured items keep their individual data (tempering / player enchantment) in a hidden
 holding container. A worn box token also passes through its contents' **armor, weight,
@@ -27,19 +31,29 @@ worn gear.
 - [RaceMenu](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee — required for body-morph follow and the SkyUI MCM SDK)
 - SkyUI (MCM)
 - `CostumeFW_Boxes.esp` (ships with the mod — provides the box tokens)
+- *(optional)* [Faster HDT-SMP (FSMP)](https://www.nexusmods.com/skyrimspecialedition/mods/57339)
+  — custom-bone SMP cloth physics on injected content (3.5.0 tested)
 
 ## Usage (MCM: "Costume Expansion FW")
 
 - **Main** — master on/off, dependency status, version.
-- **Persist** — `+ Add worn item` captures a worn accessory as always-on; remove per item or all.
+- **Persist** — `+ Add worn item` captures a worn accessory into the shared catalog and
+  activates it on this save. Per row: **active-on-this-save** toggle (visual only —
+  never moves items), **Body morph** toggle, hide-when-worn slots, and remove from
+  catalog. Entries another character removed from the catalog stay active here until
+  you deactivate them (which returns the item).
 - **Boxes** — `+ New box` picks a free slot; per box: Distribute token, Wear (show/hide),
   `+ Add worn item` (capture into the box), Armor type, **Preset** (assign a preset's
-  contents), **Export as preset**, Stats, Delete, and per-item remove.
+  contents), **Export as preset**, Stats, Delete, and per-item remove / Body morph /
+  hide-when-worn.
 - **Presets** — lists installed `CEFP_*.json` presets; assign one to a box.
+- **Diagnostics** — read-only status: dependencies, last carrier auto-sync result,
+  per-box carrier revisions, persist registration, churn counters.
 
 Presets (`Data\SKSE\Plugins\CEF\Presets\CEFP_*.json`) are the shareable unit — a named,
-human-readable set of content. Settings live in `Data\SKSE\Plugins\CEF_settings.json`
-(global, shared across saves).
+human-readable set of content. Settings live in `Data\SKSE\Plugins\CEF_settings.json` —
+a **catalog shared across saves** (box definitions, per-content options); which persist
+entries actually *show* is per-save, stored in the co-save.
 
 ## Disabling CEF from outside the game (recovery)
 
@@ -59,22 +73,28 @@ co-save data is skipped). Set `bEnabled=1` / delete the flag file to re-enable.
 ## Uninstalling
 
 Before removing the mod, open **MCM → Main → Prepare for uninstall**. This returns every
-captured item to you, removes all box tokens from your inventory, and detaches the injected
-meshes. Save, then remove the mod.
+captured item to you, removes all box tokens from your inventory, detaches the injected
+meshes, **and disables CEF persistently** (`enabled=false` in the settings — reloading or
+playing on will not re-apply anything; re-enable from MCM → Main if you change your mind).
+Save, then remove the mod.
 
 ## Known limitations
 
-- **Body morph (RaceMenu sliders) follows** via skee, including real-time edits.
+- **Body morph (RaceMenu sliders)** is per-content **opt-in, default OFF** — turn it on
+  in the MCM (or `cef morph <id> on`) for BodySlide body-conforming meshes. Keep it OFF
+  for hair/jewelry/accessories: it is wasted work there, and skee's vertex-diff pass on
+  a large mesh makes allocations that SSE Engine Fixes' allocator retains (a full wig
+  cost ~15GB before this gate existed).
 - **Body physics (CBPC / standard-bone SMP)** works on injected meshes (they bind to the
   live, physics-driven bones).
-- **Custom-bone SMP cloth physics** (outfit-specific bones, e.g. skirt sway) does **not**
-  animate on injected meshes — those bones only exist when the outfit is equipped through
-  the engine, which CEF bypasses by design. Such content is shown **statically** (the
-  affected part is bound to its nearest real ancestor bone) instead of vanishing. For full
-  cloth sway, wear that item normally. (A public API on an open HDT-SMP implementation —
-  e.g. FSMP/hdtSMP64 — to attach physics to an external node would lift this limit. Some
-  setups use FlexSMP, which is FSMP-compatible but closed-source and unmaintained, so the
-  open FSMP lineage is the realistic target for such a request.)
+- **Custom-bone SMP cloth physics** (outfit-specific bones — skirts, veils, wigs)
+  **works on injected content when FSMP is installed**: CEF auto-builds an invisible
+  physics *carrier* from a box's contents (rebuilt on change — re-equip the token until
+  the outfit sways) and a head-part carrier pool for persist items (fully automatic).
+  Without FSMP — or for content the carrier validator excludes (legacy `NiTriShape`
+  meshes) — such parts render **statically** on their nearest real ancestor bone instead
+  of vanishing. Full wigs belong in the slot-31 box, not in Persist (the facegen path
+  rebuilds their physics repeatedly at load and the retained allocations balloon memory).
 - Content must be weighted to bones present on your live skeleton (standard XPMSSE). Content
   built for a different/extended skeleton may show parts statically (logged as a remap).
 

@@ -3,6 +3,29 @@
 ## Unreleased
 
 ### Changed
+- **Body morph is now per-content OPT-IN (default OFF).** It used to be applied to
+  every injected mesh; on a non-body mesh it is wasted work, and on a large one (a
+  full SMP wig) a single skee vertex-diff pass allocated ~15GB that SSE Engine
+  Fixes' allocator then retains. Turn it on per content in the MCM (persist page /
+  box pages) or with `cef morph <id> on` — only BodySlide body-conforming meshes
+  need it.
+- **Persist is per-save now (shared catalog + per-save activation):** the persist
+  list in `CEF_settings.json` is a catalog shared by every save; each save
+  activates entries for itself (MCM toggle per row, or `cef persist on|off <id>`).
+  A new character starts with nothing shown; deleting a catalog entry no longer
+  strips other characters (their active items survive "uncataloged" and can be
+  deactivated — with the item returned — from the MCM). Existing saves keep what
+  they showed: the co-save already stored it, no migration.
+- **Capture is transactional:** the worn item is moved into the holding container
+  only after its registration succeeds; a duplicate capture leaves the item worn
+  and says so in a modal message (a corner notification was easy to miss with the
+  MCM open).
+- **"Prepare for uninstall" now also disables CEF persistently** (writes
+  `enabled=false`), so playing on / reloading no longer re-applies everything.
+  Re-enable from MCM → Main if you change your mind.
+- **Auto-sync hardening:** a timed-out nifcarrier child is terminated instead of
+  being left to race the next sync, and an `.exe`-form sync command now runs
+  without the `cmd /c` shell layer (`.cmd`/`.bat` wrappers still use it).
 - **Carrier apply is user-driven (re-equip to apply):** when a box's content set
   changes, CEF now rebuilds the carrier and repoints the token ARMA at the new
   revision, then asks you to *re-equip the box token until the outfit sways* — it
@@ -13,6 +36,9 @@
   FSMP has settled. The old two-token flip-flop machinery has been removed.
 
 ### Fixed
+- **A duplicate capture could silently swallow a physical copy** of the item into
+  the holding container, with the UI still reporting success and no return path
+  ever giving that copy back.
 - **Skin-only physics bones dropped from merged carriers (veil didn't sway):**
   merging a multi-content box only walked the node hierarchy, so a content whose
   physics bones are referenced *only* by skin data (e.g. a Pharaoh veil's
@@ -41,6 +67,25 @@
   run) so the `[sync]`/`[merge]` decisions are visible instead of discarded.
 
 ### Added
+- **Custom-bone SMP cloth physics on persist items (head-carrier pool):** persist
+  accessories with outfit-specific SMP bones (veils, dangling jewelry) now sway:
+  nifcarrier builds an invisible head-part carrier pool from the active persist
+  set and CEF registers/repoints it automatically — no re-equip needed, load-
+  persistent, self-healing (bind watchdog, generation-aware re-bind, `cef repair`).
+- **Wig support via a slot-31 box ("Costume Box 31: Hair (Wig)"):** capture an
+  equipment wig into it; wearing the token masks your real hair natively (the
+  standard equipment-wig mechanism) and the wig's SMP cloth + collision work as
+  authored. Wigs should NOT go into Persist (the facegen path rebuilds them
+  repeatedly at load and the retained allocations balloon memory).
+- **MCM Diagnostics page:** master/skee/FSMP status, last carrier auto-sync
+  result, per-box carrier revision (+ on-disk check), persist catalog/active
+  counts + head-part registration, and churn counters.
+- **Settings safety:** `CEF_settings.json` and the carrier manifest are written
+  atomically (a crash mid-write can no longer truncate them), and a last-known-
+  good `CEF_settings.json.bak` is restored automatically when the main file
+  fails to parse — a corrupted settings file no longer silently wipes your boxes.
+- **Console:** `cef recover <FormID:Plugin.esp>` (explicitly grant one copy of a
+  content item), `cef persist on|off <id>` (per-save activation).
 - **External hard kill-switch (crash recovery):** CEF can now be fully disabled from
   outside the game, read once at startup before any hook runs. Set `bEnabled=0` in
   `Data\SKSE\Plugins\CostumeExpansionFW.ini`, or just drop an empty
