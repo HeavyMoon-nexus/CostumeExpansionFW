@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (v1.2.1)
+## v1.2.1 (2026-07-07)
 
 ### Fixed
 - **Removing an ACTIVE persist entry can no longer double-return.** The
