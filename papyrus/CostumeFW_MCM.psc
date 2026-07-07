@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 17 autoReadonly
+int property CURRENT_VERSION = 18 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -60,7 +60,10 @@ string[] _assignTokens
 int[]    _exportOpts        ; per-box "Export as preset" input
 string[] _exportTokens
 string[] _wornIdsCache      ; ids parallel to the open "add worn item" menu
-int[]    _wornGenderCache   ; gender mode (0/1/2) parallel to _wornIdsCache
+int      _optInvFilter      ; "Inventory filter" input (persist + box pages)
+string   _invFilter         ; current inventory-capture name filter (session)
+int[]    _genderOpts        ; per-content "Body" (forced NIF) menu (box page)
+int[]    _persistGenderOpts ; per-content "Body" menu (persist page)
 string[] _freeTokenIds      ; ids parallel to the open "new box" slot menu
 string[] _presetFilesCache  ; files parallel to the open "assign preset" menu
 
@@ -127,7 +130,9 @@ function SetupConfig()
     _exportOpts    = new int[1]
     _exportTokens  = new string[1]
     _wornIdsCache    = new string[1]
-    _wornGenderCache = new int[1]
+    _optInvFilter    = -1
+    _genderOpts        = new int[1]
+    _persistGenderOpts = new int[1]
     _freeTokenIds    = new string[1]
     _presetFilesCache = new string[1]
     _presetAssignOpts = new int[1]
@@ -308,6 +313,7 @@ function ResetPersistPage()
 
     _optAddPersist = AddMenuOption("+ Add worn item", "")
     _optAddInvPersist = AddMenuOption("+ Add from inventory", "")
+    _optInvFilter = AddInputOption("  Inventory filter", _invFilter)
 
     string ppreset = CFW_Native.GetPersistPreset()
     if ppreset == ""
@@ -324,12 +330,14 @@ function ResetPersistPage()
         AddTextOption("(none - use + Add worn item)", "", OPTION_FLAG_DISABLED)
         _persistActiveOpts     = new int[1]
         _persistMorphOpts      = new int[1]
+        _persistGenderOpts     = new int[1]
         _persistRemoveOpts     = new int[1]
         _persistHideOpts       = new int[1]
         _persistRemoveContents = new string[1]
     else
         _persistActiveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistMorphOpts      = Utility.CreateIntArray(contents.Length, -1)
+        _persistGenderOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistHideOpts       = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveContents = Utility.CreateStringArray(contents.Length, "")
@@ -337,6 +345,7 @@ function ResetPersistPage()
         while i < contents.Length
             _persistActiveOpts[i] = AddToggleOption(CFW_Native.GetItemName(contents[i]), CFW_Native.IsPersistActive(contents[i]))
             _persistMorphOpts[i] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[i]))
+            _persistGenderOpts[i] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(contents[i])))
             _persistHideOpts[i] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[i]))
             _persistRemoveOpts[i] = AddTextOption("  Remove from catalog", "[remove]")
             _persistRemoveContents[i] = contents[i]
@@ -450,6 +459,7 @@ function ResetSingleBoxPage(int a_idx)
     _removeOpts     = Utility.CreateIntArray(cn, -1)
     _hideOpts       = Utility.CreateIntArray(cn, -1)
     _morphOpts      = Utility.CreateIntArray(cn, -1)
+    _genderOpts     = Utility.CreateIntArray(cn, -1)
     _removeTokens   = Utility.CreateStringArray(cn, "")
     _removeContents = Utility.CreateStringArray(cn, "")
 
@@ -458,6 +468,7 @@ function ResetSingleBoxPage(int a_idx)
     _equipOpts[0] = AddToggleOption("Wear (show contents)", CFW_Native.IsBoxWorn(a_idx))
     _addWornOpts[0] = AddMenuOption("+ Add worn item", "")
     _addInvOpts[0] = AddMenuOption("+ Add from inventory", "")
+    _optInvFilter = AddInputOption("  Inventory filter", _invFilter)
     _armorTypeOpts[0] = AddMenuOption("Armor type", ArmorTypeName(CFW_Native.GetBoxArmorType(a_idx)))
     string presetName = CFW_Native.GetBoxPreset(token)
     if presetName == ""
@@ -473,6 +484,7 @@ function ResetSingleBoxPage(int a_idx)
     while ci < contents.Length
         _removeOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[ci]), "[remove]")
         _morphOpts[ci] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[ci]))
+        _genderOpts[ci] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(contents[ci])))
         _hideOpts[ci] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[ci]))
         _removeTokens[ci] = token
         _removeContents[ci] = contents[ci]
@@ -661,6 +673,16 @@ event OnOptionSelect(int a_option)
     endIf
 endEvent
 
+; Display label for a forced-gender NIF mode (0/1/2).
+string Function GenderName(int mode)
+    if mode == 1
+        return "Male NIF"
+    elseIf mode == 2
+        return "Female NIF"
+    endIf
+    return "Auto"
+endFunction
+
 ; Human label for a FindContentHolder() result: the persist class, or the
 ; holding box's token name + slot.
 string Function HolderLabel(string holder)
@@ -801,38 +823,40 @@ event OnOptionMenuOpen(int a_option)
 
     bool fromInv = (a_option == _optAddInvPersist || _addInvOpts.Find(a_option) >= 0)
     if fromInv || a_option == _optAddPersist || _addWornOpts.Find(a_option) >= 0
-        ; One in-MCM SkyUI dialog that asks item AND gender NIF in a single pick:
-        ; each item is listed three times (player / Male / Female). The inventory
-        ; variant lists ALL carried armors (name-sorted, natively capped at 40) so
-        ; an item can be captured without ever being equipped = no transient FSMP
+        ; One row per item (v1.2.1): the forced-gender NIF pick moved to each
+        ; content row's "Body" menu, freeing the ~128-row dialog budget for
+        ; items (native cap 40 -> 120). The inventory variant lists carried
+        ; armors (name-sorted) narrowed by the "Inventory filter" input, so an
+        ; item can be captured without ever being equipped = no transient FSMP
         ; physics build.
-        string[] names
-        string[] ids
         if fromInv
-            names = CFW_Native.GetInventoryItemNames()
-            ids = CFW_Native.GetInventoryItemIds()
+            _wornIdsCache = CFW_Native.GetInventoryItemIds(_invFilter)
+            SetMenuDialogOptions(CFW_Native.GetInventoryItemNames(_invFilter))
         else
-            names = CFW_Native.GetWornItemNames()
-            ids = CFW_Native.GetWornItemIds()
+            _wornIdsCache = CFW_Native.GetWornItemIds()
+            SetMenuDialogOptions(CFW_Native.GetWornItemNames())
         endIf
-        int n = names.Length
-        _wornIdsCache    = Utility.CreateStringArray(n * 3, "")
-        _wornGenderCache = Utility.CreateIntArray(n * 3, 0)
-        string[] menu = Utility.CreateStringArray(n * 3, "")
-        int i = 0
-        while i < n
-            menu[i * 3]     = names[i] + "  (player gender NIF)"
-            menu[i * 3 + 1] = names[i] + "  (force Male NIF)"
-            menu[i * 3 + 2] = names[i] + "  (force Female NIF)"
-            _wornIdsCache[i * 3]     = ids[i]
-            _wornIdsCache[i * 3 + 1] = ids[i]
-            _wornIdsCache[i * 3 + 2] = ids[i]
-            _wornGenderCache[i * 3]     = 0
-            _wornGenderCache[i * 3 + 1] = 1
-            _wornGenderCache[i * 3 + 2] = 2
-            i += 1
-        endWhile
-        SetMenuDialogOptions(menu)
+        return
+    endIf
+
+    ; --- per-content "Body" (forced-gender NIF) menu (box + persist rows) ---
+    int gi = _genderOpts.Find(a_option)
+    string genderId = ""
+    if gi >= 0
+        genderId = _removeContents[gi]
+    else
+        gi = _persistGenderOpts.Find(a_option)
+        if gi >= 0
+            genderId = _persistRemoveContents[gi]
+        endIf
+    endIf
+    if genderId != ""
+        string[] g = new string[3]
+        g[0] = "Auto (player gender)"
+        g[1] = "Force Male NIF"
+        g[2] = "Force Female NIF"
+        SetMenuDialogOptions(g)
+        SetMenuDialogStartIndex(CFW_Native.GetContentGender(genderId))
         return
     endIf
 
@@ -911,6 +935,14 @@ event OnOptionMenuAccept(int a_option, int a_index)
             ForcePageReset()
             return
         endIf
+        ; Resolve guard (review item 2): refuse BEFORE anything moves when the
+        ; mesh cannot resolve - the queued registration would fail after the
+        ; item was already stored ("success" notice, item gone, nothing shows).
+        if !CFW_Native.CanResolveContent(contentId)
+            ShowMessage("CostumeFW: this item's mesh could not be resolved (no usable model) - not captured. See the log.", false)
+            ForcePageReset()
+            return
+        endIf
         ; Transaction order (review A-2): register FIRST, move the item only on
         ; success. A duplicate add must not swallow a second physical copy.
         if !CFW_Native.AddPersist(contentId)
@@ -920,11 +952,10 @@ event OnOptionMenuAccept(int a_option, int a_index)
             ForcePageReset()
             return
         endIf
-        ; Per-content settings only AFTER the add succeeded (P1-3): a failed
-        ; duplicate capture must not overwrite the existing entry's gender /
-        ; enchant snapshot. Still before the move - the item is owned/worn here.
-        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
-        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
+        ; Enchant snapshot only AFTER the add succeeded (P1-3) and before the
+        ; move (the item is still owned/worn here). Forced gender is no longer
+        ; picked at capture - the per-content "Body" menu sets it later.
+        CFW_Native.CaptureContentEnchant(contentId)
         Form contentForm = CFW_Native.ResolveForm(contentId)
         if contentForm
             Game.GetPlayer().RemoveItem(contentForm, 1, true, GetStore())
@@ -962,6 +993,12 @@ event OnOptionMenuAccept(int a_option, int a_index)
             ForcePageReset()
             return
         endIf
+        ; Resolve guard (review item 2) - see the persist flow above.
+        if !CFW_Native.CanResolveContent(contentId)
+            ShowMessage("CostumeFW: this item's mesh could not be resolved (no usable model) - not captured. See the log.", false)
+            ForcePageReset()
+            return
+        endIf
         ; Transaction order (review A-2): register FIRST, move the item only on
         ; success (false = duplicate/bad input; do not swallow another copy).
         if !CFW_Native.AddBox("", token, contentId)
@@ -971,10 +1008,9 @@ event OnOptionMenuAccept(int a_option, int a_index)
             ForcePageReset()
             return
         endIf
-        ; Per-content settings only AFTER the add succeeded (P1-3) - see the
-        ; persist flow above.
-        CFW_Native.SetContentGender(contentId, _wornGenderCache[a_index])  ; picked in the menu
-        CFW_Native.CaptureContentEnchant(contentId)             ; snapshot enchant while worn
+        ; Enchant snapshot only AFTER the add succeeded (P1-3), before the move.
+        ; Forced gender moved to the per-content "Body" menu.
+        CFW_Native.CaptureContentEnchant(contentId)
         Form contentForm = CFW_Native.ResolveForm(contentId)
         Actor player = Game.GetPlayer()
         if contentForm
@@ -1005,6 +1041,25 @@ event OnOptionMenuAccept(int a_option, int a_index)
                 pl.EquipItem(tf, false, true)
             endIf
             ForcePageReset()
+        endIf
+        return
+    endIf
+
+    ; --- per-content "Body" (forced-gender NIF) menu (box + persist rows) ---
+    int gk = _genderOpts.Find(a_option)
+    string genderId = ""
+    if gk >= 0
+        genderId = _removeContents[gk]
+    else
+        gk = _persistGenderOpts.Find(a_option)
+        if gk >= 0
+            genderId = _persistRemoveContents[gk]
+        endIf
+    endIf
+    if genderId != ""
+        if a_index >= 0 && a_index <= 2
+            CFW_Native.SetContentGender(genderId, a_index)  ; re-resolves + re-injects
+            SetMenuOptionValue(a_option, GenderName(a_index))
         endIf
         return
     endIf
@@ -1081,6 +1136,11 @@ event OnOptionInputOpen(int a_option)
             cur = "Persist"
         endIf
         SetInputDialogStartText(cur)
+        return
+    endIf
+
+    if a_option == _optInvFilter
+        SetInputDialogStartText(_invFilter)
     endIf
 endEvent
 
@@ -1119,6 +1179,12 @@ event OnOptionInputAccept(int a_option, string a_input)
             endIf
         endIf
         ForcePageReset()
+        return
+    endIf
+
+    if a_option == _optInvFilter
+        _invFilter = a_input
+        SetInputOptionValue(_optInvFilter, _invFilter)
     endIf
 endEvent
 
@@ -1130,7 +1196,9 @@ event OnOptionHighlight(int a_option)
     elseIf a_option == _optUninstall
         SetInfoText("Return all captured items, remove all box tokens, detach everything. Do this before removing the mod.")
     elseIf a_option == _optAddPersist
-        SetInfoText("Capture a worn accessory as an always-on persist item (frees its slot). Asks which gender NIF to load.")
+        SetInfoText("Capture a worn accessory as an always-on persist item (frees its slot). Forced-gender NIF is set per item afterwards (Body menu).")
+    elseIf a_option == _optInvFilter
+        SetInfoText("Name filter for the + Add from inventory list (case-insensitive substring; empty = all, first 120 shown).")
     elseIf a_option == _persistPresetOpt
         SetInfoText("Assign a preset's contents to the persist set (same presets as boxes; one preset per box/persist).")
     elseIf a_option == _persistExportOpt

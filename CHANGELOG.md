@@ -20,6 +20,16 @@
   the current in-memory state (review P2-5).
 - **The Armor type menu opens on the box's current value** instead of always
   box 0's (option-index mixup).
+- **Capture pre-validates the mesh:** when a content's model cannot be
+  resolved (no usable ARMA/3P model), the capture is refused up front with a
+  message - previously the queued registration failed AFTER the item had
+  already been moved into the hidden store ("success" notice, item gone,
+  nothing shows) (review item 2).
+- **Race-matched armor addon selection:** both the injection and the carrier
+  manifest now pick the ARMO's addon matching the player's race (exact race,
+  then additionalRaces, then the first addon) instead of blindly the first
+  one - race-/sex-specific addon lists resolved to the wrong mesh before
+  (review item 6).
 - **The "has attached scripts" capture warning fires only for real scripts.**
   Passing a form through the MCM's own Papyrus flow binds a plain VM wrapper
   object ("Armor"/"Form") to the form's handle, which the check misread as an
@@ -29,6 +39,12 @@
   rather than a verdict.
 
 ### Changed
+- **Capture menus list each item once.** The forced-gender NIF pick moved from
+  the tripled capture rows to a per-content **"Body"** menu on box/persist
+  rows (changeable any time now, not only at capture; new captures follow the
+  player's gender). An **"Inventory filter"** input narrows the "+ Add from
+  inventory" list by name (case-insensitive substring), and the native list
+  cap rose from 40 to 120 entries.
 - **One ESL-flagged plugin.** `CostumeFW_Boxes.esp` and
   `CostumeFW_Boxes_FSMPCarrier_001.esp` were merged into a single espfe plugin,
   **`CostumeFW.esp`** (52 records, no load-order slot consumed; built by
@@ -41,6 +57,11 @@
   now ships so the MCM quest starts when the plugin joins an existing save.
   The LoreBox KID ini was renamed to `CostumeFW_KID.ini` and now also covers
   the slot-31 wig token.
+- **Known limitation (documented):** multiple individuals of the same base
+  item cannot be captured separately - catalog/registry keys are base-form
+  ids, so the second copy is rejected as a duplicate. The captured copy's
+  player-enchant effects are snapshotted and applied; the item itself is
+  preserved in the hidden store.
 - **Upgrading mid-save:** the old plugins vanish from the load order, so box
   tokens disappear from the inventory once (CEF re-distributes them) and
   captured originals held by the old hidden container are returned as fresh

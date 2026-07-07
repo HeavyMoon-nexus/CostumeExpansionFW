@@ -64,11 +64,17 @@ Bool Function SetBoxLabel(String token, String label) Global Native
 String[] Function GetWornItemNames() Global Native
 String[] Function GetWornItemIds() Global Native
 
-; ALL carried player armors (worn included; box tokens excluded), name-sorted and
-; natively capped at 40. The "+ Add from inventory" capture flow - no equip
-; needed, so no transient FSMP physics build happens.
-String[] Function GetInventoryItemNames() Global Native
-String[] Function GetInventoryItemIds() Global Native
+; ALL carried player armors (worn included; box tokens excluded), name-sorted,
+; optionally narrowed by a case-insensitive name substring, and natively capped
+; at 120. The "+ Add from inventory" capture flow - no equip needed, so no
+; transient FSMP physics build happens.
+String[] Function GetInventoryItemNames(String filter = "") Global Native
+String[] Function GetInventoryItemIds(String filter = "") Global Native
+
+; Pre-capture guard (review item 2): TRUE if the content id resolves to a usable
+; mesh right now (same checks the queued registration makes). Capture flows call
+; this BEFORE moving the physical item.
+Bool Function CanResolveContent(String content) Global Native
 
 ; Create a new empty box auto-assigning the next free pool token. False if the
 ; shipped token pool (Costume Box 1..N) is exhausted.
@@ -198,7 +204,8 @@ Bool Function SetHideSlots(String id, String slots) Global Native
 ; --- Forced-gender NIF mode (per content) ------------------------------------
 ; Which body's mesh a content injects: 0 = follow the player's sex, 1 = force
 ; Male, 2 = force Female. SetContentGender re-resolves + re-injects on the main
-; thread. Asked at capture time via a UIExtensions popup (soft dependency).
+; thread. Set from the MCM per-content "Body" menu (v1.2.1; no longer asked at
+; capture - new captures start at 0 = follow the player).
 Int Function GetContentGender(String content) Global Native
 Bool Function SetContentGender(String content, Int mode) Global Native
 

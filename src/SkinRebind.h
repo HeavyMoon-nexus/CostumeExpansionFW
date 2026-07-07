@@ -56,6 +56,20 @@ namespace CostumeFW
     // (0 on failure). Shared by the box store (worn-token check / MCM equip).
     std::uint32_t ResolveFormId(const std::string& a_colonId);
 
+    // Pre-capture guard (review item 2): TRUE if the content id resolves to a
+    // usable mesh RIGHT NOW - the same (static per session) checks the queued
+    // registration makes. The MCM refuses a capture BEFORE moving the item when
+    // this fails, closing the "def added + item stored + nothing shows" window.
+    // Pure data reads; safe on the Papyrus VM thread.
+    bool CanResolveContent(const std::string& a_contentId);
+
+    // The ARMA of an ARMO best matching the PLAYER's race: exact race match
+    // first, then additionalRaces membership, then the first addon (data
+    // order). Null when the ARMO has no addons. Replaces bare
+    // armorAddons.front(), which picked race-/sex-specific addon lists wrong
+    // (review item 6). Used by injection AND the carrier manifest.
+    RE::TESObjectARMA* PickAddonForPlayer(RE::TESObjectARMO* a_armo);
+
     // Run a_fn on the main thread after (at least) a_ms milliseconds, via the
     // SKSE task queue (re-posts until the deadline; hop rate is NOT frame-locked).
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn);

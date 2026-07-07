@@ -874,11 +874,11 @@ namespace CostumeFW
             return true;
         }
 
-        // Resolve an ARMA (or ARMO -> first ARMA) to the 3P + 1P models (NIF path +
-        // alternate-texture swap) for the requested body sex. If that sex has no
-        // model, falls back to the other sex so a single-sex-authored accessory
-        // still shows (e.g. a female-only nail mesh on a male PC). False if neither
-        // sex has a 3P model / the form isn't ARMA/ARMO.
+        // Resolve an ARMA (or ARMO -> its race-matched ARMA) to the 3P + 1P models
+        // (NIF path + alternate-texture swap) for the requested body sex. If that
+        // sex has no model, falls back to the other sex so a single-sex-authored
+        // accessory still shows (e.g. a female-only nail mesh on a male PC). False
+        // if neither sex has a 3P model / the form isn't ARMA/ARMO.
         bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
             ModelRef& a_out3p, ModelRef& a_out1p)
         {
@@ -889,9 +889,7 @@ namespace CostumeFW
             RE::TESObjectARMA* arma = dh->LookupForm<RE::TESObjectARMA>(a_localID, a_plugin);
             if (!arma) {
                 if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
-                    if (!armo->armorAddons.empty()) {
-                        arma = armo->armorAddons.front();
-                    }
+                    arma = PickAddonForPlayer(armo);
                 }
             }
             if (!arma) {
@@ -1125,6 +1123,44 @@ namespace CostumeFW
             }
         }
         return false;
+    }
+
+    RE::TESObjectARMA* PickAddonForPlayer(RE::TESObjectARMO* a_armo)
+    {
+        if (!a_armo || a_armo->armorAddons.empty()) {
+            return nullptr;
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* race = player ? player->GetRace() : nullptr;
+        if (race) {
+            for (auto* aa : a_armo->armorAddons) {
+                if (aa && aa->race == race) {
+                    return aa;
+                }
+            }
+            for (auto* aa : a_armo->armorAddons) {
+                if (!aa) {
+                    continue;
+                }
+                for (auto* extra : aa->additionalRaces) {
+                    if (extra == race) {
+                        return aa;
+                    }
+                }
+            }
+        }
+        return a_armo->armorAddons.front();
+    }
+
+    bool CanResolveContent(const std::string& a_contentId)
+    {
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_contentId, localID, plugin)) {
+            return false;
+        }
+        ModelRef m3p, m1p;
+        return ResolveArmaModels(localID, plugin, EffectiveSex(a_contentId), m3p, m1p);
     }
 
     bool RegisterBoxById(const std::string& a_contentId, const std::string& a_tokenId)

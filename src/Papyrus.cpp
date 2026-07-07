@@ -240,22 +240,32 @@ namespace CostumeFW
             return out;
         }
 
-        std::vector<RE::BSFixedString> GetInventoryItemNames(RE::StaticFunctionTag*)
+        std::vector<RE::BSFixedString> GetInventoryItemNames(RE::StaticFunctionTag*,
+            RE::BSFixedString a_filter)
         {
             std::vector<RE::BSFixedString> out;
-            for (const auto& w : InventoryArmors()) {
+            for (const auto& w : InventoryArmors(a_filter.c_str())) {
                 out.emplace_back(w.name);
             }
             return out;
         }
 
-        std::vector<RE::BSFixedString> GetInventoryItemIds(RE::StaticFunctionTag*)
+        std::vector<RE::BSFixedString> GetInventoryItemIds(RE::StaticFunctionTag*,
+            RE::BSFixedString a_filter)
         {
             std::vector<RE::BSFixedString> out;
-            for (const auto& w : InventoryArmors()) {
+            for (const auto& w : InventoryArmors(a_filter.c_str())) {
                 out.emplace_back(w.id);
             }
             return out;
+        }
+
+        // Pre-capture guard (review item 2): can this content's mesh resolve
+        // right now? Pure data reads - synchronous, so the MCM can refuse the
+        // capture BEFORE it moves the physical item.
+        bool CanResolveContentNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
+        {
+            return CanResolveContent(a_content.c_str());
         }
 
         // Create an empty box auto-assigning the next free pool token (def-only,
@@ -692,7 +702,7 @@ namespace CostumeFW
 
         // --- Forced-gender NIF mode (per content) -----------------------------
         // 0 = follow player, 1 = force Male, 2 = force Female. The MCM asks at
-        // capture time (UIExtensions popup); can also be re-set later.
+        // the MCM per-content "Body" menu (v1.2.1; no longer asked at capture).
 
         std::int32_t GetContentGender(RE::StaticFunctionTag*, RE::BSFixedString a_content)
         {
@@ -851,6 +861,7 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetWornItemIds", kClass, GetWornItemIds);
         a_vm->RegisterFunction("GetInventoryItemNames", kClass, GetInventoryItemNames);
         a_vm->RegisterFunction("GetInventoryItemIds", kClass, GetInventoryItemIds);
+        a_vm->RegisterFunction("CanResolveContent", kClass, CanResolveContentNative);
         a_vm->RegisterFunction("NewBox", kClass, NewBoxNative);
         a_vm->RegisterFunction("GetItemName", kClass, GetItemName);
 

@@ -39,15 +39,16 @@ worn gear.
 
 - **Main** — master on/off, dependency status, version.
 - **Persist** — `+ Add worn item` / `+ Add from inventory` capture an accessory (from
-  your equipped items, or straight from your inventory — no need to equip first) into
-  the shared catalog and activate it on this save. Per row: **active-on-this-save**
-  toggle (visual only — never moves items), **Body morph** toggle, hide-when-worn
-  slots, and remove from catalog. Entries another character removed from the catalog
-  stay active here until you deactivate them (which returns the item).
+  your equipped items, or straight from your inventory — no need to equip first; the
+  **Inventory filter** input narrows the list by name) into the shared catalog and
+  activate it on this save. Per row: **active-on-this-save** toggle (visual only —
+  never moves items), **Body morph** toggle, **Body** (forced-gender NIF) menu,
+  hide-when-worn slots, and remove from catalog. Entries another character removed
+  from the catalog stay active here until you deactivate them (which returns the item).
 - **Boxes** — `+ New box` picks a free slot; per box: Distribute token, Wear (show/hide),
-  `+ Add worn item` / `+ Add from inventory` (capture into the box), Armor type,
-  **Preset** (assign a preset's contents), **Export as preset**, Stats, Delete, and
-  per-item remove / Body morph / hide-when-worn.
+  `+ Add worn item` / `+ Add from inventory` (capture into the box; same filter input),
+  Armor type, **Preset** (assign a preset's contents), **Export as preset**, Stats,
+  Delete, and per-item remove / Body morph / Body (forced NIF) / hide-when-worn.
 - **Presets** — lists installed `CEFP_*.json` presets; assign one to a box.
 - **Diagnostics** — read-only status: dependencies, last carrier auto-sync result,
   per-box carrier revisions, persist registration, churn counters.
@@ -56,6 +57,11 @@ Presets (`Data\SKSE\Plugins\CEF\Presets\CEFP_*.json`) are the shareable unit —
 human-readable set of content. Settings live in `Data\SKSE\Plugins\CEF_settings.json` —
 a **catalog shared across saves** (box definitions, per-content options); which persist
 entries actually *show* is per-save, stored in the co-save.
+
+**Known limitation:** items are tracked by their *base form* — two individuals of the
+same item (e.g. differently enchanted copies) cannot be captured separately; the second
+is rejected as a duplicate. The captured copy's player-enchant effects are snapshotted
+and applied through the token/persist ability.
 
 ## Disabling CEF from outside the game (recovery)
 

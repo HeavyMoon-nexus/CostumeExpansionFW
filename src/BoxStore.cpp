@@ -344,9 +344,10 @@ namespace CostumeFW
                 const std::string plugin = id.substr(colon + 1);
                 auto* arma = dh->LookupForm<RE::TESObjectARMA>(lid, plugin);
                 if (!arma) {
-                    if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin);
-                        armo && !armo->armorAddons.empty()) {
-                        arma = armo->armorAddons.front();
+                    if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin)) {
+                        // Race-matched addon, same rule as the injection side -
+                        // the carrier must be built from the mesh that shows.
+                        arma = PickAddonForPlayer(armo);
                     }
                 }
                 if (!arma) {
@@ -1522,13 +1523,26 @@ namespace CostumeFW
         return out;
     }
 
-    std::vector<WornItem> InventoryArmors()
+    std::vector<WornItem> InventoryArmors(const std::string& a_filter)
     {
         std::vector<WornItem> out;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
             return out;
         }
+        // Case-insensitive substring match on the display name (byte-wise
+        // tolower: ASCII folds, multi-byte names still match byte-exact).
+        const auto matchesFilter = [&](const std::string& a_name) {
+            if (a_filter.empty()) {
+                return true;
+            }
+            const auto it = std::search(a_name.begin(), a_name.end(),
+                a_filter.begin(), a_filter.end(), [](char a, char b) {
+                    return std::tolower(static_cast<unsigned char>(a)) ==
+                           std::tolower(static_cast<unsigned char>(b));
+                });
+            return it != a_name.end();
+        };
         auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
             return a_obj.Is(RE::FormType::Armor);
         });
@@ -1541,24 +1555,29 @@ namespace CostumeFW
             if (!armo) {
                 continue;
             }
-            // Exclude our own box tokens (base pool esp + the carrier patch).
+            // Exclude our own box tokens.
             auto* file = armo->GetFile(0);
             if (IsTokenPluginFile(file)) {
                 continue;
             }
             const char* nm = armo->GetFullName();
-            out.push_back({ (nm && *nm) ? std::string(nm) : MakeColonId(armo), MakeColonId(armo) });
+            std::string name = (nm && *nm) ? std::string(nm) : MakeColonId(armo);
+            if (!matchesFilter(name)) {
+                continue;
+            }
+            out.push_back({ std::move(name), MakeColonId(armo) });
         }
         std::sort(out.begin(), out.end(),
             [](const WornItem& a, const WornItem& b) { return a.name < b.name; });
-        // The MCM lists each entry three times (player / Male / Female gender
-        // pick); SkyUI's menu dialog degrades past ~128 rows, so cap the item
-        // count. The worn-capture menu remains the escape hatch for the rest.
-        constexpr std::size_t kMaxItems = 40;
+        // The MCM lists each entry ONCE (v1.2.1: the forced-gender pick moved to
+        // the per-content "Body" menu); SkyUI's menu dialog degrades past ~128
+        // rows, so cap just under that. The "Inventory filter" input (and the
+        // worn-capture menu) reaches anything past the cap.
+        constexpr std::size_t kMaxItems = 120;
         if (out.size() > kMaxItems) {
             SKSE::log::info(
-                "boxes: inventory capture list truncated {} -> {} (alphabetical)",
-                out.size(), kMaxItems);
+                "boxes: inventory capture list truncated {} -> {} (alphabetical; filter='{}')",
+                out.size(), kMaxItems, a_filter);
             out.resize(kMaxItems);
         }
         return out;

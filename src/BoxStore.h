@@ -188,10 +188,11 @@ namespace CostumeFW
 
     // ALL carried player ARMOs (worn included; our box tokens excluded), for the
     // "+ Add from inventory" capture flow - the item never has to be equipped,
-    // so no transient FSMP armor build happens. Sorted by name and capped
-    // natively (the MCM menu lists each entry three times for the gender pick,
-    // and SkyUI's menu dialog degrades past ~128 rows).
-    std::vector<WornItem> InventoryArmors();
+    // so no transient FSMP armor build happens. Sorted by name, optionally
+    // narrowed by a case-insensitive name substring (the MCM "Inventory
+    // filter" input), and capped natively at 120 rows (SkyUI's menu dialog
+    // degrades past ~128).
+    std::vector<WornItem> InventoryArmors(const std::string& a_filter);
 
     // The shipped slot-token pool (CostumeFW.esp ARMOs named "Costume Box*"),
     // as colon-form ids, sorted by their biped slot number. FreeTokens = those not
