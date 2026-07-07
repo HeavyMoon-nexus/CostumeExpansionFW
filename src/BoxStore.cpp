@@ -353,9 +353,17 @@ namespace CostumeFW
                 if (!arma) {
                     return nullptr;
                 }
-                const char* nif = arma->bipedModels[RE::SEXES::kFemale].model.c_str();
+                // Same sex the INJECTION resolves (player sex + per-content
+                // forced-gender override), so the carrier is built from the
+                // NIF that actually shows - female-first here desynced the
+                // carrier from a forced-Male / male-PC mesh whose bone set
+                // differs (review 2026-07-07 P2).
+                const RE::SEX sex = EffectiveSexFor(id);
+                const RE::SEX other =
+                    (sex == RE::SEXES::kMale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
+                const char* nif = arma->bipedModels[sex].model.c_str();
                 if (!nif || !*nif) {
-                    nif = arma->bipedModels[RE::SEXES::kMale].model.c_str();
+                    nif = arma->bipedModels[other].model.c_str();
                 }
                 if (!nif || !*nif) {
                     return nullptr;
@@ -1229,12 +1237,16 @@ namespace CostumeFW
         // persist pool); the re-reconcile below re-registers - both requests
         // coalesce into ONE debounced head rebuild.
         LoadBoxes();
+        // Re-register EVERY snapshot active - including entries no longer in
+        // the reloaded catalog. Uncataloged actives are a supported M2 state
+        // ("another character removed the entry; this save keeps showing it
+        // until deactivated"), and the co-save restore path never filters by
+        // catalog either. Filtering here silently vanished them with no item
+        // return (review 2026-07-07 P1-a).
         int restored = 0;
         for (const auto& id : actives) {
-            if (std::find(g_persist.begin(), g_persist.end(), id) != g_persist.end()) {
-                if (RegisterBoxById(id, {})) {
-                    ++restored;
-                }
+            if (RegisterBoxById(id, {})) {
+                ++restored;
             }
         }
         Reconcile();
@@ -1468,6 +1480,9 @@ namespace CostumeFW
         } else {
             g_genderModes.erase(a_id);  // 0 (or invalid) = follow player
         }
+        // WriteJson's trailing WriteCarrierManifest picks up the flip: the
+        // manifest resolves content NIFs by effective sex (P2 fix), so a
+        // gender change that switches the shown NIF rebuilds the carrier.
         WriteJson();
         return true;
     }
@@ -2201,7 +2216,22 @@ namespace CostumeFW
             }
             armorSum += armo->GetArmorRating();
             weightSum += armo->weight;
-            if (auto* ench = armo->formEnchanting) {
+            // Same priority as the synthesized ability (BuildEnchantSpell):
+            // the captured player-enchant snapshot beats the base enchantment.
+            // Showing only the base made a captured enchant look unapplied
+            // (review 2026-07-07 P3).
+            if (const auto snap = g_contentEnchants.find(c);
+                snap != g_contentEnchants.end() && !snap->second.empty()) {
+                for (const auto& e : snap->second) {
+                    auto* mgef = ResolveMgef(e.mgef);
+                    auto* full = mgef ? mgef->As<RE::TESFullName>() : nullptr;
+                    const char* nm = full ? full->GetFullName() : nullptr;
+                    char buf[96]{};
+                    std::snprintf(buf, sizeof(buf), "%s %.0f",
+                        (nm && *nm) ? nm : "effect", e.magnitude);
+                    effs.push_back(buf);
+                }
+            } else if (auto* ench = armo->formEnchanting) {
                 for (auto* e : ench->effects) {
                     if (!e || !e->baseEffect) {
                         continue;
@@ -2411,6 +2441,17 @@ namespace CostumeFW
             SKSE::log::warn("preset: '{}' already assigned to box {}", a_presetName, holder);
             return false;
         }
+        // Cross-holder guard, preset edition (P1-1 parity, review 2026-07-07):
+        // reject when any incoming id is held by a BOX.
+        for (const auto& c : a_contents) {
+            const std::string ch = ContentHolder(c);
+            if (!ch.empty() && ch != "persist") {
+                SKSE::log::warn(
+                    "preset: '{}' rejected - content '{}' is already captured in box '{}'",
+                    a_presetName, c, ch);
+                return false;
+            }
+        }
         g_persist = a_contents;  // persist mirrors the preset's contents
         g_persistPreset = a_presetName;
         WriteJson();
@@ -2444,6 +2485,19 @@ namespace CostumeFW
         if (!holder.empty() && holder != a_token) {
             SKSE::log::warn("preset: '{}' already assigned to box {}", a_presetName, holder);
             return false;
+        }
+        // Cross-holder guard, preset edition (P1-1 parity, review 2026-07-07):
+        // the injection registry is one-entry-per-id, so a preset shipping an
+        // id that ANOTHER box or persist already holds must not apply - it
+        // would steal the display and share per-content settings.
+        for (const auto& c : a_contents) {
+            const std::string ch = ContentHolder(c);
+            if (!ch.empty() && ch != a_token) {
+                SKSE::log::warn(
+                    "preset: '{}' rejected - content '{}' is already captured in '{}'",
+                    a_presetName, c, ch);
+                return false;
+            }
         }
         g_boxes[idx].preset = a_presetName;
         g_boxes[idx].contents = a_contents;  // box mirrors the preset's contents

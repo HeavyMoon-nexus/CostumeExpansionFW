@@ -3,6 +3,32 @@
 ## Unreleased (v1.2.1)
 
 ### Fixed
+- **"Reload settings from disk" keeps uncataloged actives.** The reload
+  re-registers every persist entry active on this save - including entries
+  another character removed from the shared catalog (a supported state the
+  co-save restore also preserves). They were silently dropped with no item
+  return (review round 3).
+- **Assigning a preset returns the items it replaces.** Box and persist
+  preset assignment now returns the physical items of every content the
+  preset drops (old minus new; overlapping entries keep their stored
+  custody) - previously the old captured items were stranded in the hidden
+  store with no UI path back.
+- **Presets respect the cross-holder guard.** A preset containing an id
+  already captured in another box (or persist) is rejected with the reason
+  logged, matching the manual-capture guard - it used to silently steal the
+  display and share per-content settings.
+- **Removing an INACTIVE persist entry no longer fabricates an item.** The
+  single-row "Remove from catalog" returns store-only for entries this save
+  never displayed (the capturing character keeps the original); the new-copy
+  fallback stays for active entries, per the 2026-07-06 decision.
+- **The carrier manifest resolves content NIFs by effective sex** (player sex
+  + per-content forced-gender override), matching the injection - it was
+  hardwired female-first, so a forced-Male item or a male PC could get a
+  carrier built from the other sex's NIF with a mismatched bone set. A Body
+  menu change now also rebuilds the carrier when the shown NIF switches.
+- **The Stats row shows the captured enchant snapshot** (what the synthesized
+  ability actually applies) instead of only the base enchantment - a captured
+  player enchant used to look unapplied.
 - **Multi-content boxes: per-content bone/shape namespace isolation.** Outfit
   series that reuse custom bone names across items (e.g. COCO's shared
   cocoa01... chains - two COCO skirts share 104 custom bone names) collapsed

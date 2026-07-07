@@ -102,10 +102,10 @@ namespace CostumeFW
 
     // MCM "Reload settings from disk": drop every injected node + the whole
     // registry, re-run LoadBoxes() against the CURRENT CEF_settings.json, then
-    // re-register this save's persist actives (which are co-save-owned - the
-    // JSON knows nothing about them; survivors = still in the reloaded catalog)
-    // and reconcile. The transient empty-actives window coalesces into one
-    // debounced head rebuild. Main thread.
+    // re-register ALL of this save's persist actives (co-save-owned - the JSON
+    // knows nothing about them; uncataloged actives survive too, like the
+    // co-save restore) and reconcile. The transient empty-actives window
+    // coalesces into one debounced head rebuild. Main thread.
     void ReloadSettingsFromDisk();
 
     // True if the FormID is any defined box's token - so the equip sink fires even

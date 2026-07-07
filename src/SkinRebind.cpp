@@ -1185,6 +1185,11 @@ namespace CostumeFW
         return ResolveArmaModels(localID, plugin, EffectiveSex(a_contentId), m3p, m1p);
     }
 
+    RE::SEX EffectiveSexFor(const std::string& a_id)
+    {
+        return EffectiveSex(a_id);
+    }
+
     bool RegisterBoxById(const std::string& a_contentId, const std::string& a_tokenId)
     {
         const auto colon = a_contentId.find(':');

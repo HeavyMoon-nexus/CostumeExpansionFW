@@ -63,6 +63,11 @@ namespace CostumeFW
     // Pure data reads; safe on the Papyrus VM thread.
     bool CanResolveContent(const std::string& a_contentId);
 
+    // The body sex a_id's model resolves for (player sex overridden by the
+    // per-content forced-gender mode). Exported so the carrier manifest picks
+    // the SAME NIF the injection shows (review 2026-07-07 P2).
+    RE::SEX EffectiveSexFor(const std::string& a_id);
+
     // The ARMA of an ARMO best matching the PLAYER's race: exact race match
     // first, then additionalRaces membership, then the first addon (data
     // order). Null when the ARMO has no addons. Replaces bare

@@ -595,8 +595,18 @@ event OnOptionSelect(int a_option)
     endIf
     int p = _persistRemoveOpts.Find(a_option)
     if p >= 0
-        ReturnItem(CFW_Native.ResolveForm(_persistRemoveContents[p]))
-        CFW_Native.RemovePersist(_persistRemoveContents[p])
+        string rid = _persistRemoveContents[p]
+        ; New-copy fallback only for an entry THIS save displays (P1, 2026-07-07
+        ; refinement of the 2026-07-06 decision): removing an INACTIVE catalog
+        ; entry fabricated a copy of an item this save never showed - the
+        ; original lives with the capturing character. Store-only covers the
+        ; capturing character removing after deactivation.
+        if CFW_Native.IsPersistActive(rid)
+            ReturnItem(CFW_Native.ResolveForm(rid))
+        else
+            ReturnItemStoreOnly(CFW_Native.ResolveForm(rid))
+        endIf
+        CFW_Native.RemovePersist(rid)
         ForcePageReset()
         return
     endIf
@@ -708,10 +718,10 @@ endFunction
 ; Return ONE captured copy of akItem to the player: from this save's hidden
 ; store when it has one, else as a NEW copy. The new-copy fallback DUPLICATES
 ; across characters (the original stays in the capturing save's store) - that
-; is ACCEPTED BY DESIGN: losing the item is worse, and an uncataloged stored
-; copy cannot be returned from the MCM until the catalog/activate UI lands
-; (in-game decision 2026-07-06, CEF_STATE_SCOPE.md §4). aNotify=false keeps
-; bulk loops (remove-all / delete box / uninstall) quiet.
+; is ACCEPTED BY DESIGN: losing the item is worse (in-game decision 2026-07-06,
+; CEF_STATE_SCOPE.md §4). 2026-07-07 refinement: the fallback is reserved for
+; entries THIS save displays - callers use ReturnItemStoreOnly for persist
+; entries that were never active here. aNotify=false keeps bulk loops quiet.
 function ReturnItem(Form akItem, bool aNotify = true)
     if !akItem
         return
@@ -725,6 +735,57 @@ function ReturnItem(Form akItem, bool aNotify = true)
             Debug.Notification("CostumeFW: returned as a new copy (none stored on this character)")
         endIf
     endIf
+endFunction
+
+; Store-only return: hand back this save's stored original if present; never
+; fabricate a new copy. For persist entries this save does not display
+; (2026-07-07 P1 refinement - see the single-remove handler).
+function ReturnItemStoreOnly(Form akItem)
+    if !akItem
+        return
+    endIf
+    ObjectReference store = GetStore()
+    if store && store.GetItemCount(akItem) > 0
+        store.RemoveItem(akItem, 1, true, Game.GetPlayer())
+    endIf
+endFunction
+
+; Return the items a preset assign DROPPED (in aOld, missing from aNew);
+; overlapping ids keep their stored custody. Persist entries get the new-copy
+; fallback only if they were ACTIVE here before the assign (aPreActive); box
+; contents mirror the delete-box flow (fallback always). P1, review 2026-07-07:
+; assigning a preset used to strand the old captured items in the hidden store
+; with no UI path back.
+function ReturnDroppedContents(string[] aOld, string[] aNew, bool aPersist, string[] aPreActive)
+    int i = 0
+    while i < aOld.Length
+        if aNew.Find(aOld[i]) < 0
+            Form itm = CFW_Native.ResolveForm(aOld[i])
+            bool allowNew = true
+            if aPersist
+                allowNew = aPreActive.Length > 0 && aPreActive.Find(aOld[i]) >= 0
+            endIf
+            if allowNew
+                ReturnItem(itm, false)
+            else
+                ReturnItemStoreOnly(itm)
+            endIf
+        endIf
+        i += 1
+    endWhile
+endFunction
+
+; The box index currently bound to a token ("" / unknown -> -1).
+int Function BoxIndexOfToken(string token)
+    int n = CFW_Native.GetBoxCount()
+    int i = 0
+    while i < n
+        if CFW_Native.GetBoxToken(i) == token
+            return i
+        endIf
+        i += 1
+    endWhile
+    return -1
 endFunction
 
 ; Clean-uninstall helper: return every captured item (box + persist) to the
@@ -1069,8 +1130,14 @@ event OnOptionMenuAccept(int a_option, int a_index)
         if a_index <= 0
             CFW_Native.ClearPersistPreset()
         else
+            ; Snapshot BEFORE the assign: the old catalog for the drop diff,
+            ; the pre-assign actives for the return policy (P1 2026-07-07).
+            string[] oldP = CFW_Native.GetPersistContents()
+            string[] preAct = CFW_Native.GetPersistActive()
             if !CFW_Native.AssignPersistPreset(_presetFilesCache[a_index])
-                Debug.Notification("CostumeFW: preset already assigned to a box")
+                ShowMessage("CostumeFW: preset not assigned - already used by a box, or it contains items captured in a box (see log).", false)
+            else
+                ReturnDroppedContents(oldP, CFW_Native.GetPersistContents(), true, preAct)
             endIf
         endIf
         ForcePageReset()
@@ -1084,8 +1151,12 @@ event OnOptionMenuAccept(int a_option, int a_index)
         if a_index <= 0
             CFW_Native.ClearPreset(token)
         else
+            int bi = BoxIndexOfToken(token)
+            string[] oldB = CFW_Native.GetBoxContents(bi)
             if !CFW_Native.AssignPreset(token, _presetFilesCache[a_index])
-                Debug.Notification("CostumeFW: preset already assigned to another box")
+                ShowMessage("CostumeFW: preset not assigned - already used elsewhere, or it contains items captured in another box/persist (see log).", false)
+            else
+                ReturnDroppedContents(oldB, CFW_Native.GetBoxContents(bi), false, None)
             endIf
         endIf
         ForcePageReset()
@@ -1096,10 +1167,14 @@ event OnOptionMenuAccept(int a_option, int a_index)
     k = _presetAssignOpts.Find(a_option)
     if k >= 0
         if a_index > 0 && a_index < _presetBoxTokens.Length
-            if !CFW_Native.AssignPreset(_presetBoxTokens[a_index], _presetAssignFiles[k])
-                Debug.Notification("CostumeFW: assign failed (already used or box invalid)")
+            string btok = _presetBoxTokens[a_index]
+            int pbi = BoxIndexOfToken(btok)
+            string[] oldPB = CFW_Native.GetBoxContents(pbi)
+            if !CFW_Native.AssignPreset(btok, _presetAssignFiles[k])
+                Debug.Notification("CostumeFW: assign failed (already used, box invalid, or items captured elsewhere)")
             else
                 Debug.Notification("CostumeFW: preset assigned")
+                ReturnDroppedContents(oldPB, CFW_Native.GetBoxContents(pbi), false, None)
             endIf
             ForcePageReset()
         endIf
