@@ -95,6 +95,24 @@ namespace nifcarrier {
     // strip the HDT extra. C# ProxyNif port.
     VerbResult ProxyNif(const std::filesystem::path& in, const std::filesystem::path& out);
 
+    // Deterministic per-content namespace prefix ("C" + fnv1a32 hex of the
+    // colon-form content id + "_") for multi-content merges. The CEF bind side
+    // (SkinRebind) derives the SAME prefix from the same id to resolve a
+    // content's bones inside the merged carrier - keep the two in sync.
+    std::string ContentNamePrefix(const std::string& contentId);
+
+    // Namespace-isolate ONE content for a multi-content merge: rename every
+    // custom bone (non live-skeleton NiNode) and every shape to prefix+name in
+    // a COPY of the content NIF, and rewrite the physics XML references (any
+    // attribute value / element text exactly equal to a renamed name). Without
+    // this, same-named custom bones across contents (COCO's shared cocoa01...
+    // chains) collapse onto ONE node under ONE parent - the first content wins
+    // and e.g. a skirt's chains end up hanging from a veil's NPC Head root
+    // (2026-07-07).
+    VerbResult IsolateContent(const std::filesystem::path& nifIn,
+        const std::filesystem::path& xmlIn, const std::string& prefix,
+        const std::filesystem::path& nifOut, const std::filesystem::path& xmlOut);
+
     // Level-3 merge carrier: bone union of every input into inputs[0]'s tree
     // (hierarchy walk + skin-only bone rescue), shapes cloned per content and
     // dropped back to bones-only when the clone fails SaveReloadOk - one

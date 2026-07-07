@@ -58,10 +58,14 @@ human-readable set of content. Settings live in `Data\SKSE\Plugins\CEF_settings.
 a **catalog shared across saves** (box definitions, per-content options); which persist
 entries actually *show* is per-save, stored in the co-save.
 
-**Known limitation:** items are tracked by their *base form* — two individuals of the
-same item (e.g. differently enchanted copies) cannot be captured separately; the second
-is rejected as a duplicate. The captured copy's player-enchant effects are snapshotted
-and applied through the token/persist ability.
+**Known limitations:**
+- Items are tracked by their *base form* — two individuals of the same item (e.g.
+  differently enchanted copies) cannot be captured separately; the second is rejected
+  as a duplicate. The captured copy's player-enchant effects are snapshotted and
+  applied through the token/persist ability.
+- SMP items whose physics is wired **only** through FSMP's global `defaultBBPs.xml`
+  (no inline HDT extra data in the NIF) are not detected as SMP — they inject without
+  physics (static). The carrier sync log says so per item.
 
 ## Disabling CEF from outside the game (recovery)
 

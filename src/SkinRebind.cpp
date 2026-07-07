@@ -2,6 +2,7 @@
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Offsets.h"
+#include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
 #include "RE/B/BGSHeadPart.h"
@@ -314,6 +315,14 @@ namespace CostumeFW
         bool g_injectStatic3p = false;         // set by RebindGeometry, read by InjectInternal
         std::vector<std::string> g_rebindRetryIds;  // items to detach+re-inject on retry
 
+        // Per-content carrier bone prefix of the item currently being injected
+        // (v1.2.1 multi-content namespace isolation, nifcarrier IsolateContent):
+        // a multi-content carrier's copy of this content's custom bones is
+        // "C<fnv1a32>_<bone>", so the FSMP-renamed lookup must try the prefixed
+        // name first, then the plain one (single-content carriers stay plain).
+        // Set by InjectInternal, read by RebindGeometry. Main thread only.
+        std::string g_rebindPrefix;
+
         // --- persist head-rebuild debounce + diagnostics (Codex Phase 2) -------
         // ApplyPersistCarrier can fire in bursts (settings writes, sync
         // completion, load passes); each DoReset3D makes FSMP rebuild the wig
@@ -528,7 +537,17 @@ namespace CostumeFW
                     // "hdtSSEPhysics_AutoRename_(Armor|Head)_<id> <bone>". Bind THERE
                     // so the injected mesh follows the simulated bone = real SMP sway,
                     // instead of falling through to the static ancestor remap below.
-                    tgt = FindFsmpRenamedBone(a_root, src->name.c_str());
+                    // Multi-content carriers prefix this content's custom bones
+                    // (namespace isolation) - try the prefixed name first so the
+                    // mesh binds ITS OWN chain, not a same-named chain of another
+                    // content (or of the plain worn outfit).
+                    if (!g_rebindPrefix.empty()) {
+                        const std::string prefixed = g_rebindPrefix + src->name.c_str();
+                        tgt = FindFsmpRenamedBone(a_root, prefixed.c_str());
+                    }
+                    if (!tgt) {
+                        tgt = FindFsmpRenamedBone(a_root, src->name.c_str());
+                    }
                     if (tgt) {
                         ++fsmpCount;
                         if (firstFsmp.empty()) {
@@ -789,6 +808,9 @@ namespace CostumeFW
 
             bool any = false;
             g_injectStatic3p = false;
+            // Multi-content carriers prefix this content's custom bones
+            // (nifcarrier namespace isolation) - same id, same prefix.
+            g_rebindPrefix = nifcarrier::ContentNamePrefix(a_id);
             // Collect the bones this injection binds to, then APPEND them to the
             // item's pin set (append, not replace: an idempotent skip on one
             // skeleton must not drop the pins the other skeleton still uses).

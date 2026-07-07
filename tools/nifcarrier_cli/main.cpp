@@ -33,6 +33,16 @@ int main(int argc, char** argv)
         std::printf("[hdtxml] '%s'\n", p.c_str());
         return p.empty() ? 1 : 0;
     }
+    if (argc >= 7 && verb == "isolate") {
+        // isolate <in.nif> <in.xml> <prefix> <out.nif> <out.xml>
+        const auto r = nifcarrier::IsolateContent(argv[2], argv[3], argv[4], argv[5], argv[6]);
+        std::fputs(r.log.c_str(), stdout);
+        return r.ok ? 0 : 1;
+    }
+    if (argc >= 3 && verb == "prefixof") {
+        std::printf("%s\n", nifcarrier::ContentNamePrefix(argv[2]).c_str());
+        return 0;
+    }
     if (argc >= 5 && verb == "mergexml") {
         std::vector<std::filesystem::path> inputs;
         for (int i = 3; i < argc; ++i) {

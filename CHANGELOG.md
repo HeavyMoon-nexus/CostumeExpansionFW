@@ -3,6 +3,22 @@
 ## Unreleased (v1.2.1)
 
 ### Fixed
+- **Multi-content boxes: per-content bone/shape namespace isolation.** Outfit
+  series that reuse custom bone names across items (e.g. COCO's shared
+  cocoa01... chains - two COCO skirts share 104 custom bone names) collapsed
+  onto a single node under ONE parent in the merged carrier: the first content
+  won, so another item's chains could end up hanging from a veil's NPC Head
+  root ("the outfit bunches up behind the head"), and the losing items'
+  physics systems never built (static, no sway). Each content's custom bones
+  and collision shapes are now renamed into a per-content namespace
+  (`C<hash>_<name>`) in the carrier NIF and its physics XML, and
+  the bind side resolves the prefixed name first (plain names still work for
+  single-content carriers). The carrier hash salt was bumped, so every
+  existing carrier rebuilds once on the next sync.
+- **Carrier builds no longer skip non-SMP contents silently.** Items with no
+  inline HDT physics xml in the NIF - including items whose physics is wired
+  through FSMP's global defaultBBPs.xml, which CEF cannot detect yet - now log
+  why they will inject without physics.
 - **Capture is guarded across holders:** capturing an item that another box
   (or persist) already holds is rejected with "already captured in ..." —
   previously the second registration silently stole the display, and deleting

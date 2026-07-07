@@ -820,6 +820,123 @@ namespace nifcarrier {
         return r;
     }
 
+    std::string ContentNamePrefix(const std::string& contentId)
+    {
+        // FNV-1a 32-bit over the exact colon-id string. Both producers (this
+        // and SkinRebind's bind lookup) receive the same MakeColonId output,
+        // so no case folding is needed.
+        std::uint32_t h = 2166136261u;
+        for (unsigned char c : contentId) {
+            h ^= c;
+            h *= 16777619u;
+        }
+        char buf[12]{};
+        std::snprintf(buf, sizeof(buf), "C%08X_", h);
+        return buf;
+    }
+
+    VerbResult IsolateContent(const std::filesystem::path& nifIn, const std::filesystem::path& xmlIn,
+        const std::string& prefix, const std::filesystem::path& nifOut,
+        const std::filesystem::path& xmlOut)
+    {
+        VerbResult r;
+        try {
+            nifly::NifFile nif;
+            if (nif.Load(nifIn) != 0 || !nif.IsValid()) {
+                Log(r.log, "[isolate] FAILED to load %s", nifIn.string().c_str());
+                return r;
+            }
+            auto* root = nif.GetRootNode();
+            // Rename map: every custom bone (live-skeleton bones stay shared -
+            // that union IS the point of the merge) and every shape (collision
+            // meshes; also de-duplicates VirtualGround across contents).
+            std::map<std::string, std::string> renames;
+            const auto& hdr = nif.GetHeader();
+            int bones = 0;
+            for (uint32_t i = 0; i < hdr.GetNumBlocks(); ++i) {
+                auto* node = hdr.GetBlock<nifly::NiNode>(i);
+                if (!node || node == root || !IsExactNiNode(node)) {
+                    continue;
+                }
+                const std::string nm = node->name.get();
+                if (nm.empty() || LooksLiveSkeletonBone(nm) ||
+                    nm.rfind(prefix, 0) == 0) {  // idempotent on re-runs
+                    continue;
+                }
+                node->name.get() = prefix + nm;
+                renames.emplace(nm, prefix + nm);
+                ++bones;
+            }
+            int shapes = 0;
+            for (auto* s : nif.GetShapes()) {
+                const std::string nm = s->name.get();
+                if (nm.empty() || nm.rfind(prefix, 0) == 0) {
+                    continue;
+                }
+                s->name.get() = prefix + nm;
+                renames.emplace(nm, prefix + nm);
+                ++shapes;
+            }
+            if (nif.Save(nifOut) != 0) {
+                Log(r.log, "[isolate] FAILED to save %s", nifOut.string().c_str());
+                return r;
+            }
+            nifly::NifFile chk;
+            if (chk.Load(nifOut) != 0 || !chk.IsValid()) {
+                Log(r.log, "[isolate] FAILED: isolated NIF invalid on reload");
+                return r;
+            }
+
+            // Rewrite the physics XML: bone names ride in name=/bodyA=/bodyB=
+            // attributes, mesh names in per-*-shape name= - cover them all by
+            // replacing any attribute value / element text that EXACTLY equals
+            // a renamed name.
+            pugi::xml_document doc;
+            const auto res = doc.load_file(xmlIn.c_str(),
+                pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
+            if (!res || !doc.document_element()) {
+                Log(r.log, "[isolate] FAILED xml load '%s'", xmlIn.string().c_str());
+                return r;
+            }
+            int refs = 0;
+            const std::function<void(pugi::xml_node)> walk = [&](pugi::xml_node node) {
+                for (auto attr : node.attributes()) {
+                    const auto it = renames.find(attr.value());
+                    if (it != renames.end()) {
+                        attr.set_value(it->second.c_str());
+                        ++refs;
+                    }
+                }
+                for (auto child : node.children()) {
+                    if (child.type() == pugi::node_pcdata) {
+                        const auto it = renames.find(child.value());
+                        if (it != renames.end()) {
+                            child.set_value(it->second.c_str());
+                            ++refs;
+                        }
+                        continue;
+                    }
+                    walk(child);
+                }
+            };
+            walk(doc.document_element());
+            if (!doc.save_file(xmlOut.c_str(), "  ")) {
+                Log(r.log, "[isolate] FAILED xml save '%s'", xmlOut.string().c_str());
+                return r;
+            }
+            Log(r.log, "[isolate] %s: prefixed %d bone(s) + %d shape(s) as '%s*' (%d xml ref(s))",
+                nifIn.filename().string().c_str(), bones, shapes, prefix.c_str(), refs);
+            r.ok = true;
+        } catch (const std::exception& e) {
+            Log(r.log, "[isolate] FAILED: exception: %s", e.what());
+            r.ok = false;
+        } catch (...) {
+            Log(r.log, "[isolate] FAILED: unknown exception");
+            r.ok = false;
+        }
+        return r;
+    }
+
     std::string FragmentWithCount(const std::string& fragment, int count)
     {
         if (fragment.empty()) {
@@ -1501,6 +1618,8 @@ namespace nifcarrier {
             std::filesystem::path nif;
             std::filesystem::path xmlDisk;
             std::string xmlRel;
+            std::string id;      // manifest colon-id ("" on legacy manifests)
+            std::string prefix;  // ContentNamePrefix(id); "" = no isolation
         };
 
         // Hash inputs by path+size+mtime (the same skip-when-unchanged contract
@@ -1545,7 +1664,15 @@ namespace nifcarrier {
                 }
                 const std::string xmlRel = GetHdtXmlPath(nifDisk);
                 if (xmlRel.empty()) {
-                    continue;  // not an SMP content
+                    // Not an SMP content BY OUR DETECTION (no inline HDT extra
+                    // data). Items whose physics comes from FSMP's global
+                    // defaultBBPs.xml carry no inline xml and land here too -
+                    // they inject static. Log it: this was silent and cost a
+                    // diagnosis session (2026-07-07).
+                    Log(log, "%s content '%s' skipped for the carrier - no inline HDT xml "
+                             "(not SMP, or defaultBBPs-driven which is not detected)%s",
+                        tag.c_str(), rel.c_str(), excludedSuffix);
+                    continue;
                 }
                 std::string reason;
                 if (!ValidateNifPathImpl(nifDisk, reason)) {
@@ -1566,9 +1693,73 @@ namespace nifcarrier {
                     }
                     continue;
                 }
-                smp.push_back({ nifDisk, xmlDisk, xmlRel });
+                const std::string id = c.value("id", "");
+                smp.push_back({ nifDisk, xmlDisk, xmlRel, id,
+                    id.empty() ? std::string{} : ContentNamePrefix(id) });
             }
             return smp;
+        }
+
+        // Namespace-isolate every content of a MULTI-content set in place
+        // (nif/xmlDisk repointed at prefixed temp copies). Also reports how
+        // many custom names were shared across contents - the aliasing the
+        // isolation exists to prevent. False on any per-content failure.
+        bool IsolateSmpSet(std::vector<SmpContent>& smp, const std::filesystem::path& tmpDir,
+            const std::string& tmpTag, const std::string& logTag, std::string& log)
+        {
+            std::map<std::string, int> seen;  // custom bone name -> content count
+            int ci = 0;
+            for (auto& s : smp) {
+                if (s.prefix.empty()) {
+                    Log(log, "%s content '%s' has no manifest id - merged WITHOUT isolation",
+                        logTag.c_str(), s.nif.filename().string().c_str());
+                    ++ci;
+                    continue;
+                }
+                // Collision census BEFORE the rename (custom bones only).
+                {
+                    nifly::NifFile src;
+                    if (src.Load(s.nif) == 0 && src.IsValid()) {
+                        const auto& hdr = src.GetHeader();
+                        auto* root = src.GetRootNode();
+                        for (uint32_t i = 0; i < hdr.GetNumBlocks(); ++i) {
+                            auto* node = hdr.GetBlock<nifly::NiNode>(i);
+                            if (node && node != root && IsExactNiNode(node)) {
+                                const std::string nm = node->name.get();
+                                if (!nm.empty() && !LooksLiveSkeletonBone(nm)) {
+                                    ++seen[nm];
+                                }
+                            }
+                        }
+                    }
+                }
+                const auto in_ = tmpDir / (tmpTag + "_c" + std::to_string(ci) + ".nif");
+                const auto ix = tmpDir / (tmpTag + "_c" + std::to_string(ci) + ".xml");
+                const auto iso = IsolateContent(s.nif, s.xmlDisk, s.prefix, in_, ix);
+                log += iso.log;
+                if (!iso.ok) {
+                    return false;
+                }
+                s.nif = in_;
+                s.xmlDisk = ix;
+                ++ci;
+            }
+            int shared = 0;
+            std::string example;
+            for (const auto& [nm, cnt] : seen) {
+                if (cnt > 1) {
+                    ++shared;
+                    if (example.empty()) {
+                        example = nm;
+                    }
+                }
+            }
+            if (shared > 0) {
+                Log(log, "%s %d custom bone name(s) shared across contents (e.g. '%s') - "
+                         "aliased before, now isolated per-content",
+                    logTag.c_str(), shared, example.c_str());
+            }
+            return true;
         }
 
         // First content owning a merge-trigger shape (R2). requireShader: the
@@ -1653,7 +1844,8 @@ namespace nifcarrier {
                                    : std::nullopt;
             }
 
-            const std::string hash = HashContents("p1|", smp);
+            // p2: salt bump for the per-content namespace isolation.
+            const std::string hash = HashContents("p2|", smp);
             if (std::filesystem::exists(hashPath) && std::filesystem::exists(basePath) &&
                 ReadTextFile(hashPath) == hash && oldFragment) {
                 ensurePool();
@@ -1680,6 +1872,15 @@ namespace nifcarrier {
                 if (static_cast<int>(i) != baseIdx) {
                     ordered.push_back(smp[i]);
                 }
+            }
+
+            // Per-content namespace isolation (same aliasing hazard as the box
+            // merge; see IsolateContent). Single-content persist keeps plain
+            // names - the bind side falls back to the unprefixed lookup.
+            if (ordered.size() >= 2 &&
+                !IsolateSmpSet(ordered, tmpDir, "persist", "[persist]", log)) {
+                Log(log, "[persist] FAILED namespace isolation");
+                return failKeepOld();
             }
 
             // Master merged nif: bones union + every content's shapes
@@ -2090,7 +2291,7 @@ namespace nifcarrier {
                 const auto hashPath = carrierDir / ("Box" + slotStr + "_carrier.hash");
 
                 const int declared = box.contains("contents") ? static_cast<int>(box["contents"].size()) : 0;
-                const auto smp = ResolveSmpContents(box["contents"], opts.dataRoots, tag,
+                auto smp = ResolveSmpContents(box["contents"], opts.dataRoots, tag,
                     "; box built from the rest", nullptr, res.log);
 
                 const auto ensurePool = [&]() {
@@ -2122,7 +2323,9 @@ namespace nifcarrier {
                     continue;
                 }
 
-                const std::string hash = HashContents("v1|", smp);
+                // v2: salt bump for the per-content namespace isolation - every
+                // existing multi-content carrier must rebuild with prefixes.
+                const std::string hash = HashContents("v2|", smp);
                 if (std::filesystem::exists(hashPath) && std::filesystem::exists(carrierPath) &&
                     ReadTextFile(hashPath) == hash) {
                     ensurePool();
@@ -2147,8 +2350,15 @@ namespace nifcarrier {
                     res.log += za.log;
                     rc = za.ok ? 0 : 1;
                 } else {
-                    // merge FIRST, then zero-alpha the whole merged NIF, then
+                    // Per-content namespace isolation FIRST (see IsolateContent:
+                    // same-named custom bones across contents alias otherwise),
+                    // then merge, then zero-alpha the whole merged NIF, then
                     // point the extra data at the unified XML.
+                    if (!IsolateSmpSet(smp, tmpDir, "box" + slotStr, tag, res.log)) {
+                        Log(res.log, "%s FAILED namespace isolation", tag.c_str());
+                        ++res.failed;
+                        continue;
+                    }
                     const auto t1 = tmpDir / ("box" + slotStr + "_mg.nif");
                     const auto t2 = tmpDir / ("box" + slotStr + "_za.nif");
                     std::vector<std::filesystem::path> nifs;
