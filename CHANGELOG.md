@@ -3,6 +3,25 @@
 ## Unreleased (v1.2.1)
 
 ### Fixed
+- **Removing an ACTIVE persist entry can no longer double-return.** The
+  catalog remove now also deactivates the entry (return pairs with
+  deactivation), and the "Active but not in catalog" [deactivate] row guards
+  against stale page snapshots - previously the removed-but-still-active
+  entry resurfaced there and its deactivate returned a second copy (review
+  round 4).
+- **Co-save restore honors the forced-gender NIF.** The token-less persist
+  restore resolved models with the raw player sex, so a forced Male/Female
+  NIF reverted on every load; it now uses the same effective sex as live
+  registration.
+- **A persist catalog remove keeps the per-content settings.** Hide rules,
+  forced gender, body-morph opt-in and the captured enchant snapshot used to
+  be erased with the catalog entry - but another save may keep the entry
+  uncataloged-active and still display it, and lost its look/enchant on the
+  next load. The maps now survive (a re-capture re-snapshots the enchant).
+- **Preset validation checks displayability and drops duplicates.** Entries
+  are validated with the same gate captures use (usable ARMO/ARMA model, not
+  mere form existence), and duplicate ids no longer double the stats/enchant
+  aggregation.
 - **"Reload settings from disk" keeps uncataloged actives.** The reload
   re-registers every persist entry active on this save - including entries
   another character removed from the shared catalog (a supported state the

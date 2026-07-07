@@ -1,5 +1,5 @@
 #include "Preset.h"
-#include "SkinRebind.h"  // ResolveFormId (validation)
+#include "SkinRebind.h"  // CanResolveContent (validation)
 
 #include <nlohmann/json.hpp>
 
@@ -210,7 +210,17 @@ namespace CostumeFW::Preset
         std::vector<std::string>& a_resolvable, std::vector<std::string>& a_missing)
     {
         for (const auto& c : a_contents) {
-            if (ResolveFormId(c) != 0) {
+            // Duplicate ids would double the stats/enchant aggregation and
+            // fight over the one registry slot - first occurrence wins.
+            if (std::find(a_resolvable.begin(), a_resolvable.end(), c) !=
+                a_resolvable.end()) {
+                continue;
+            }
+            // Displayability, not mere form existence (review round 4): the
+            // same gate captures use (ARMO/ARMA with a usable model), so a
+            // broken entry lands in a_missing instead of assigning fine and
+            // then never showing.
+            if (CanResolveContent(c)) {
                 a_resolvable.push_back(c);
             } else {
                 a_missing.push_back(c);

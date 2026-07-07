@@ -1609,7 +1609,10 @@ namespace CostumeFW
             return false;
         }
         const std::string plugin = a_id.substr(colon + 1);
-        const RE::SEX sex = PlayerSex();
+        // Effective sex, not raw player sex (review round 4): the co-save
+        // restore runs after the settings load, so the per-content forced
+        // gender is known - PlayerSex() here made a forced NIF revert on load.
+        const RE::SEX sex = EffectiveSex(a_id);
         ModelRef m3p, m1p;
         if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
             return false;

@@ -1289,10 +1289,13 @@ namespace CostumeFW
             return false;
         }
         g_persist.erase(it);
-        g_hideRules.erase(a_content);       // drop any hide rule for the removed content
-        g_genderModes.erase(a_content);     // and its gender override
-        g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
-        g_contentEnchants.erase(a_content);  // and its captured enchantment
+        // Per-content maps (hide/gender/morph/enchant snapshot) survive a
+        // catalog remove ON PURPOSE (review round 4): another save may keep
+        // this entry uncataloged-ACTIVE and still display it - erasing here
+        // degraded its look/enchant/gender after that save's next load. A
+        // re-capture re-snapshots the enchant anyway; the orphaned entries
+        // are a few bytes in the shared json. (Box content removal still
+        // erases - box contents have no per-save active state.)
         WriteJson();
         return true;
     }

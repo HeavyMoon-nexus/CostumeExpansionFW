@@ -585,6 +585,7 @@ event OnOptionSelect(int a_option)
             ; copy here would duplicate it for every character that bulk-removes.
             if CFW_Native.IsPersistActive(pc[pi])
                 ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
+                CFW_Native.SetPersistActive(pc[pi], false)  ; return pairs with deactivation
             endIf
             CFW_Native.RemovePersist(pc[pi])
             pi += 1
@@ -603,6 +604,11 @@ event OnOptionSelect(int a_option)
         ; capturing character removing after deactivation.
         if CFW_Native.IsPersistActive(rid)
             ReturnItem(CFW_Native.ResolveForm(rid))
+            ; Pair the return with DEACTIVATION (review round 4): RemovePersist
+            ; only deletes the catalog entry, so a returned-but-still-active
+            ; entry would surface under "Active but not in catalog" and its
+            ; [deactivate] would return a SECOND copy.
+            CFW_Native.SetPersistActive(rid, false)
         else
             ReturnItemStoreOnly(CFW_Native.ResolveForm(rid))
         endIf
@@ -632,8 +638,13 @@ event OnOptionSelect(int a_option)
     endIf
     p = _persistUncatOpts.Find(a_option)
     if p >= 0
-        ReturnItem(CFW_Native.ResolveForm(_persistUncatIds[p]))
-        CFW_Native.SetPersistActive(_persistUncatIds[p], false)
+        ; Stale-row guard (review round 4): the page renders from a snapshot,
+        ; so a row whose entry was deactivated meanwhile (e.g. by an active
+        ; catalog remove, which now deactivates too) must not return again.
+        if CFW_Native.IsPersistActive(_persistUncatIds[p])
+            ReturnItem(CFW_Native.ResolveForm(_persistUncatIds[p]))
+            CFW_Native.SetPersistActive(_persistUncatIds[p], false)
+        endIf
         ForcePageReset()
         return
     endIf
