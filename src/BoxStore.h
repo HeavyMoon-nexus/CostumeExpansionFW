@@ -4,6 +4,11 @@
 #include <string>
 #include <vector>
 
+namespace RE
+{
+    class TESObjectREFR;
+}
+
 namespace CostumeFW
 {
     // A box definition: a token ARMO (colon-form id) that, while worn, shows its
@@ -227,11 +232,25 @@ namespace CostumeFW
     std::string ItemDisplayName(const std::string& a_colonId);
 
     // `cef recover <id>`: deliberately grant ONE copy of a content item to the
-    // player. The MCM return flows are STORE-ONLY (they never fabricate items;
-    // a store miss means the copy lives on another character's save -
-    // CEF_STATE_SCOPE.md §4); this is the explicit, logged escape hatch.
-    // Main thread (touches the player inventory).
+    // player. Drains the hidden store first (returns the captured original), so it
+    // no longer double-copies a still-stored item; fabricates a fresh base copy
+    // only when this save has no stored copy. Main thread (touches inventory).
     bool RecoverContentItem(const std::string& a_id);
+
+    // --- Hidden-store custody (border audit 2026-07-09, ROOT A) ---------------
+    // The MCM owns a disabled holding container (CFW_Storage 0x80D, PlaceAtMe) that
+    // preserves captured items WITH their instance data (tempering / player enchant).
+    // It was reachable ONLY from the MCM script, so every non-MCM removal route
+    // (console, another mod's direct native call) stranded the physical item. The
+    // MCM now hands the ref to the native layer (OnConfigOpen) so those borders can
+    // return it too. Cleared on game load (the ref is per-save). Main thread.
+    void SetStoreRef(RE::TESObjectREFR* a_store);
+
+    // Return one captured copy of a_id to the player: the hidden store's original
+    // if it holds one (keeps instance data), else - only if a_fabricate - a fresh
+    // base copy (the accepted cross-save duplication, CEF_STATE_SCOPE.md §4).
+    // Returns true if a copy reached the player. Main thread (touches inventory).
+    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate);
 
     // --- Box abilities (Phase C) ---------------------------------------------
     // The shipped ability-spell catalog (CostumeFW.esp SPEL named
@@ -298,6 +317,14 @@ namespace CostumeFW
     // settings), so capture flows must block while ANY box or the persist
     // catalog holds the id (review 2026-07-07 P1-1).
     std::string ContentHolder(const std::string& a_content);
+
+    // ROOT C (border audit 2026-07-09): TRUE if the colon-form id belongs to a CEF
+    // plugin (CostumeFW.esp or the two pre-merge plugins). CEF's own records are box
+    // tokens / carrier / pool / ability forms - NEVER valid CONTENT (content is
+    // third-party costume meshes). Ingest borders reject a CEF-own id used as content
+    // (the MCM capture lists already filter it via IsTokenPluginFile; the native /
+    // preset / hand-edited-JSON routes did not). Cheap string check - no form lookup.
+    bool IsTokenColonId(const std::string& a_id);
 
     // AddBox: create the box for a_token if absent (with a_label), then append
     // a_content if non-empty and not already present. Returns false on bad input.

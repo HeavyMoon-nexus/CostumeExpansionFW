@@ -155,6 +155,10 @@ namespace
             // save (a CTD rollback can predate the registration - C §9-18); it
             // rebuilds the head only when something actually changed.
             SKSE::GetTaskInterface()->AddTask([] {
+                // The hidden-store ref is per-save; drop the stale handle until the
+                // MCM re-hands it (OnConfigOpen), so a console removal between load
+                // and menu-open can't touch the wrong save's store (ROOT A).
+                CostumeFW::SetStoreRef(nullptr);
                 CostumeFW::ClearBoxSpellCache();
                 CostumeFW::ReapplyBoxes();
                 CostumeFW::ApplyCarrierOverrides(false);

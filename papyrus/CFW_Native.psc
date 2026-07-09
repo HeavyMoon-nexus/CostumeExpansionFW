@@ -54,9 +54,12 @@ Form Function GetBoxTokenForm(Int index) Global Native
 ; Create the box for token (with label) if absent, then append content if given.
 Bool Function AddBox(String label, String token, String content) Global Native
 
-; Remove one content from a box, or the whole box, or relabel it.
-Bool Function RemoveBoxContent(String token, String content) Global Native
-Bool Function RemoveBox(String token) Global Native
+; Remove one content from a box, or the whole box, or relabel it. returnStored
+; (border audit ROOT A): the MCM passes false - it returns the captured item
+; itself (its store-only-vs-fabricate custody). Another mod calling this native
+; directly passes true so the item is handed back, not stranded in the store.
+Bool Function RemoveBoxContent(String token, String content, Bool returnStored = false) Global Native
+Bool Function RemoveBox(String token, Bool returnStored = false) Global Native
 Bool Function SetBoxLabel(String token, String label) Global Native
 
 ; Currently-worn player armors (excluding our box tokens): display names and the
@@ -164,7 +167,12 @@ String Function GetPresetAssignedTo(String name) Global Native
 ; saves keep their actives).
 String[] Function GetPersistContents() Global Native
 Bool Function AddPersist(String content) Global Native
-Bool Function RemovePersist(String content) Global Native
+Bool Function RemovePersist(String content, Bool returnStored = false) Global Native
+
+; Hand the MCM's hidden holding container (CFW_Storage) to the native layer so
+; console / external-mod removal borders can return captured items (ROOT A).
+; Call from OnConfigOpen; the native clears it on load until re-handed.
+Function SetStoreRef(ObjectReference akStore) Global Native
 
 ; Where a content id is already held: "" if free, "persist" if in the persist
 ; catalog, else the holding box's token. Capture flows check this BEFORE moving

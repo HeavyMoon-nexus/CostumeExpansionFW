@@ -215,6 +215,25 @@ namespace CostumeFW
                 const std::string id = Trim(rest.substr(on ? 3 : 4));
                 SKSE::GetTaskInterface()->AddTask([id, on] {
                     const bool ok = PersistSetActive(id, on);
+                    if (ok && !on) {
+                        // ROOT A [1324]: an uncataloged-active persist id has no
+                        // catalog entry keeping custody, so deactivating it strands
+                        // the stored original. Return it store-only (mirrors the MCM
+                        // uncataloged deactivate). A CATALOGED id keeps its stored
+                        // copy (re-activatable), so leave it.
+                        std::string cid = id;
+                        CanonicalizeColonId(cid);
+                        bool cataloged = false;
+                        for (const auto& e : PersistContents()) {
+                            if (e == cid) {
+                                cataloged = true;
+                                break;
+                            }
+                        }
+                        if (!cataloged) {
+                            ReturnStoredItem(cid, false);  // store-only, no fabricate
+                        }
+                    }
                     if (auto* c = RE::ConsoleLog::GetSingleton()) {
                         std::string msg;
                         if (ok) {

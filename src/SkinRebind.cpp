@@ -21,6 +21,7 @@
 #include "RE/N/NiSkinInstance.h"
 #include "RE/P/PlayerCharacter.h"
 
+#include <cstdio>  // std::snprintf (CanonicalizeColonId)
 #include <unordered_set>
 #include "RE/S/Sexes.h"
 #include "RE/T/TESDataHandler.h"
@@ -1174,6 +1175,23 @@ namespace CostumeFW
         return a_armo->armorAddons.front();
     }
 
+    bool CanonicalizeColonId(std::string& a_id)
+    {
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_id, localID, plugin)) {
+            return false;  // unparseable - leave it for the resolver to reject
+        }
+        char buf[8]{};
+        std::snprintf(buf, sizeof(buf), "%06X", localID);
+        std::string canon = std::string(buf) + ":" + plugin;
+        if (canon == a_id) {
+            return false;
+        }
+        a_id = std::move(canon);
+        return true;
+    }
+
     bool CanResolveContent(const std::string& a_contentId)
     {
         std::uint32_t localID = 0;
@@ -1192,23 +1210,27 @@ namespace CostumeFW
 
     bool RegisterBoxById(const std::string& a_contentId, const std::string& a_tokenId)
     {
-        const auto colon = a_contentId.find(':');
-        if (colon == std::string::npos) {
-            return false;
+        // ROOT D: register under canonical ids so the registry key, the gender-map
+        // lookup, and active-vs-catalog matching agree with the (canonical) config
+        // side regardless of how this id was spelled at its source.
+        std::string cid = a_contentId;
+        CanonicalizeColonId(cid);
+        std::string tid = a_tokenId;
+        if (!tid.empty()) {
+            CanonicalizeColonId(tid);
         }
         std::uint32_t localID = 0;
-        try {
-            localID = static_cast<std::uint32_t>(std::stoul(a_contentId.substr(0, colon), nullptr, 16));
-        } catch (...) {
+        std::string plugin;
+        if (!ParseColonId(cid, localID, plugin)) {
             return false;
         }
-        const RE::SEX sex = EffectiveSex(a_contentId);
+        const RE::SEX sex = EffectiveSex(cid);
         ModelRef m3p, m1p;
-        if (!ResolveArmaModels(localID, a_contentId.substr(colon + 1), sex, m3p, m1p)) {
+        if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
             return false;
         }
-        const RE::FormID tokenForm = ResolveFormID(a_tokenId);
-        Register(a_contentId, m3p, m1p, a_tokenId, tokenForm, sex);
+        const RE::FormID tokenForm = ResolveFormID(tid);
+        Register(cid, m3p, m1p, tid, tokenForm, sex);
         return true;
     }
 
@@ -1598,26 +1620,24 @@ namespace CostumeFW
     {
         // Parse the colon-form id "XXXXXX:Plugin.esp", resolve + register WITHOUT
         // injecting (used by the co-save load callback; ReattachAll injects later).
-        const auto colon = a_id.find(':');
-        if (colon == std::string::npos) {
-            return false;
-        }
+        // ROOT D: canonicalize first so a pre-fix co-save's non-canonical id lands
+        // under the same registry key the (canonical) catalog uses.
+        std::string cid = a_id;
+        CanonicalizeColonId(cid);
         std::uint32_t localID = 0;
-        try {
-            localID = static_cast<std::uint32_t>(std::stoul(a_id.substr(0, colon), nullptr, 16));
-        } catch (...) {
+        std::string plugin;
+        if (!ParseColonId(cid, localID, plugin)) {
             return false;
         }
-        const std::string plugin = a_id.substr(colon + 1);
         // Effective sex, not raw player sex (review round 4): the co-save
         // restore runs after the settings load, so the per-content forced
         // gender is known - PlayerSex() here made a forced NIF revert on load.
-        const RE::SEX sex = EffectiveSex(a_id);
+        const RE::SEX sex = EffectiveSex(cid);
         ModelRef m3p, m1p;
         if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
             return false;
         }
-        Register(a_id, m3p, m1p, {}, 0, sex);
+        Register(cid, m3p, m1p, {}, 0, sex);
         return true;
     }
 

@@ -178,15 +178,23 @@ namespace CostumeFW
             return true;
         }
 
+        // a_returnStored (border audit ROOT A): the MCM passes FALSE - it hands the
+        // captured item back itself (its nuanced store-only-vs-fabricate custody).
+        // Another mod calling this native directly passes TRUE so the item is not
+        // stranded in the hidden store. Default FALSE keeps every existing MCM call
+        // (2-arg) unchanged.
         bool RemoveBoxContentNative(RE::StaticFunctionTag*, RE::BSFixedString a_token,
-            RE::BSFixedString a_content)
+            RE::BSFixedString a_content, bool a_returnStored)
         {
             const std::string token = a_token.c_str();
             const std::string content = a_content.c_str();
             if (!RemoveBoxContent(token, content)) {  // sync def + json
                 return false;
             }
-            SKSE::GetTaskInterface()->AddTask([token, content] {
+            SKSE::GetTaskInterface()->AddTask([token, content, a_returnStored] {
+                if (a_returnStored) {
+                    ReturnStoredItem(content, true);  // external caller: return the captured item
+                }
                 DetachSkinned(content);
                 RebuildBoxAbility(token);
                 ApplyBoxAbilities();
@@ -195,7 +203,7 @@ namespace CostumeFW
             return true;
         }
 
-        bool RemoveBoxNative(RE::StaticFunctionTag*, RE::BSFixedString a_token)
+        bool RemoveBoxNative(RE::StaticFunctionTag*, RE::BSFixedString a_token, bool a_returnStored)
         {
             const std::string token = a_token.c_str();
             const std::vector<std::string> contents = BoxContents(token);  // capture first
@@ -203,8 +211,11 @@ namespace CostumeFW
             if (!RemoveBox(token)) {  // sync def + json
                 return false;
             }
-            SKSE::GetTaskInterface()->AddTask([token, contents, ability] {
+            SKSE::GetTaskInterface()->AddTask([token, contents, ability, a_returnStored] {
                 for (const auto& c : contents) {
+                    if (a_returnStored) {
+                        ReturnStoredItem(c, true);
+                    }
                     DetachSkinned(c);
                 }
                 RemoveBoxAbilitySpell(ability);  // drop the manual spell if any
@@ -570,13 +581,19 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([] { ReloadSettingsFromDisk(); });
         }
 
-        bool RemovePersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
+        bool RemovePersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_content, bool a_returnStored)
         {
             const std::string content = a_content.c_str();
             if (!RemovePersistContent(content)) {
                 return false;
             }
-            SKSE::GetTaskInterface()->AddTask([content] {
+            SKSE::GetTaskInterface()->AddTask([content, a_returnStored] {
+                if (a_returnStored) {
+                    // Persist is a SHARED catalog - store-only (no fabricate) so an
+                    // external catalog-remove can't mint copies of an item still
+                    // active on another save.
+                    ReturnStoredItem(content, false);
+                }
                 DetachSkinned(content);
                 Reconcile();
                 RebuildPersistAbility();
@@ -584,6 +601,14 @@ namespace CostumeFW
                 SyncPersistManifest();  // persist manifest fragment tracks the ACTIVE set (M2)
             });
             return true;
+        }
+
+        // Hand the MCM's hidden holding container to the native layer (ROOT A) so
+        // console / external-mod removal borders can return captured items. Called
+        // from the MCM's OnConfigOpen; cleared on load until the MCM re-sets it.
+        void SetStoreRefNative(RE::StaticFunctionTag*, RE::TESObjectREFR* a_store)
+        {
+            SetStoreRef(a_store);
         }
 
         // --- C-phase MCM support (Diagnostics / body morph / M2 activation) ----
@@ -893,6 +918,7 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetPersistContents", kClass, GetPersistContents);
         a_vm->RegisterFunction("AddPersist", kClass, AddPersistNative);
         a_vm->RegisterFunction("RemovePersist", kClass, RemovePersistNative);
+        a_vm->RegisterFunction("SetStoreRef", kClass, SetStoreRefNative);
         a_vm->RegisterFunction("FindContentHolder", kClass, FindContentHolderNative);
         a_vm->RegisterFunction("ReloadSettings", kClass, ReloadSettingsNative);
         a_vm->RegisterFunction("GetDiagLines", kClass, GetDiagLinesNative);

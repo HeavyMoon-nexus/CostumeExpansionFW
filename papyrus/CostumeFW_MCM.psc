@@ -171,6 +171,10 @@ function BuildPages()
 endFunction
 
 event OnConfigOpen()
+    ; ROOT A: (re)hand the hidden holding container to the native layer so console
+    ; / external-mod removal borders can return captured items. The native clears
+    ; it on load, so refresh it every open (the store ref is per-save).
+    CFW_Native.SetStoreRef(GetStore())
     BuildPages()
 endEvent
 
@@ -772,7 +776,12 @@ function ReturnDroppedContents(string[] aOld, string[] aNew, bool aPersist, stri
     while i < aOld.Length
         if aNew.Find(aOld[i]) < 0
             Form itm = CFW_Native.ResolveForm(aOld[i])
-            bool allowNew = true
+            ; A-4 (border audit ROOT A): preset-dropped BOX contents were possibly
+            ; never physically captured (a preset just lists ids), so the new-copy
+            ; fallback minted a free item on every preset swap. Store-only for box
+            ; contents (hand back a genuinely-captured original if present, else
+            ; nothing). Persist keeps its was-active-here fabricate policy.
+            bool allowNew = false
             if aPersist
                 allowNew = aPreActive.Length > 0 && aPreActive.Find(aOld[i]) >= 0
             endIf

@@ -1,5 +1,6 @@
 #include "Preset.h"
-#include "SkinRebind.h"  // CanResolveContent (validation)
+#include "BoxStore.h"    // IsTokenColonId (border quarantine)
+#include "SkinRebind.h"  // CanResolveContent, CanonicalizeColonId (validation)
 
 #include <nlohmann/json.hpp>
 
@@ -209,11 +210,22 @@ namespace CostumeFW::Preset
     void Validate(const std::vector<std::string>& a_contents,
         std::vector<std::string>& a_resolvable, std::vector<std::string>& a_missing)
     {
-        for (const auto& c : a_contents) {
+        for (const auto& c0 : a_contents) {
+            // ROOT C/D border quarantine (border audit 2026-07-09): a shared preset
+            // is untrusted input. Canonicalize the id, then dedup / reject a CEF-own
+            // id / gate on displayability.
+            std::string c = c0;
+            CanonicalizeColonId(c);
             // Duplicate ids would double the stats/enchant aggregation and
             // fight over the one registry slot - first occurrence wins.
             if (std::find(a_resolvable.begin(), a_resolvable.end(), c) !=
                 a_resolvable.end()) {
+                continue;
+            }
+            // A box token / carrier / pool part is never valid content (it can
+            // only inject an invisible carrier and compound the box's stats).
+            if (IsTokenColonId(c)) {
+                a_missing.push_back(c);
                 continue;
             }
             // Displayability, not mere form existence (review round 4): the

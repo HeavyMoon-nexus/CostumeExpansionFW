@@ -63,6 +63,14 @@ namespace CostumeFW
     // Pure data reads; safe on the Papyrus VM thread.
     bool CanResolveContent(const std::string& a_contentId);
 
+    // ROOT D (border audit 2026-07-09): normalize a colon-form id to its canonical
+    // "XXXXXX:Plugin.esp" spelling (upper-hex, 6 digits, no 0x / leading-zero
+    // variance). True if the string changed. Every ingest border canonicalizes so
+    // the string-keyed guards (ContentHolder, dedup, active-vs-catalog, per-content
+    // side maps, injected node name) match ids that arrived non-canonical via a
+    // hand-edited JSON, a shared preset, or another mod's direct native call.
+    bool CanonicalizeColonId(std::string& a_id);
+
     // The body sex a_id's model resolves for (player sex overridden by the
     // per-content forced-gender mode). Exported so the carrier manifest picks
     // the SAME NIF the injection shows (review 2026-07-07 P2).

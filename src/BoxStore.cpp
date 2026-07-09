@@ -610,6 +610,13 @@ namespace CostumeFW
                 SKSE::log::warn("carriers.json parse failed: {}", e.what());
                 return;
             }
+            // ROOT B (border audit 2026-07-09): the parse is guarded above, but the
+            // per-slot field reads below (doc[key].value(...) and the persist
+            // fragment) are typed accesses that throw json::type_error on a
+            // wrong-typed member of an otherwise-valid carriers.json. Catch it - a
+            // malformed override just leaves the ESP-default carriers in place,
+            // never an uncaught throw out of the load / sync path.
+            try {
             bool anyChanged = false;
             for (const auto& b : g_boxes) {
                 auto* armoA = ResolveArmo(b.token);
@@ -659,6 +666,9 @@ namespace CostumeFW
             // Persist class (approach C): the head-part pool needs no re-equip -
             // CEF can fire the facegen rebuild itself, so this is fully automatic.
             ApplyPersistCarrier(doc, a_refreshChanged);
+            } catch (const std::exception& e) {
+                SKSE::log::warn("carriers.json field type error ({}) - keeping ESP-default carriers", e.what());
+            }
         }
 
         // --- auto-sync: rebuild carriers when the manifest changes ---------------
@@ -942,15 +952,19 @@ namespace CostumeFW
                             "it is rewritten on the next settings change)",
                 kSettingsBakPath);
         }
-        if (!migrated && !fromBackup) {
-            // Snapshot the just-parsed good file as the recovery backup. Best
-            // effort - a failed copy only means no fallback, not a load failure.
-            CopyFileA(kSettingsPath, kSettingsBakPath, FALSE);
-        }
-
         // Heal pre-merge colon-ids (v1.2.1 plugin consolidation) wherever the
         // settings persist them; a healed file is rewritten once below.
         bool healed = false;
+        // ROOT B (border audit 2026-07-09): the field reads below are typed
+        // value()/get<> accesses. A WRONG-TYPED field in a hand-edited settings file
+        // (e.g. "boxes": 5) throws json::type_error - which the parse-only guard above
+        // did NOT cover, so it crashed at EVERY launch. Wrap the extraction: a bad
+        // field discards the partial state and leaves the on-disk file intact (no
+        // data-destroying WriteJson) instead of crashing. Also enforce ingest
+        // invariants here (one box per token, one holder per content id).
+        std::vector<std::string> seenTokens;    // ROOT B: one box per token
+        std::vector<std::string> seenContents;  // ROOT B: one holder per content id
+        try {
         g_cefEnabled = doc.value("enabled", true);
         const auto boxes = doc.value("boxes", nlohmann::json::array());
         for (const auto& jb : boxes) {
@@ -958,20 +972,53 @@ namespace CostumeFW
             b.label = jb.value("label", std::string{});
             b.token = jb.value("token", std::string{});
             healed |= MigrateLegacyColonId(b.token);
+            healed |= CanonicalizeColonId(b.token);  // ROOT D
             if (b.token.empty()) {
                 continue;
             }
+            if (!IsTokenColonId(b.token)) {
+                // ROOT C: a box token must be a CEF plugin record; anything else means
+                // SetTokenStats below would rewrite a foreign/vanilla ARMO's stats.
+                SKSE::log::warn("boxes: LoadBoxes drops box with non-CEF token '{}'", b.token);
+                healed = true;
+                continue;
+            }
+            if (std::find(seenTokens.begin(), seenTokens.end(), b.token) != seenTokens.end()) {
+                // ROOT B: token-keyed mutators only ever reach the first box, so a
+                // second box on the same token is a dead "item printer" - drop it.
+                SKSE::log::warn("boxes: LoadBoxes drops second box on token '{}'", b.token);
+                healed = true;
+                continue;
+            }
+            seenTokens.push_back(b.token);
             for (const auto& c : jb.value("contents", nlohmann::json::array())) {
                 if (c.is_string()) {
                     auto id = c.get<std::string>();
                     healed |= MigrateLegacyColonId(id);
+                    healed |= CanonicalizeColonId(id);  // ROOT D
+                    if (IsTokenColonId(id)) {  // ROOT C: CEF-own id smuggled as content
+                        SKSE::log::warn(
+                            "boxes: LoadBoxes drops CEF-own content id '{}' from box '{}'", id, b.token);
+                        healed = true;
+                        continue;
+                    }
+                    if (std::find(seenContents.begin(), seenContents.end(), id) != seenContents.end()) {
+                        // ROOT B: the injection registry is one-entry-per-id; a dup
+                        // across boxes last-wins and the extra remove row fabricates.
+                        SKSE::log::warn(
+                            "boxes: LoadBoxes drops duplicate content id '{}' (one holder per id)", id);
+                        healed = true;
+                        continue;
+                    }
+                    seenContents.push_back(id);
                     b.contents.push_back(std::move(id));
                 }
             }
             b.ability = jb.value("ability", std::string{});
             healed |= MigrateLegacyColonId(b.ability);
+            healed |= CanonicalizeColonId(b.ability);  // ROOT D
             b.enabled = jb.value("enabled", true);
-            b.armorType = jb.value("armorType", 0);
+            b.armorType = std::clamp(jb.value("armorType", 0), 0, 2);  // ROOT B: valid class only
             b.preset = jb.value("preset", std::string{});
             b.uiVisible = jb.value("uiVisible", true);
             b.wear = jb.value("wear", false);
@@ -982,6 +1029,18 @@ namespace CostumeFW
             if (c.is_string()) {
                 auto id = c.get<std::string>();
                 healed |= MigrateLegacyColonId(id);
+                healed |= CanonicalizeColonId(id);  // ROOT D
+                if (IsTokenColonId(id)) {  // ROOT C
+                    SKSE::log::warn("boxes: LoadBoxes drops CEF-own persist id '{}'", id);
+                    healed = true;
+                    continue;
+                }
+                if (std::find(seenContents.begin(), seenContents.end(), id) != seenContents.end()) {
+                    SKSE::log::warn("boxes: LoadBoxes drops persist id '{}' (already a box content)", id);
+                    healed = true;
+                    continue;
+                }
+                seenContents.push_back(id);
                 g_persist.push_back(std::move(id));
             }
         }
@@ -991,12 +1050,18 @@ namespace CostumeFW
             std::vector<int> slots;
             for (const auto& s : it.value()) {
                 if (s.is_number_integer()) {
-                    slots.push_back(s.get<int>());
+                    const int slot = s.get<int>();
+                    if (slot >= 30 && slot <= 61) {  // ROOT B: valid biped slots only
+                        slots.push_back(slot);
+                    } else {
+                        healed = true;
+                    }
                 }
             }
             if (!slots.empty()) {
                 std::string key = it.key();
                 healed |= MigrateLegacyColonId(key);
+                healed |= CanonicalizeColonId(key);  // ROOT D
                 g_hideRules[std::move(key)] = std::move(slots);
             }
         }
@@ -1007,6 +1072,7 @@ namespace CostumeFW
                 if (m >= 1 && m <= 2) {
                     std::string key = it.key();
                     healed |= MigrateLegacyColonId(key);
+                    healed |= CanonicalizeColonId(key);  // ROOT D
                     g_genderModes[std::move(key)] = m;
                 }
             }
@@ -1015,6 +1081,7 @@ namespace CostumeFW
             if (id.is_string()) {
                 auto s = id.get<std::string>();
                 healed |= MigrateLegacyColonId(s);
+                healed |= CanonicalizeColonId(s);  // ROOT D
                 g_bodyMorphOn.insert(std::move(s));
             }
         }
@@ -1030,8 +1097,31 @@ namespace CostumeFW
             if (!effs.empty()) {
                 std::string key = it.key();
                 healed |= MigrateLegacyColonId(key);
+                healed |= CanonicalizeColonId(key);  // ROOT D
                 g_contentEnchants[std::move(key)] = std::move(effs);
             }
+        }
+        } catch (const std::exception& e) {
+            // ROOT B: a wrong-typed field threw mid-extraction. Discard the partial
+            // state and leave CEF_settings.json untouched so the user can fix it -
+            // no crash, and no data-destroying WriteJson of an empty store.
+            SKSE::log::error("settings: field type error ({}) - loaded empty; "
+                             "CEF_settings.json left intact for repair", e.what());
+            g_boxes.clear();
+            g_persist.clear();
+            g_hideRules.clear();
+            g_genderModes.clear();
+            g_bodyMorphOn.clear();
+            g_contentEnchants.clear();
+            g_persistPreset.clear();
+            g_cefEnabled = true;
+            return;
+        }
+        // ROOT B: snapshot the last-known-good backup only AFTER a clean, fully
+        // validated load (previously taken before the field reads, so a file that
+        // parsed but had a bad field could clobber the good .bak).
+        if (!migrated && !fromBackup) {
+            CopyFileA(kSettingsPath, kSettingsBakPath, FALSE);
         }
         if (healed) {
             SKSE::log::info(
@@ -1267,16 +1357,30 @@ namespace CostumeFW
         if (a_content.empty()) {
             return false;
         }
+        // ROOT C/D border quarantine (parity with AddBox): canonicalize, refuse a
+        // CEF-own id as content, and refuse an id a BOX already holds (the injection
+        // registry is one-entry-per-id).
+        std::string content = a_content;
+        CanonicalizeColonId(content);
+        if (IsTokenColonId(content)) {
+            SKSE::log::warn("persist: rejects CEF-own id '{}' as content", content);
+            return false;
+        }
+        const std::string holder = ContentHolder(content);
+        if (!holder.empty() && holder != "persist") {
+            SKSE::log::warn("persist: '{}' rejected - already captured in box '{}'", content, holder);
+            return false;
+        }
         // "Already added" means ACTIVE ON THIS SAVE (M2, CEF_STATE_SCOPE.md §3):
         // capturing a catalog entry on a second character must succeed - only a
         // same-save duplicate fails (so the MCM never swallows the item).
         for (const auto& it : ActiveSnapshot()) {
-            if (it.tokenId.empty() && it.id == a_content) {
+            if (it.tokenId.empty() && it.id == content) {
                 return false;
             }
         }
-        if (std::find(g_persist.begin(), g_persist.end(), a_content) == g_persist.end()) {
-            g_persist.push_back(a_content);  // catalog add (shared across saves)
+        if (std::find(g_persist.begin(), g_persist.end(), content) == g_persist.end()) {
+            g_persist.push_back(content);  // catalog add (shared across saves)
             WriteJson();
         }
         return true;
@@ -1302,30 +1406,40 @@ namespace CostumeFW
 
     bool PersistSetActive(const std::string& a_id, bool a_on)
     {
+        std::string id = a_id;  // ROOT D: canonical so catalog / active compares match
+        CanonicalizeColonId(id);
         bool active = false;
         for (const auto& it : ActiveSnapshot()) {
-            if (it.tokenId.empty() && it.id == a_id) {
+            if (it.tokenId.empty() && it.id == id) {
                 active = true;
                 break;
             }
         }
         if (a_on) {
-            if (std::find(g_persist.begin(), g_persist.end(), a_id) == g_persist.end()) {
+            if (std::find(g_persist.begin(), g_persist.end(), id) == g_persist.end()) {
                 SKSE::log::warn(
-                    "persist on: '{}' is not in the catalog (capture it via the MCM first)", a_id);
+                    "persist on: '{}' is not in the catalog (capture it via the MCM first)", id);
+                return false;
+            }
+            // ROOT C: reject an id that a BOX also holds (only reachable via an
+            // unvalidated JSON that put the same id in a box AND the catalog).
+            // ContentHolder checks boxes first, so a box holder != "persist".
+            const std::string holder = ContentHolder(id);
+            if (!holder.empty() && holder != "persist") {
+                SKSE::log::warn("persist on: '{}' is also box content ({}) - refusing", id, holder);
                 return false;
             }
             if (active) {
                 return true;  // idempotent
             }
-            if (!RegisterBoxById(a_id, {})) {
+            if (!RegisterBoxById(id, {})) {
                 return false;
             }
         } else {
             if (!active) {
                 return false;
             }
-            DetachSkinned(a_id);  // detach + unregister; the catalog is untouched
+            DetachSkinned(id);  // detach + unregister; the catalog is untouched
         }
         Reconcile();
         RebuildPersistAbility();
@@ -2266,19 +2380,58 @@ namespace CostumeFW
         return out.empty() ? "(no stats)" : out;
     }
 
-    bool RecoverContentItem(const std::string& a_id)
+    // --- Hidden-store custody (border audit 2026-07-09, ROOT A) ---------------
+    // FormID of the MCM's disabled holding container (CFW_Storage 0x80D). Set by
+    // SetStoreRef (MCM OnConfigOpen); cleared on game load (per-save ref).
+    static std::uint32_t g_storeFormId = 0;
+
+    void SetStoreRef(RE::TESObjectREFR* a_store)
+    {
+        g_storeFormId = a_store ? a_store->GetFormID() : 0;
+    }
+
+    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_id);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
         auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
         if (!player || !obj) {
-            SKSE::log::warn("recover: '{}' does not resolve to an inventory item", a_id);
             return false;
         }
-        player->AddObjectToContainer(obj, nullptr, 1, nullptr);
-        SKSE::log::info("recover: granted 1x '{}' ({})", ItemDisplayName(a_id), a_id);
-        return true;
+        // Prefer the captured original in the hidden store (keeps tempering /
+        // player-enchant instance data), exactly like the MCM's ReturnItem.
+        if (g_storeFormId) {
+            auto* sform = RE::TESForm::LookupByID(g_storeFormId);
+            auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr;
+            if (store) {
+                const auto counts = store->GetInventoryCounts();
+                const auto it = counts.find(obj);
+                if (it != counts.end() && it->second > 0) {
+                    store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
+                    SKSE::log::info("custody: returned stored '{}' to player", a_id);
+                    return true;
+                }
+            }
+        }
+        if (a_fabricate) {
+            player->AddObjectToContainer(obj, nullptr, 1, nullptr);
+            SKSE::log::info("custody: fabricated 1x '{}' (none stored on this save)", a_id);
+            return true;
+        }
+        return false;
+    }
+
+    bool RecoverContentItem(const std::string& a_id)
+    {
+        // ROOT A ([2279]): drain the store first, fabricate only on a store miss -
+        // so recovering a still-stored item no longer mints a second copy.
+        if (ReturnStoredItem(a_id, true)) {
+            SKSE::log::info("recover: granted 1x '{}' ({})", ItemDisplayName(a_id), a_id);
+            return true;
+        }
+        SKSE::log::warn("recover: '{}' does not resolve to an inventory item", a_id);
+        return false;
     }
 
     int BoxCount()
@@ -2318,6 +2471,29 @@ namespace CostumeFW
         return idx < 0 ? std::vector<std::string>{} : g_boxes[idx].contents;
     }
 
+    bool IsTokenColonId(const std::string& a_id)
+    {
+        const auto colon = a_id.find(':');
+        if (colon == std::string::npos) {
+            return false;
+        }
+        const std::string_view plugin(a_id.data() + colon + 1, a_id.size() - colon - 1);
+        // CEF's own records ship in CostumeFW.esp (post-merge) or the two pre-merge
+        // plugins. Case-insensitive (Skyrim plugin names are).
+        constexpr std::string_view kCefPlugins[] = {
+            "CostumeFW.esp",
+            "CostumeFW_Boxes.esp",
+            "CostumeFW_Boxes_FSMPCarrier_001.esp",
+        };
+        for (const auto n : kCefPlugins) {
+            if (plugin.size() == n.size() &&
+                ::_strnicmp(plugin.data(), n.data(), n.size()) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::string ContentHolder(const std::string& a_content)
     {
         if (a_content.empty()) {
@@ -2340,30 +2516,53 @@ namespace CostumeFW
         if (a_token.empty()) {
             return false;
         }
-        int idx = FindBox(a_token);
+        // ROOT C/D border quarantine: canonicalize the ids, and refuse a CEF-own id
+        // (a box token / pool part) or an id already held elsewhere as content. The
+        // MCM pre-checks both (IsTokenPluginFile list filter + FindContentHolder),
+        // but the native / preset / hand-edited-JSON routes reach here unchecked.
+        std::string token = a_token;
+        CanonicalizeColonId(token);
+        if (!IsTokenColonId(token)) {  // ROOT C: token must be a CEF plugin record
+            SKSE::log::warn("boxes: AddBox rejects non-CEF token '{}'", token);
+            return false;
+        }
+        std::string content = a_content;
+        if (!content.empty()) {
+            CanonicalizeColonId(content);
+            if (IsTokenColonId(content)) {
+                SKSE::log::warn("boxes: AddBox rejects CEF-own id '{}' as content", content);
+                return false;
+            }
+            const std::string holder = ContentHolder(content);
+            if (!holder.empty() && holder != token) {
+                SKSE::log::warn("boxes: AddBox rejects '{}' - already captured in '{}'", content, holder);
+                return false;
+            }
+        }
+        int idx = FindBox(token);
         if (idx < 0) {
-            g_boxes.push_back({ a_label, a_token, {} });
+            g_boxes.push_back({ a_label, token, {} });
             idx = static_cast<int>(g_boxes.size()) - 1;
         } else if (!a_label.empty()) {
             g_boxes[idx].label = a_label;
         }
 
         auto& box = g_boxes[idx];
-        if (!a_content.empty()) {
-            if (std::find(box.contents.begin(), box.contents.end(), a_content) !=
+        if (!content.empty()) {
+            if (std::find(box.contents.begin(), box.contents.end(), content) !=
                 box.contents.end()) {
                 // Duplicate: report failure so the MCM capture flow does NOT move
                 // the physical item into the store (a swallowed extra copy could
                 // never be returned - review A-2 / CEF_STATE_SCOPE.md §4).
-                SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", a_content, a_token);
+                SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", content, token);
                 return false;
             }
-            box.contents.push_back(a_content);  // caller registers + reconciles
+            box.contents.push_back(content);  // caller registers + reconciles
         }
 
         WriteJson();
         SetTokenStats(g_boxes[idx]);  // write armor/weight onto the token now
-        SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, a_token, a_content);
+        SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, token, content);
         return true;
     }
 
