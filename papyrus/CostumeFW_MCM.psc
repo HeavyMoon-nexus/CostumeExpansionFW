@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 18 autoReadonly
+int property CURRENT_VERSION = 19 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -64,6 +64,9 @@ int      _optInvFilter      ; "Inventory filter" input (persist + box pages)
 string   _invFilter         ; current inventory-capture name filter (session)
 int[]    _genderOpts        ; per-content "Body" (forced NIF) menu (box page)
 int[]    _persistGenderOpts ; per-content "Body" menu (persist page)
+int      _contentPage       ; F2: current contents page index within a box page
+int      _contentPrevOpt    ; "< Prev contents" nav option (-1 when absent)
+int      _contentNextOpt    ; "Next contents >" nav option (-1 when absent)
 string[] _freeTokenIds      ; ids parallel to the open "new box" slot menu
 string[] _presetFilesCache  ; files parallel to the open "assign preset" menu
 
@@ -179,6 +182,8 @@ event OnConfigOpen()
 endEvent
 
 event OnPageReset(string a_page)
+    _contentPrevOpt = -1   ; F2: invalidate stale box-page content-nav options
+    _contentNextOpt = -1
     if a_page == "Boxes"
         ResetBoxesOverviewPage()
     elseIf a_page == "Persist"
@@ -434,14 +439,38 @@ endFunction
 ; handlers that need the box index use _curBoxIndex.
 function ResetSingleBoxPage(int a_idx)
     SetCursorFillMode(TOP_TO_BOTTOM)
+    ; F2: paginate contents so a box with many items doesn't overflow SkyUI's
+    ; ~128-option page limit (each content renders 4 options). Switching to a
+    ; different box resets to the first content page.
+    if _curBoxIndex != a_idx
+        _contentPage = 0
+    endIf
     _curBoxIndex = a_idx
 
     string token = CFW_Native.GetBoxToken(a_idx)
     int slot = CFW_Native.GetTokenSlot(token)
     string[] contents = CFW_Native.GetBoxContents(a_idx)
-    int cn = contents.Length
-    if cn == 0
-        cn = 1
+    int total = contents.Length
+    int pageSize = 24
+    int pageCount = 1
+    if total > pageSize
+        pageCount = (total + pageSize - 1) / pageSize
+    endIf
+    if _contentPage >= pageCount
+        _contentPage = pageCount - 1
+    endIf
+    if _contentPage < 0
+        _contentPage = 0
+    endIf
+    int cStart = _contentPage * pageSize
+    int cEnd = cStart + pageSize
+    if cEnd > total
+        cEnd = total
+    endIf
+    int renderCount = cEnd - cStart   ; rows this page (0 for an empty box)
+    int arrN = renderCount
+    if arrN < 1
+        arrN = 1                       ; Utility.CreateArray needs length >= 1
     endIf
 
     _equipOpts     = Utility.CreateIntArray(1, -1)
@@ -460,12 +489,12 @@ function ResetSingleBoxPage(int a_idx)
     _exportTokens  = Utility.CreateStringArray(1, token)
     _deleteOpts    = Utility.CreateIntArray(1, -1)
     _deleteTokens  = Utility.CreateStringArray(1, token)
-    _removeOpts     = Utility.CreateIntArray(cn, -1)
-    _hideOpts       = Utility.CreateIntArray(cn, -1)
-    _morphOpts      = Utility.CreateIntArray(cn, -1)
-    _genderOpts     = Utility.CreateIntArray(cn, -1)
-    _removeTokens   = Utility.CreateStringArray(cn, "")
-    _removeContents = Utility.CreateStringArray(cn, "")
+    _removeOpts     = Utility.CreateIntArray(arrN, -1)
+    _hideOpts       = Utility.CreateIntArray(arrN, -1)
+    _morphOpts      = Utility.CreateIntArray(arrN, -1)
+    _genderOpts     = Utility.CreateIntArray(arrN, -1)
+    _removeTokens   = Utility.CreateStringArray(arrN, "")
+    _removeContents = Utility.CreateStringArray(arrN, "")
 
     AddHeaderOption(CFW_Native.GetItemName(token) + ": " + SlotName(slot))
     _distribOpts[0] = AddToggleOption("Distribute token", CFW_Native.GetBoxEnabled(a_idx))
@@ -483,15 +512,25 @@ function ResetSingleBoxPage(int a_idx)
     AddTextOption("Stats", CFW_Native.GetBoxStats(a_idx), OPTION_FLAG_DISABLED)
     _deleteOpts[0] = AddTextOption("Delete box", "")
 
-    AddHeaderOption("Contents (" + contents.Length + ")")
+    AddHeaderOption("Contents (" + total + ")")
+    if pageCount > 1
+        AddTextOption("  Page " + (_contentPage + 1) + " / " + pageCount, "", OPTION_FLAG_DISABLED)
+        if _contentPage > 0
+            _contentPrevOpt = AddTextOption("  < Prev contents", "")
+        endIf
+        if _contentPage < pageCount - 1
+            _contentNextOpt = AddTextOption("  Next contents >", "")
+        endIf
+    endIf
     int ci = 0
-    while ci < contents.Length
-        _removeOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[ci]), "[remove]")
-        _morphOpts[ci] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[ci]))
-        _genderOpts[ci] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(contents[ci])))
-        _hideOpts[ci] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[ci]))
+    while ci < renderCount
+        int idx = cStart + ci
+        _removeOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[idx]), "[remove]")
+        _morphOpts[ci] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[idx]))
+        _genderOpts[ci] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(contents[idx])))
+        _hideOpts[ci] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[idx]))
         _removeTokens[ci] = token
-        _removeContents[ci] = contents[ci]
+        _removeContents[ci] = contents[idx]
         ci += 1
     endWhile
 endFunction
@@ -689,6 +728,16 @@ event OnOptionSelect(int a_option)
         return
     endIf
 
+    if a_option == _contentPrevOpt && _contentPrevOpt != -1   ; F2: content pagination
+        _contentPage -= 1
+        ForcePageReset()
+        return
+    endIf
+    if a_option == _contentNextOpt && _contentNextOpt != -1
+        _contentPage += 1
+        ForcePageReset()
+        return
+    endIf
     k = _removeOpts.Find(a_option)
     if k >= 0
         ReturnItem(CFW_Native.ResolveForm(_removeContents[k]))
