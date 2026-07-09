@@ -1253,6 +1253,11 @@ namespace CostumeFW
         if (a_tokenForm == 0) {
             return;
         }
+        if (!CefEnabled()) {
+            // ROOT G [1166]: master switch off (incl. right after uninstall cleanup,
+            // which leaves box.enabled=true) - don't force tokens back onto the player.
+            return;
+        }
         // Only replenish a token whose box is ENABLED (distribution on). A disabled
         // box's token is meant to be gone, so don't fight the user removing it.
         bool enabledBox = false;
@@ -1564,6 +1569,8 @@ namespace CostumeFW
         if (a_id.empty()) {
             return false;
         }
+        std::string id = a_id;
+        CanonicalizeColonId(id);  // ROOT D
         // Keep only valid vanilla biped slots (30-61), de-duplicated.
         std::vector<int> clean;
         for (const int s : a_slots) {
@@ -1573,9 +1580,13 @@ namespace CostumeFW
             }
         }
         if (clean.empty()) {
-            g_hideRules.erase(a_id);  // empty list = clear the rule
+            g_hideRules.erase(id);  // empty list = clear the rule
         } else {
-            g_hideRules[a_id] = std::move(clean);
+            if (ContentHolder(id).empty()) {  // ROOT E [1476]: no orphan side-map entries
+                SKSE::log::warn("hide: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            g_hideRules[id] = std::move(clean);
         }
         WriteJson();
         return true;
@@ -1592,10 +1603,16 @@ namespace CostumeFW
         if (a_id.empty()) {
             return false;
         }
+        std::string id = a_id;
+        CanonicalizeColonId(id);  // ROOT D
         if (a_mode == 1 || a_mode == 2) {
-            g_genderModes[a_id] = a_mode;
+            if (ContentHolder(id).empty()) {  // ROOT E [1476]: no orphan side-map entries
+                SKSE::log::warn("gender: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            g_genderModes[id] = a_mode;
         } else {
-            g_genderModes.erase(a_id);  // 0 (or invalid) = follow player
+            g_genderModes.erase(id);  // 0 (or invalid) = follow player
         }
         // WriteJson's trailing WriteCarrierManifest picks up the flip: the
         // manifest resolves content NIFs by effective sex (P2 fix), so a
@@ -1614,10 +1631,16 @@ namespace CostumeFW
         if (a_id.empty()) {
             return false;
         }
+        std::string id = a_id;
+        CanonicalizeColonId(id);  // ROOT D
         if (a_on) {
-            g_bodyMorphOn.insert(a_id);
+            if (ContentHolder(id).empty()) {  // ROOT E [1498]: no orphan bodyMorph entries
+                SKSE::log::warn("morph: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            g_bodyMorphOn.insert(id);
         } else {
-            g_bodyMorphOn.erase(a_id);
+            g_bodyMorphOn.erase(id);
         }
         WriteJson();
         return true;
@@ -2271,8 +2294,12 @@ namespace CostumeFW
         if (!player) {
             return;
         }
+        const bool cefOn = CefEnabled();  // ROOT G: master switch gates box abilities too
         for (const auto& b : g_boxes) {
-            const bool worn = TokenWorn(b.token);
+            // With CEF disabled nothing is injected, so a worn token must not still
+            // grant its contents' enchant/armor effects (only the persist spell was
+            // gated before - border audit [2161]).
+            const bool worn = cefOn && TokenWorn(b.token);
             // Synthesized ENCHANT ability (armor/weight are on the token's fields).
             SyncSpell(player, BoxAbilityFor(b), worn);
             // Optional manual extra ability (dormant unless set in json).

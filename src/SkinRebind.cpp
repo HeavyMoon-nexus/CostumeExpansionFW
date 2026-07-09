@@ -1512,6 +1512,25 @@ namespace CostumeFW
             SKSE::log::error("hair PoC: player has no actor base");
             return false;
         }
+        // ROOT E [1496]: ChangeHeadPart REPLACES the same-type part and is save-
+        // persistent (like RaceMenu). Restrict this debug lever to Hair so it can't
+        // irreversibly swap the player's face/eyes, and log the displaced hair's
+        // FormID so it can be re-applied to revert.
+        if (hdpt->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
+            SKSE::log::error("hair PoC: refusing - {:X}:{} is head-part type {} (Hair only)",
+                localID, plugin, static_cast<int>(hdpt->type.get()));
+            if (auto* console = RE::ConsoleLog::GetSingleton()) {
+                console->Print("CostumeFW: cef hair refused - not a Hair head part");
+            }
+            return false;
+        }
+        for (std::int32_t i = 0; i < base->numHeadParts; ++i) {
+            auto* cur = base->headParts ? base->headParts[i] : nullptr;
+            if (cur && cur->type.get() == RE::BGSHeadPart::HeadPartType::kHair) {
+                SKSE::log::info("hair PoC: displacing current hair '{}' ({:08X}) - re-apply it or reload to revert",
+                    cur->GetFormEditorID(), cur->GetFormID());
+            }
+        }
         SKSE::log::info("hair PoC: ChangeHeadPart -> editorID='{}' type={} model='{}'",
             hdpt->GetFormEditorID(), static_cast<int>(hdpt->type.get()),
             hdpt->model.c_str());
@@ -1715,8 +1734,19 @@ namespace CostumeFW
             const std::string left = line.substr(0, colon);
             const std::string plugin = line.substr(colon + 1);
             const bool hex = left.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
-            if (hex && plugin.size() > 4) {
-                const auto localID = static_cast<std::uint32_t>(std::stoul(left, nullptr, 16));
+            if (hex && !left.empty() && left.size() <= 8 && plugin.size() > 4) {
+                std::uint32_t localID = 0;
+                try {
+                    localID = static_cast<std::uint32_t>(std::stoul(left, nullptr, 16));
+                } catch (...) {
+                    // ROOT E [1699]: an over-long hex prefix threw std::out_of_range
+                    // inside this main-thread task and hard-crashed the game.
+                    SKSE::log::error("test inject: bad FormID hex '{}'", left);
+                    if (auto* console = RE::ConsoleLog::GetSingleton()) {
+                        console->Print("CostumeFW: bad FormID in test txt");
+                    }
+                    return;
+                }
                 const bool ok = InjectArma(localID, plugin, "test");
                 if (auto* console = RE::ConsoleLog::GetSingleton()) {
                     console->Print(ok ? "CostumeFW: injected (ARMA)" : "CostumeFW: inject FAILED (see log)");
