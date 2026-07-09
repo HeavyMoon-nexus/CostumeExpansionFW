@@ -505,9 +505,39 @@ namespace CostumeFW
 
         bool CarrierFileOnDisk(const std::string& a_file)
         {
+            // ROOT F (border audit 2026-07-09): carriers.json is disk-editable and
+            // externally written, so validate BOTH the path and the file before a
+            // live ARMA/HDPT model is repointed at it. Reject traversal / absolute /
+            // UNC / non-.nif paths and truncated-or-non-NIF files - fall back to the
+            // ESP-default carrier rather than feed the engine's skin loader a bad
+            // model (a wrong/garbage NIF can render junk geometry or, for the
+            // NiTriShape / zero-vertex class, divide-by-zero CTD).
+            if (a_file.size() < 4 || a_file.find("..") != std::string::npos ||
+                a_file.find(':') != std::string::npos) {
+                return false;
+            }
+            if (a_file[0] == '\\' || a_file[0] == '/') {
+                return false;  // absolute / UNC (a meshes-relative path never leads with a slash)
+            }
+            if (::_strnicmp(a_file.c_str() + (a_file.size() - 4), ".nif", 4) != 0) {
+                return false;
+            }
             std::string diskPath = "Data\\meshes\\" + a_file;
             std::replace(diskPath.begin(), diskPath.end(), '/', '\\');
-            return std::ifstream(diskPath).good();
+            std::ifstream f(diskPath, std::ios::binary);
+            if (!f) {
+                return false;
+            }
+            // NIF header magic ("Gamebryo File Format" / "NetImmerse File Format")
+            // catches a truncated slot file or a non-NIF path substituted by hand.
+            char buf[24]{};
+            f.read(buf, sizeof(buf));
+            if (f.gcount() < static_cast<std::streamsize>(sizeof(buf))) {
+                return false;
+            }
+            const std::string_view head(buf, sizeof(buf));
+            return head.find("Gamebryo") != std::string_view::npos ||
+                   head.find("NetImmerse") != std::string_view::npos;
         }
 
         // Repoint + registration reconcile for the persist head-carrier pool.
@@ -656,11 +686,9 @@ namespace CostumeFW
                 // worn token can't load a missing/stale path. The carriers.json path
                 // is meshes-relative; it resolves through MO2's VFS like our other
                 // relative reads.
-                std::string diskPath = "Data\\meshes\\" + file;
-                std::replace(diskPath.begin(), diskPath.end(), '/', '\\');
-                if (!std::ifstream(diskPath).good()) {
+                if (!CarrierFileOnDisk(file)) {
                     SKSE::log::warn(
-                        "carrier override: slot {} carrier '{}' missing on disk - keeping ESP default",
+                        "carrier override: slot {} carrier '{}' missing/invalid on disk - keeping ESP default",
                         key, file);
                     continue;
                 }

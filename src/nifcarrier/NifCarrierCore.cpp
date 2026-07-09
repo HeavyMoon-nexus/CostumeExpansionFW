@@ -2290,8 +2290,13 @@ namespace nifcarrier {
                 const std::string mergedXmlRel = "meshes\\CostumeFW\\XML\\Box" + slotStr + "_physics.xml";
                 const auto hashPath = carrierDir / ("Box" + slotStr + "_carrier.hash");
 
-                const int declared = box.contains("contents") ? static_cast<int>(box["contents"].size()) : 0;
-                auto smp = ResolveSmpContents(box["contents"], opts.dataRoots, tag,
+                // ROOT F [2294]: box["contents"] is a const operator[] - UB on a
+                // missing key. The persist loop guards with .contains; match it here.
+                const nlohmann::json kEmptyContents = nlohmann::json::array();
+                const nlohmann::json& contentsRef =
+                    box.contains("contents") ? box.at("contents") : kEmptyContents;
+                const int declared = static_cast<int>(contentsRef.size());
+                auto smp = ResolveSmpContents(contentsRef, opts.dataRoots, tag,
                     "; box built from the rest", nullptr, res.log);
 
                 const auto ensurePool = [&]() {
@@ -2429,7 +2434,13 @@ namespace nifcarrier {
                     const auto sx = SetXml(carrierPath, slotNifDisk, slotXmlRel);
                     res.log += sx.log;
                     if (!sx.ok) {
-                        Log(res.log, "%s WARNING slot carrier setxml failed", tag.c_str());
+                        // ROOT F [2431]: a failed SetXml left the rotation slot stale/
+                        // half-written, yet the rev was still bumped and carriers.json
+                        // repointed at it. Treat it like the sibling copy failures -
+                        // fail this box and keep the previous carrier (rev NOT bumped).
+                        ++res.failed;
+                        Log(res.log, "%s FAILED slot carrier setxml - revision NOT bumped", tag.c_str());
+                        continue;
                     }
                 } else {
                     if (!CopyOverwrite(carrierPath, slotNifDisk)) {
