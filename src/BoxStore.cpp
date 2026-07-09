@@ -246,7 +246,12 @@ namespace CostumeFW
             if (!a_file) {
                 return false;
             }
-            return a_file->GetFilename() == kTokenPlugin;
+            // CEF's own records live in CostumeFW.esp and any CostumeFW_* dev patch
+            // (e.g. CostumeFW_VanillaSlots_001.esp = F1 vanilla-slot tokens, folded
+            // into CostumeFW.esp at release). Prefix match so a not-yet-folded patch's
+            // tokens are still recognized as ours.
+            const auto name = a_file->GetFilename();
+            return name.size() >= 9 && ::_strnicmp(name.data(), "CostumeFW", 9) == 0;
         }
 
         // Build the project's colon-form id "XXXXXX:Plugin.esp" from a form: its
@@ -2551,20 +2556,10 @@ namespace CostumeFW
             return false;
         }
         const std::string_view plugin(a_id.data() + colon + 1, a_id.size() - colon - 1);
-        // CEF's own records ship in CostumeFW.esp (post-merge) or the two pre-merge
-        // plugins. Case-insensitive (Skyrim plugin names are).
-        constexpr std::string_view kCefPlugins[] = {
-            "CostumeFW.esp",
-            "CostumeFW_Boxes.esp",
-            "CostumeFW_Boxes_FSMPCarrier_001.esp",
-        };
-        for (const auto n : kCefPlugins) {
-            if (plugin.size() == n.size() &&
-                ::_strnicmp(plugin.data(), n.data(), n.size()) == 0) {
-                return true;
-            }
-        }
-        return false;
+        // Any CEF plugin: CostumeFW.esp (post-merge), the two pre-merge plugins, or a
+        // CostumeFW_* dev patch (F1 vanilla-slot tokens). All start "CostumeFW";
+        // costume CONTENT mods never do. Prefix match, case-insensitive.
+        return plugin.size() >= 9 && ::_strnicmp(plugin.data(), "CostumeFW", 9) == 0;
     }
 
     std::string ContentHolder(const std::string& a_content)
