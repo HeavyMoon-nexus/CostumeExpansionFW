@@ -67,6 +67,7 @@ int[]    _persistGenderOpts ; per-content "Body" menu (persist page)
 int      _contentPage       ; F2: current contents page index within a box page
 int      _contentPrevOpt    ; "< Prev contents" nav option (-1 when absent)
 int      _contentNextOpt    ; "Next contents >" nav option (-1 when absent)
+int      _curBoxSlot        ; ROOT I: the open box page's STABLE biped slot (index re-resolve)
 string[] _freeTokenIds      ; ids parallel to the open "new box" slot menu
 string[] _presetFilesCache  ; files parallel to the open "assign preset" menu
 
@@ -449,6 +450,7 @@ function ResetSingleBoxPage(int a_idx)
 
     string token = CFW_Native.GetBoxToken(a_idx)
     int slot = CFW_Native.GetTokenSlot(token)
+    _curBoxSlot = slot   ; ROOT I: remember the stable slot for index re-resolution
     string[] contents = CFW_Native.GetBoxContents(a_idx)
     int total = contents.Length
     int pageSize = 24
@@ -698,6 +700,7 @@ event OnOptionSelect(int a_option)
     endIf
 
     ; --- Boxes (single-box page: box index is _curBoxIndex) ---
+    RefreshCurBoxIndex()   ; ROOT I: re-resolve from the stable slot before acting
     int k = _distribOpts.Find(a_option)
     if k >= 0
         ToggleDistribute(a_option, _curBoxIndex)
@@ -842,6 +845,18 @@ function ReturnDroppedContents(string[] aOld, string[] aNew, bool aPersist, stri
         endIf
         i += 1
     endWhile
+endFunction
+
+; ROOT I: re-resolve _curBoxIndex from the box page's STABLE biped slot, so a live
+; handler acts on the right box even if an external box add/remove shifted g_boxes
+; since the page was rendered (OnPageReset is slot-stable; the handlers were not).
+function RefreshCurBoxIndex()
+    if _curBoxSlot > 0
+        int idx = CFW_Native.GetBoxBySlot(_curBoxSlot)
+        if idx >= 0
+            _curBoxIndex = idx
+        endIf
+    endIf
 endFunction
 
 ; The box index currently bound to a token ("" / unknown -> -1).
@@ -1097,6 +1112,7 @@ event OnOptionMenuAccept(int a_option, int a_index)
     endIf
 
     ; --- Box "+ Add worn item" / "+ Add from inventory" capture ---
+    RefreshCurBoxIndex()   ; ROOT I: re-resolve the box index from its stable slot
     int k = _addWornOpts.Find(a_option)
     int capBoxIdx = -1
     if k >= 0
@@ -1111,7 +1127,7 @@ event OnOptionMenuAccept(int a_option, int a_index)
         if a_index < 0 || a_index >= _wornIdsCache.Length
             return
         endIf
-        int boxIdx = capBoxIdx
+        int boxIdx = _curBoxIndex   ; ROOT I: re-resolved (was capBoxIdx, index could shift)
         string token = CFW_Native.GetBoxToken(boxIdx)
         string contentId = _wornIdsCache[a_index]
 

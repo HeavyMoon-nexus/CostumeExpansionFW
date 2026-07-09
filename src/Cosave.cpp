@@ -29,6 +29,13 @@ namespace CostumeFW
         constexpr std::uint32_t kMaxStringLen = 1024;
         constexpr std::uint32_t kMaxItemCount = 4096;
 
+        // ROOT H (border audit 2026-07-09): persist ids that FAILED to resolve at
+        // this session's load (a content mod was temporarily disabled). Re-serialized
+        // on save so a temporary disable doesn't permanently erase the per-save
+        // activation - the next load with the mod back re-registers them. Rebuilt each
+        // load; cleared on revert.
+        std::vector<std::string> g_unresolvedActives;
+
         bool ReadStringChecked(SKSE::SerializationInterface* a_intfc, std::string& a_out)
         {
             std::uint32_t len = 0;
@@ -54,17 +61,25 @@ namespace CostumeFW
                 SKSE::log::error("cosave: OpenRecord failed");
                 return;
             }
-            const auto count = static_cast<std::uint32_t>(persist.size());
+            const auto count = static_cast<std::uint32_t>(persist.size() + g_unresolvedActives.size());
             a_intfc->WriteRecordData(count);
             for (const auto& it : persist) {
                 WriteString(a_intfc, it.id);
                 WriteString(a_intfc, it.tokenId);  // always empty here (persist)
             }
-            SKSE::log::info("cosave: saved {} persist item(s)", count);
+            // ROOT H: carry this session's unresolved actives so a temporary content-mod
+            // disable does not silently erase them from the save.
+            for (const auto& id : g_unresolvedActives) {
+                WriteString(a_intfc, id);
+                WriteString(a_intfc, "");  // persist (token-less)
+            }
+            SKSE::log::info("cosave: saved {} persist item(s) ({} unresolved carried)",
+                count, g_unresolvedActives.size());
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intfc)
         {
+            g_unresolvedActives.clear();  // ROOT H: rebuilt from this load's failures
             std::uint32_t type = 0;
             std::uint32_t version = 0;
             std::uint32_t length = 0;
@@ -90,6 +105,11 @@ namespace CostumeFW
                                                      : RegisterBoxById(id, tokenId);
                     if (ok) {
                         ++restored;
+                    } else if (tokenId.empty()) {
+                        // ROOT H: keep an unresolved persist id (its content mod may be
+                        // temporarily off) so the next save doesn't erase it.
+                        g_unresolvedActives.push_back(id);
+                        SKSE::log::warn("cosave: '{}' unresolved - carried for next save", id);
                     } else {
                         SKSE::log::warn("cosave: could not restore '{}'", id);
                     }
@@ -109,6 +129,7 @@ namespace CostumeFW
         void RevertCallback(SKSE::SerializationInterface*)
         {
             ClearRegistry();
+            g_unresolvedActives.clear();
             SKSE::log::info("cosave: reverted (registry cleared)");
         }
     }
