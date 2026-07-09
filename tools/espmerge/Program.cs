@@ -37,6 +37,10 @@ internal static class Program
         @"K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW";
 
     private const string kOutName = "CostumeFW.esp";
+    // CONTRACT (border audit ROOT J): the runtime id-healer MigrateLegacyColonId
+    // (src/BoxStore.cpp) MUST mirror this disposition - it re-maps a pre-merge
+    // settings.json's colon-ids by the same +kRenumberOffset for patch-new records
+    // and drops kDropPatchIds (leaving them unhealed). Change both sides together.
     private const uint kRenumberOffset = 0x100;   // patch-new 0x8xx -> 0x9xx
     private const uint kMcmQuestLocalId = 0x802;  // CFW_MCMQuest (StartGameEnabled)
 

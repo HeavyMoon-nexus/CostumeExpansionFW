@@ -282,8 +282,26 @@ namespace CostumeFW
                 return true;
             }
             if (endsWithCI(a_id, kOldPatch)) {
-                const auto lid = static_cast<std::uint32_t>(std::strtoul(
-                    a_id.substr(0, a_id.size() - kOldPatch.size()).c_str(), nullptr, 16));
+                const std::string prefix = a_id.substr(0, a_id.size() - kOldPatch.size());
+                // ROOT B [285]: require a valid 1-6 digit hex prefix. A garbage prefix
+                // used to be silently rewritten to the fabricated id "000100".
+                const bool okHex = !prefix.empty() && prefix.size() <= 6 &&
+                    prefix.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+                if (!okHex) {
+                    SKSE::log::warn("settings: unparseable legacy patch id '{}' - left as-is", a_id);
+                    return false;
+                }
+                const auto lid = static_cast<std::uint32_t>(std::strtoul(prefix.c_str(), nullptr, 16));
+                // ROOT J: mirror espmerge's disposition (tools/espmerge Program.cs).
+                // The PoC records 0x806-0x808 were DROPPED (kDropPatchIds), so they
+                // have no +0x100 image - leave such an id unhealed so it fails to
+                // resolve and is dropped, instead of fabricating a dangling 000906.
+                // Every OTHER patch-new record was renumbered +0x100 (kRenumberOffset).
+                // Keep this in lockstep with espmerge if those constants ever change.
+                if (lid == 0x806u || lid == 0x807u || lid == 0x808u) {
+                    SKSE::log::warn("settings: legacy PoC id '{}' was dropped by the merge - not healing", a_id);
+                    return false;
+                }
                 char buf[8]{};
                 std::snprintf(buf, sizeof(buf), "%06X", lid + 0x100u);
                 a_id = std::string(buf) + ":" + std::string(kTokenPlugin);
