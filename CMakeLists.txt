@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # The project name becomes the name of the produced SKSE .dll.
-project(CostumeExpansionFW VERSION 1.2.1 LANGUAGES CXX)
+project(CostumeExpansionFW VERSION 1.3.0 LANGUAGES CXX)
 
 # --- Optional auto-deploy --------------------------------------------------
 # If SKYRIM_MODS_FOLDER is set, the built .dll is copied to
@@ -53,6 +53,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/Preset.cpp
     src/LoreBox.cpp
     src/NifCarrierBridge.cpp
+    src/SmfUI.cpp
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json nifcarrier_core)

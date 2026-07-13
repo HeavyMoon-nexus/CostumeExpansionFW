@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 19 autoReadonly
+int property CURRENT_VERSION = 22 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -29,6 +29,7 @@ string[] _persistRemoveContents
 string[] _persistWornIdsCache
 int[]    _persistActiveOpts   ; per-catalog-entry "active on this save" toggle (M2)
 int[]    _persistMorphOpts    ; per-catalog-entry body-morph toggle
+int[]    _persistHideBodyOpts ; per-catalog-entry hide-bundled-body toggle
 int[]    _persistUncatOpts    ; active-but-not-in-catalog [deactivate] rows (M2)
 string[] _persistUncatIds
 
@@ -48,9 +49,16 @@ int[]    _deleteOpts
 string[] _deleteTokens
 int[]    _removeOpts
 int[]    _hideOpts
-int[]    _morphOpts          ; per-content body-morph toggle (single box page)
+int[]    _morphOpts          ; RIGHT panel body-morph toggle (index 0 = selected content)
 string[] _removeTokens
-string[] _removeContents
+string[] _removeContents      ; index 0 = the content shown in the right detail panel
+string   _selectedContent     ; content-id whose detail fills the right column (box page)
+int[]    _contentSelectOpts   ; LEFT column content list (click to select for the right panel)
+string[] _contentSelectIds
+int[]    _shapeOpts           ; RIGHT panel per-shape hide toggles
+string[] _shapeNames          ; parallel raw NIF shape names
+int      _scanShapesOpt = -1  ; RIGHT panel "scan shapes" button (-1 when absent)
+int      _realBodyOpt = -1    ; RIGHT panel "show real body" toggle (-1 when absent)
 int[]    _distribOpts
 string[] _distribTokens
 int[]    _armorTypeOpts
@@ -110,6 +118,7 @@ function SetupConfig()
     _persistWornIdsCache   = new string[1]
     _persistActiveOpts     = new int[1]
     _persistMorphOpts      = new int[1]
+    _persistHideBodyOpts   = new int[1]
     _persistUncatOpts      = new int[1]
     _persistUncatIds       = new string[1]
     _equipOpts     = new int[1]
@@ -125,6 +134,10 @@ function SetupConfig()
     _morphOpts      = new int[1]
     _removeTokens   = new string[1]
     _removeContents = new string[1]
+    _contentSelectOpts = new int[1]
+    _contentSelectIds  = new string[1]
+    _shapeOpts      = new int[1]
+    _shapeNames     = new string[1]
     _distribOpts    = new int[1]
     _distribTokens  = new string[1]
     _armorTypeOpts   = new int[1]
@@ -362,6 +375,7 @@ function ResetPersistPage()
         AddTextOption("(none - use + Add worn item)", "", OPTION_FLAG_DISABLED)
         _persistActiveOpts     = new int[1]
         _persistMorphOpts      = new int[1]
+        _persistHideBodyOpts   = new int[1]
         _persistGenderOpts     = new int[1]
         _persistRemoveOpts     = new int[1]
         _persistHideOpts       = new int[1]
@@ -369,6 +383,7 @@ function ResetPersistPage()
     else
         _persistActiveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistMorphOpts      = Utility.CreateIntArray(contents.Length, -1)
+        _persistHideBodyOpts   = Utility.CreateIntArray(contents.Length, -1)
         _persistGenderOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistHideOpts       = Utility.CreateIntArray(contents.Length, -1)
@@ -462,11 +477,12 @@ endFunction
 ; handlers that need the box index use _curBoxIndex.
 function ResetSingleBoxPage(int a_idx)
     SetCursorFillMode(TOP_TO_BOTTOM)
-    ; F2: paginate contents so a box with many items doesn't overflow SkyUI's
-    ; ~128-option page limit (each content renders 4 options). Switching to a
-    ; different box resets to the first content page.
+    ; Master-detail: LEFT column = box settings + a 1-row-per-content list (click a
+    ; content to select it); RIGHT column = the selected content's detail + its
+    ; per-shape hide toggles. Switching box resets the page + selection.
     if _curBoxIndex != a_idx
         _contentPage = 0
+        _selectedContent = ""
     endIf
     _curBoxIndex = a_idx
 
@@ -475,7 +491,14 @@ function ResetSingleBoxPage(int a_idx)
     _curBoxSlot = slot   ; ROOT I: remember the stable slot for index re-resolution
     string[] contents = CFW_Native.GetBoxContents(a_idx)
     int total = contents.Length
-    int pageSize = 24
+    ; Keep the current selection if it still belongs to this box; else pick the first
+    ; so the right panel is never empty when the box has contents.
+    if total > 0 && (_selectedContent == "" || contents.Find(_selectedContent) < 0)
+        _selectedContent = contents[0]
+    elseIf total == 0
+        _selectedContent = ""
+    endIf
+    int pageSize = 40   ; LEFT list is 1 row per content; F2 nav only for huge boxes
     int pageCount = 1
     if total > pageSize
         pageCount = (total + pageSize - 1) / pageSize
@@ -513,12 +536,16 @@ function ResetSingleBoxPage(int a_idx)
     _exportTokens  = Utility.CreateStringArray(1, token)
     _deleteOpts    = Utility.CreateIntArray(1, -1)
     _deleteTokens  = Utility.CreateStringArray(1, token)
-    _removeOpts     = Utility.CreateIntArray(arrN, -1)
-    _hideOpts       = Utility.CreateIntArray(arrN, -1)
-    _morphOpts      = Utility.CreateIntArray(arrN, -1)
-    _genderOpts     = Utility.CreateIntArray(arrN, -1)
-    _removeTokens   = Utility.CreateStringArray(arrN, "")
-    _removeContents = Utility.CreateStringArray(arrN, "")
+    _contentSelectOpts = Utility.CreateIntArray(arrN, -1)
+    _contentSelectIds  = Utility.CreateStringArray(arrN, "")
+    ; RIGHT-panel per-content controls are single (index 0 = _selectedContent), so
+    ; the existing _morphOpts/_genderOpts/_hideOpts/_removeOpts handlers still work.
+    _removeOpts     = Utility.CreateIntArray(1, -1)
+    _hideOpts       = Utility.CreateIntArray(1, -1)
+    _morphOpts      = Utility.CreateIntArray(1, -1)
+    _genderOpts     = Utility.CreateIntArray(1, -1)
+    _removeTokens   = Utility.CreateStringArray(1, token)
+    _removeContents = Utility.CreateStringArray(1, _selectedContent)
 
     AddHeaderOption(CFW_Native.GetItemName(token) + ": " + SlotName(slot))
     _distribOpts[0] = AddToggleOption("Distribute token", CFW_Native.GetBoxEnabled(a_idx))
@@ -540,23 +567,75 @@ function ResetSingleBoxPage(int a_idx)
     if pageCount > 1
         AddTextOption("  Page " + (_contentPage + 1) + " / " + pageCount, "", OPTION_FLAG_DISABLED)
         if _contentPage > 0
-            _contentPrevOpt = AddTextOption("  < Prev contents", "")
+            _contentPrevOpt = AddTextOption("  < Prev", "")
         endIf
         if _contentPage < pageCount - 1
-            _contentNextOpt = AddTextOption("  Next contents >", "")
+            _contentNextOpt = AddTextOption("  Next >", "")
         endIf
+    endIf
+    if total == 0
+        AddTextOption("  (empty - use + Add worn item)", "", OPTION_FLAG_DISABLED)
     endIf
     int ci = 0
     while ci < renderCount
         int idx = cStart + ci
-        _removeOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[idx]), "[remove]")
-        _morphOpts[ci] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[idx]))
-        _genderOpts[ci] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(contents[idx])))
-        _hideOpts[ci] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[idx]))
-        _removeTokens[ci] = token
-        _removeContents[ci] = contents[idx]
+        string mark = ""
+        if contents[idx] == _selectedContent
+            mark = "<"
+        endIf
+        _contentSelectOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[idx]), mark)
+        _contentSelectIds[ci] = contents[idx]
         ci += 1
     endWhile
+
+    ; ===== RIGHT column: the selected content's detail + per-shape hide =====
+    SetCursorPosition(1)
+    _scanShapesOpt = -1
+    _realBodyOpt = -1
+    if _selectedContent == ""
+        AddHeaderOption("Edit content")
+        AddTextOption("Select a content on the left.", "", OPTION_FLAG_DISABLED)
+        _shapeOpts  = Utility.CreateIntArray(1, -1)
+        _shapeNames = Utility.CreateStringArray(1, "")
+        return
+    endIf
+    AddHeaderOption(CFW_Native.GetItemName(_selectedContent))
+    _morphOpts[0]  = AddToggleOption("Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(_selectedContent))
+    _genderOpts[0] = AddMenuOption("Body (forced NIF)", GenderName(CFW_Native.GetContentGender(_selectedContent)))
+    _hideOpts[0]   = AddInputOption("Hide when worn (slots)", CFW_Native.GetHideSlots(_selectedContent))
+    _realBodyOpt   = AddToggleOption("Show real body under", CFW_Native.GetShowRealBody(_selectedContent))
+    _removeOpts[0] = AddTextOption("Remove from box", "[remove]")
+
+    string[] shapes = CFW_Native.GetContentShapes(_selectedContent)
+    AddHeaderOption("Hide shapes (" + shapes.Length + ")")
+    if shapes.Length == 0
+        CFW_Native.ScanContentShapes(_selectedContent)   ; fill the cache async for the next view
+        AddTextOption("Wear the box to list shapes,", "", OPTION_FLAG_DISABLED)
+        _scanShapesOpt = AddTextOption("or click here to scan now", "")
+        _shapeOpts  = Utility.CreateIntArray(1, -1)
+        _shapeNames = Utility.CreateStringArray(1, "")
+    else
+        _shapeOpts  = Utility.CreateIntArray(shapes.Length, -1)
+        _shapeNames = Utility.CreateStringArray(shapes.Length, "")
+        int si = 0
+        while si < shapes.Length
+            string entry = shapes[si]   ; "name|slot"
+            int bar = StringUtil.Find(entry, "|")
+            string sname = entry
+            string sslot = "-1"
+            if bar >= 0
+                sname = StringUtil.Substring(entry, 0, bar)
+                sslot = StringUtil.Substring(entry, bar + 1)
+            endIf
+            string label = sname
+            if sslot != "-1"
+                label = sname + " [slot " + sslot + "]"
+            endIf
+            _shapeOpts[si] = AddToggleOption(label, CFW_Native.GetHideShape(_selectedContent, sname))
+            _shapeNames[si] = sname
+            si += 1
+        endWhile
+    endIf
 endFunction
 
 ; -----------------------------------------------------------------------------
@@ -621,6 +700,7 @@ function ToggleBodyMorph(int a_option, string contentId)
     CFW_Native.SetBodyMorph(contentId, nowOn)
     SetToggleOptionValue(a_option, nowOn)
 endFunction
+
 
 ; -----------------------------------------------------------------------------
 ; Option handlers
@@ -720,9 +800,39 @@ event OnOptionSelect(int a_option)
         ToggleBodyMorph(a_option, _removeContents[p])
         return
     endIf
+    ; per-shape hide toggle (right detail panel)
+    p = _shapeOpts.Find(a_option)
+    if p >= 0
+        bool nowHidden = !CFW_Native.GetHideShape(_selectedContent, _shapeNames[p])
+        CFW_Native.SetHideShape(_selectedContent, _shapeNames[p], nowHidden)
+        SetToggleOptionValue(a_option, nowHidden)
+        return
+    endIf
+    if a_option == _realBodyOpt && _realBodyOpt != -1
+        bool nowRealBody = !CFW_Native.GetShowRealBody(_selectedContent)
+        if nowRealBody
+            ShowMessage("CostumeFW: Show real body ON. Injects your real (naked) body under this content - pair it with Hide shapes on the costume's body. On a box whose slot does NOT mask your body, your real body already shows, so this would DOUBLE it.", false)
+        endIf
+        CFW_Native.SetShowRealBody(_selectedContent, nowRealBody)
+        SetToggleOptionValue(a_option, nowRealBody)
+        return
+    endIf
 
     ; --- Boxes (single-box page: box index is _curBoxIndex) ---
     RefreshCurBoxIndex()   ; ROOT I: re-resolve from the stable slot before acting
+
+    ; content selection (left list) -> load its detail into the right column
+    p = _contentSelectOpts.Find(a_option)
+    if p >= 0
+        _selectedContent = _contentSelectIds[p]
+        ForcePageReset()
+        return
+    endIf
+    if a_option == _scanShapesOpt && _scanShapesOpt != -1
+        CFW_Native.ScanContentShapes(_selectedContent)
+        Debug.Notification("CostumeFW: scanning shapes - reopen this content to see them")
+        return
+    endIf
     int k = _distribOpts.Find(a_option)
     if k >= 0
         ToggleDistribute(a_option, _curBoxIndex)
@@ -767,6 +877,7 @@ event OnOptionSelect(int a_option)
     if k >= 0
         ReturnItem(CFW_Native.ResolveForm(_removeContents[k]))
         CFW_Native.RemoveBoxContent(_removeTokens[k], _removeContents[k])
+        _selectedContent = ""   ; the shown content is gone; rebuild picks a new one
         ForcePageReset()
         return
     endIf
@@ -792,12 +903,22 @@ string Function HolderLabel(string holder)
 endFunction
 
 ObjectReference Function GetStore()
+    ; P2 (SMF): the native layer owns + co-save-persists the hidden store now.
+    ; Prefer its container so both UIs share ONE custody home per save; the
+    ; PlaceAtMe below is only the first-ever-creation fallback (native adopts
+    ; it via SetStoreRef, first-wins).
+    ObjectReference nativeStore = CFW_Native.GetStoreRef()
+    if nativeStore
+        _store = nativeStore
+        return _store
+    endIf
     if _store == None
         Form base = Game.GetFormFromFile(0x00080D, "CostumeFW.esp")
         if base
             _store = Game.GetPlayer().PlaceAtMe(base)
             if _store
                 _store.Disable()
+                CFW_Native.SetStoreRef(_store)  ; adopt immediately (not just on next open)
             endIf
         endIf
     endIf
@@ -1406,6 +1527,12 @@ event OnOptionHighlight(int a_option)
         SetInfoText("Show this catalog item on THIS save. The catalog is shared; each save picks what it shows. No items are moved by this toggle.")
     elseIf _persistMorphOpts.Find(a_option) >= 0 || _morphOpts.Find(a_option) >= 0
         SetInfoText("Apply your RaceMenu body sliders to this mesh. ON only for BodySlide body-conforming meshes; keep OFF for hair/jewelry (memory cost).")
+    elseIf _shapeOpts.Find(a_option) >= 0
+        SetInfoText("Drop this shape from the costume. Hide the bundled body shape so it stops doubling your real BodySlide body while the garments stay.")
+    elseIf _contentSelectOpts.Find(a_option) >= 0
+        SetInfoText("Select this content to edit its settings and per-shape hide list in the right column.")
+    elseIf a_option == _realBodyOpt && _realBodyOpt != -1
+        SetInfoText("Inject your real (naked, morphed) body under this content. Use with Hide shapes on the costume's body so garments sit on your body. Doubles if your body already shows.")
     elseIf _persistUncatOpts.Find(a_option) >= 0
         SetInfoText("Active on this save but removed from the shared catalog elsewhere. Deactivate to stop showing it and get the item back.")
     elseIf a_option == _optAddInvPersist || _addInvOpts.Find(a_option) >= 0

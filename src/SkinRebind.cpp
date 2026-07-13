@@ -689,12 +689,57 @@ namespace CostumeFW
             return BodyMorphOn(a_id);
         }
 
+        // True if this skin is a costume's bundled body/hands/feet shape - a
+        // BSDismemberSkinInstance with a partition on biped slot 32/33/37. MUST be
+        // read BEFORE RebindGeometry neutralizes the partition slots to 61. Used
+        // to drop the shipped body so it does not double the player's real one.
+        // The first dismember biped slot of a skin (32 body / 33 hands / 37 feet /
+        // ...), or -1 if not a BSDismemberSkinInstance. Read BEFORE RebindGeometry
+        // neutralizes the partition slots to 61. Annotates a shape in the MCM list.
+        int ShapeSlot(RE::NiSkinInstance* a_skin)
+        {
+            // Same detection as RebindGeometry's neutralize path: only a
+            // BSDismemberSkinInstance carries biped-slot partitions.
+            const char* rtti = a_skin && a_skin->GetRTTI() ? a_skin->GetRTTI()->name : "";
+            if (std::string_view(rtti) != "BSDismemberSkinInstance") {
+                return -1;
+            }
+            auto* dsi = static_cast<RE::BSDismemberSkinInstance*>(a_skin);
+            auto& rd = dsi->GetRuntimeData();
+            return rd.numPartitions > 0 ? static_cast<int>(rd.partitions[0].slot) : -1;
+        }
+
+        // Find a non-empty "BODYTRI" NiStringExtraData anywhere in a subtree.
+        // BodySlide puts it on the NIF root, but some outfits carry it on a child
+        // node - and the caller also retries on the PRE-CLONE original, since
+        // extra data may not survive Clone(). (Codex 2026-07-11 morph root cause.)
+        RE::NiStringExtraData* FindBodyTri(RE::NiAVObject* a_root)
+        {
+            RE::NiStringExtraData* found = nullptr;
+            if (!a_root) {
+                return found;
+            }
+            RE::BSVisit::TraverseScenegraphObjects(a_root, [&](RE::NiAVObject* a_obj) {
+                if (auto* sed = a_obj->GetExtraData<RE::NiStringExtraData>("BODYTRI");
+                    sed && sed->value && *sed->value) {
+                    found = sed;
+                    return RE::BSVisit::BSVisitControl::kStop;
+                }
+                return RE::BSVisit::BSVisitControl::kContinue;
+            });
+            return found;
+        }
+
         // Inject onto one skeleton root (3D root). Returns true on attach.
         // a_applyMorph gates skee body morph (off for hair/head content, which
-        // must not receive body-slider deformation).
+        // must not receive body-slider deformation). a_hideShapes = the NIF shape
+        // names to DROP (per-content pick). a_cacheShapes: record this NIF's shapes
+        // into the MCM cache (true only for the primary/3p pass so 1p doesn't
+        // overwrite the full list with its partial one).
         bool InjectOnRoot(RE::NiAVObject* a_root3D, const std::string& a_relPath,
             const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap,
-            bool a_applyMorph)
+            bool a_applyMorph, const std::unordered_set<std::string>& a_hideShapes,
+            const std::string& a_id, bool a_cacheShapes)
         {
             if (!a_root3D) {
                 return false;
@@ -732,11 +777,22 @@ namespace CostumeFW
             // Collect the skinned geometry and rebind each to the live skeleton.
             // Bind/resolve against the live actor root (a_root3D), as skee does.
             std::vector<RE::NiPointer<RE::BSGeometry>> geoms;
+            std::vector<std::pair<std::string, int>> shapeList;  // every skinned shape, for the MCM cache
             bool ok = true;
             RE::BSVisit::TraverseScenegraphGeometries(clone.get(),
                 [&](RE::BSGeometry* a_geom) {
                     auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
                     if (skin) {
+                        const std::string sname = a_geom->name.c_str();
+                        // Record the shape (name + dismember slot, BEFORE
+                        // RebindGeometry neutralizes it) so the MCM can list it.
+                        shapeList.emplace_back(sname, ShapeSlot(skin.get()));
+                        // Per-shape hide: drop the shapes the user picked by name
+                        // (e.g. a costume's bundled body doubling the real body).
+                        if (!a_hideShapes.empty() && a_hideShapes.contains(sname)) {
+                            SKSE::log::info("  hideshape: skipping '{}' (id={})", sname, a_id);
+                            return RE::BSVisit::BSVisitControl::kContinue;
+                        }
                         if (!RebindGeometry(skin.get(), a_root3D)) {
                             ok = false;
                             return RE::BSVisit::BSVisitControl::kStop;
@@ -745,6 +801,9 @@ namespace CostumeFW
                     }
                     return RE::BSVisit::BSVisitControl::kContinue;
                 });
+            if (a_cacheShapes && !shapeList.empty()) {
+                SetContentShapes(a_id, shapeList);  // let the MCM list this content's shapes
+            }
 
             // Unresolved bones are now ancestor-remapped (not gated), so RebindGeometry
             // only fails on a corrupt skin (null source bone). NOT-SHOWN summaries:
@@ -769,6 +828,43 @@ namespace CostumeFW
                     p->DetachChild(g.get());
                 }
                 holder->AttachChild(g.get(), true);
+            }
+
+            // Preserve the BodySlide morph reference: RaceMenu's ApplyVertexDiff
+            // searches the node it is given for a "BODYTRI" NiStringExtraData and
+            // applies NOTHING if it's missing. Our bare-geometry holder drops the
+            // NIF's own nodes - so the injected mesh (body AND garments in the same
+            // .tri) never got morphed. Search the whole clone subtree; if cloning
+            // dropped the extra data, fall back to the pre-clone original (sharing
+            // the ref-counted object with the holder is safe - skee only reads it).
+            auto* bodyTri = FindBodyTri(clone.get());
+            if (!bodyTri) {
+                bodyTri = FindBodyTri(loaded.get());
+            }
+            if (bodyTri) {
+                const bool added = holder->AddExtraData(bodyTri);
+                SKSE::log::info("  BODYTRI '{}' -> holder ({})", bodyTri->value,
+                    added ? "carried" : "ADD FAILED");
+            } else {
+                // Diagnostic: list what extras the loader kept - if even the
+                // original root has none, the model DB stripped them (args issue).
+                const auto dumpExtras = [](const char* a_tag, RE::NiObjectNET* a_net) {
+                    if (!a_net) {
+                        return;
+                    }
+                    std::string names;
+                    const std::uint16_t n = a_net->GetExtraDataSize();
+                    for (std::uint16_t i = 0; i < n; ++i) {
+                        if (auto* e = a_net->GetExtraDataAt(i)) {
+                            names += e->name.c_str();
+                            names += ' ';
+                        }
+                    }
+                    SKSE::log::info("  BODYTRI: none on {} (root extras: {})", a_tag,
+                        names.empty() ? std::string("<none>") : names);
+                };
+                dumpExtras("clone", clone.get());
+                dumpExtras("loaded", loaded.get());
             }
 
             attachRoot->AttachChild(holder, true);
@@ -806,6 +902,11 @@ namespace CostumeFW
             const bool applyMorph = ShouldApplyBodyMorph(a_id);
             SKSE::log::info("  bodymorph gate '{}' -> {}",
                 a_id, applyMorph ? "apply (opted in)" : "SKIP (not opted in)");
+            const auto hideList = HideShapesFor(a_id);
+            const std::unordered_set<std::string> hideShapes(hideList.begin(), hideList.end());
+            if (!hideShapes.empty()) {
+                SKSE::log::info("  hideshape gate '{}' -> dropping {} shape(s)", a_id, hideShapes.size());
+            }
 
             bool any = false;
             g_injectStatic3p = false;
@@ -818,7 +919,7 @@ namespace CostumeFW
             std::vector<RE::NiPointer<RE::NiAVObject>> collected;
             g_boneRefSink = &collected;
             if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
-                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap, applyMorph);
+                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap, applyMorph, hideShapes, a_id, true);
             }
             if (g_injectStatic3p) {
                 // This item's 3p rebind fell to the static fallback - the carrier
@@ -826,7 +927,7 @@ namespace CostumeFW
                 RequestRebindRetry(a_id);
             }
             if (auto* root1p = player->Get3D(true); root1p && !a_m1p.nifPath.empty()) {
-                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap, applyMorph);
+                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap, applyMorph, hideShapes, a_id, false);
             }
             g_boneRefSink = nullptr;
             if (!collected.empty()) {
@@ -835,6 +936,221 @@ namespace CostumeFW
             }
             if (!any) {
                 SKSE::log::warn("InjectInternal: nothing attached for id='{}'", a_id);
+            }
+            return any;
+        }
+
+        // --- Substitute body (dual injection, HANDOVER §8.4 strategy 2) ----------
+        bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
+            ModelRef& a_out3p, ModelRef& a_out1p);  // fwd (defined below)
+
+        constexpr const char* kRealBodyNode = "CEF_RealBody";
+
+        void DetachRealBody()
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player) {
+                return;
+            }
+            for (int fp = 0; fp <= 1; ++fp) {
+                if (auto* root = player->Get3D(fp != 0)) {
+                    if (auto* n = root->GetObjectByName(kRealBodyNode)) {
+                        if (auto* p = n->parent) {
+                            p->DetachChild(n);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pick the BODY (slot-32) addon from a skin ARMO's armature for the player's
+        // race - not the first race-matching addon (which may be hands/feet/genital;
+        // 2026-07-10 TNG's skin gave femalehands). Prefers an exact race match among
+        // body addons, else any body addon. nullptr if the skin has no body addon.
+        // a_raceMatched (optional) reports whether the returned addon actually
+        // covers a_race (RNAM/additionalRaces) - the engine only RENDERS a skin
+        // addon whose race matches, so callers adopting a non-default skin gate
+        // on it (the anyBody fallback is leniency the engine does not share).
+        RE::TESObjectARMA* PickBodyAddon(RE::TESObjectARMO* a_armo, RE::TESRace* a_race,
+            bool* a_raceMatched = nullptr)
+        {
+            if (a_raceMatched) {
+                *a_raceMatched = false;
+            }
+            if (!a_armo) {
+                return nullptr;
+            }
+            const auto isBody = [](RE::TESObjectARMA* aa) {
+                return (static_cast<std::uint32_t>(aa->GetSlotMask()) &
+                        static_cast<std::uint32_t>(RE::BGSBipedObjectForm::BipedObjectSlot::kBody)) != 0;
+            };
+            RE::TESObjectARMA* anyBody = nullptr;
+            for (auto* aa : a_armo->armorAddons) {
+                if (!aa || !isBody(aa)) {
+                    continue;
+                }
+                if (!anyBody) {
+                    anyBody = aa;
+                }
+                if (aa->race == a_race) {
+                    if (a_raceMatched) {
+                        *a_raceMatched = true;
+                    }
+                    return aa;
+                }
+                for (auto* extra : aa->additionalRaces) {
+                    if (extra == a_race) {
+                        if (a_raceMatched) {
+                            *a_raceMatched = true;
+                        }
+                        return aa;
+                    }
+                }
+            }
+            return anyBody;
+        }
+
+        // True if the addon carries ANY sex's 3P biped model path (the injection
+        // falls back across sexes, so one non-empty model makes it usable).
+        bool HasBodyModel(RE::TESObjectARMA* a_aa)
+        {
+            if (!a_aa) {
+                return false;
+            }
+            for (int s = 0; s < static_cast<int>(RE::SEXES::kTotal); ++s) {
+                if (const char* m = a_aa->bipedModels[s].model.c_str(); m && *m) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Apply a skin TXST to EVERY shape under an injected holder node (a naked
+        // body NIF's shapes are all skin). The engine layers the ARMA's per-sex
+        // skin texture set (NAM0/NAM1) over whatever the body NIF references -
+        // TXST-only alternate skins (RaceMenu Selector of Skins' skin02-04 share
+        // the vanilla mesh and differ ONLY by texture set) rely on that. Without
+        // this the injected copy keeps the NIF's baked-in texture paths. Also runs
+        // on the idempotent already-attached path, so a TXST-only skin change
+        // converges without waiting for a 3D rebuild.
+        void ApplySkinTextures(RE::NiAVObject* a_root3D, const char* a_nodeName,
+            RE::BGSTextureSet* a_txst)
+        {
+            auto* holder = a_root3D ? a_root3D->GetObjectByName(a_nodeName) : nullptr;
+            if (!holder || !a_txst) {
+                return;
+            }
+            int applied = 0;
+            RE::BSVisit::TraverseScenegraphGeometries(holder,
+                [&](RE::BSGeometry* a_geom) {
+                    if (ApplyTextureSet(a_geom, a_txst)) {
+                        ++applied;
+                    }
+                    return RE::BSVisit::BSVisitControl::kContinue;
+                });
+            if (applied > 0) {
+                SKSE::log::info("realbody: skin TXST {:08X} -> {} shape(s)",
+                    a_txst->GetFormID(), applied);
+            }
+        }
+
+        // Inject the player's real (naked) skin body (slot 32) under a dedicated,
+        // idempotent node so a costume whose own body shape is hidden shows the
+        // player's morphed body instead of nothing. Morph ON. No-op if the skin
+        // can't be resolved. Main thread only (called from Reconcile).
+        bool InjectRealBody()
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player) {
+                return false;
+            }
+            // Engine-faithful skin resolution with a CONSERVATIVE adoption guard.
+            // The engine renders the actor-base skin (WNAM - what SetSkin-style
+            // mods write) over the race skin, so prefer it here - but adopt it
+            // ONLY when the engine itself would render it on the naked player:
+            // it must yield a slot-32 body addon that (a) race-matches the player
+            // (the engine skips race-mismatched skin ARMAs; RNAM/additionalRaces)
+            // and (b) carries a real model. Anything less - keyword-only TNG/SOS
+            // tag skins with no body ARMA (2026-07-10: TNG_Skin_B08 injected an
+            // empty body), race-mismatched ARMAs, empty models - falls through to
+            // the race skin, which is byte-identical to the pre-2026-07-12 path
+            // (anyBody leniency included). The addon's model is resolved directly
+            // below (it may be a runtime form with no round-trippable lid/plugin).
+            auto* base = player->GetActorBase();
+            auto* race = player->GetRace();
+            RE::TESObjectARMO* skin = nullptr;
+            RE::TESObjectARMA* bodyAA = nullptr;
+            const char* skinSrc = "race";  // logged: WHICH chain the skin came from
+                                           // (EDIDs are usually empty at runtime)
+            if (RE::TESObjectARMO* baseSkin = base ? base->skin : nullptr) {
+                bool raceMatched = false;
+                RE::TESObjectARMA* baseAA = PickBodyAddon(baseSkin, race, &raceMatched);
+                if (baseAA && raceMatched && HasBodyModel(baseAA)) {
+                    skin = baseSkin;
+                    bodyAA = baseAA;
+                    skinSrc = "base";
+                } else {
+                    const char* why = !baseAA          ? "no slot-32 body addon"
+                                      : !raceMatched   ? "no race-matched body addon"
+                                                       : "body addon has no model";
+                    SKSE::log::info("realbody: base skin {:08X} not adopted ({}) - using race skin",
+                        baseSkin->GetFormID(), why);
+                }
+            }
+            if (!bodyAA) {
+                skin = race ? race->skin : nullptr;
+                bodyAA = PickBodyAddon(skin, race);
+            }
+            if (!skin) {
+                SKSE::log::warn("realbody: no skin ARMO on player");
+                return false;
+            }
+            if (!bodyAA) {
+                SKSE::log::warn("realbody: skin '{}' has no slot-32 body addon",
+                    skin->GetFormEditorID() ? skin->GetFormEditorID() : "?");
+                return false;
+            }
+            const RE::SEX reqSex = base ? base->GetSex() : RE::SEX::kMale;
+            RE::SEX sex = reqSex;
+            RE::TESModelTextureSwap* mm3 = &bodyAA->bipedModels[sex];
+            RE::TESModelTextureSwap* mm1 = &bodyAA->bipedModel1stPersons[sex];
+            if (!mm3->model.c_str() || !*mm3->model.c_str()) {  // requested sex has no model
+                const RE::SEX other = (sex == RE::SEXES::kMale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
+                if (const char* on = bodyAA->bipedModels[other].model.c_str(); on && *on) {
+                    sex = other;
+                    mm3 = &bodyAA->bipedModels[other];
+                    mm1 = &bodyAA->bipedModel1stPersons[other];
+                }
+            }
+            const char* nif3 = mm3->model.c_str();
+            if (!nif3 || !*nif3) {
+                SKSE::log::warn("realbody: body addon {:08X} has no model", bodyAA->GetFormID());
+                return false;
+            }
+            const char* nif1 = mm1->model.c_str();
+            ModelRef m3p{ nif3, mm3 };
+            ModelRef m1p = (nif1 && *nif1) ? ModelRef{ nif1, mm1 } : m3p;
+            SKSE::log::info("realbody: skin '{}' ({:08X}, {}) body addon {:08X} sex={} model3p='{}'",
+                skin->GetFormEditorID() ? skin->GetFormEditorID() : "?", skin->GetFormID(),
+                skinSrc, bodyAA->GetFormID(), sex == RE::SEXES::kFemale ? "F" : "M", m3p.nifPath);
+            // The addon's per-sex skin texture set - follow the (possibly
+            // fallen-back) model sex so the TXST matches the mesh's UVs. Null =
+            // the NIF's own textures stand.
+            RE::BGSTextureSet* skinTx = bodyAA->skinTextures[sex];
+            static const std::unordered_set<std::string> kNoHide;
+            bool any = false;
+            if (auto* root3p = player->Get3D(false); root3p && !m3p.nifPath.empty()) {
+                any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
+                    m3p.swap, true, kNoHide, "realbody", false);
+                ApplySkinTextures(root3p, kRealBodyNode, skinTx);
+            }
+            if (auto* root1p = player->Get3D(true); root1p && !m1p.nifPath.empty()) {
+                any |= InjectOnRoot(root1p, StripMeshesPrefix(m1p.nifPath), kRealBodyNode,
+                    m1p.swap, true, kNoHide, "realbody", false);
+                ApplySkinTextures(root1p, kRealBodyNode, skinTx);
+            }
+            if (any) {
+                SKSE::log::info("realbody: injected player body addon {:08X}", bodyAA->GetFormID());
             }
             return any;
         }
@@ -1064,6 +1380,7 @@ namespace CostumeFW
         auto* player = RE::PlayerCharacter::GetSingleton();
         const bool cefOn = CefEnabled();  // master off (Main page) -> hide everything
         SKSE::log::info("Reconcile: {} active item(s) (cef enabled={})", g_active.size(), cefOn);
+        bool anyRealBody = false;   // set if a shown content wants the real body under it
         for (auto& it : g_active) {
             // master off -> hide; else persist (tokenForm 0) always shows, a box
             // item shows only while its token is worn.
@@ -1124,9 +1441,20 @@ namespace CostumeFW
                     }
                 }
                 InjectInternal(it.id, it.m3p, it.m1p);
+                if (ShowRealBodyOn(it.id)) {
+                    anyRealBody = true;
+                }
             } else {
                 DetachNodes(it.id);
             }
+        }
+        // Substitute body (dual injection, HANDOVER §8.4 strategy 2): when a shown
+        // content opted in, inject the player's real skin body (paired with
+        // hideShapes dropping the costume's own body); else remove it.
+        if (anyRealBody) {
+            InjectRealBody();
+        } else {
+            DetachRealBody();
         }
     }
 
@@ -1201,6 +1529,38 @@ namespace CostumeFW
         }
         ModelRef m3p, m1p;
         return ResolveArmaModels(localID, plugin, EffectiveSex(a_contentId), m3p, m1p);
+    }
+
+    std::vector<std::pair<std::string, int>> EnumerateContentShapes(const std::string& a_id)
+    {
+        // Main thread only: resolve the content's ARMA model, load the NIF, list its
+        // skinned shapes (name + first dismember biped slot), and cache the result so
+        // the MCM's GetContentShapes can read it without a VM-thread NIF load. Empty
+        // on failure. LoadNif returns the shared cached model - read-only traversal.
+        std::vector<std::pair<std::string, int>> out;
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_id, localID, plugin)) {
+            return out;
+        }
+        ModelRef m3p, m1p;
+        if (!ResolveArmaModels(localID, plugin, EffectiveSex(a_id), m3p, m1p)) {
+            return out;
+        }
+        auto loaded = LoadNif(StripMeshesPrefix(m3p.nifPath));
+        if (!loaded) {
+            return out;
+        }
+        RE::BSVisit::TraverseScenegraphGeometries(loaded.get(),
+            [&](RE::BSGeometry* a_geom) {
+                auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
+                if (skin) {
+                    out.emplace_back(std::string(a_geom->name.c_str()), ShapeSlot(skin.get()));
+                }
+                return RE::BSVisit::BSVisitControl::kContinue;
+            });
+        SetContentShapes(a_id, out);
+        return out;
     }
 
     RE::SEX EffectiveSexFor(const std::string& a_id)
@@ -1343,6 +1703,67 @@ namespace CostumeFW
             a_base->numHeadParts = static_cast<std::int8_t>(n - 1);
             return true;
         }
+
+        // The player's mouth/teeth head part: a Misc-type HDPT whose model is a
+        // mouth mesh (path contains "mouth"). nullptr if none (a custom head can
+        // bake the mouth in) - then the mouth watchdog stays inert.
+        RE::BGSHeadPart* FindPlayerMouth(RE::TESNPC* a_base)
+        {
+            if (!a_base || !a_base->headParts) {
+                return nullptr;
+            }
+            for (std::int8_t i = 0; i < a_base->numHeadParts; ++i) {
+                auto* part = a_base->headParts[i];
+                if (!part || part->type.get() != RE::BGSHeadPart::HeadPartType::kMisc) {
+                    continue;
+                }
+                std::string m = part->model.c_str() ? part->model.c_str() : "";
+                for (auto& ch : m) {
+                    if (ch >= 'A' && ch <= 'Z') {
+                        ch = static_cast<char>(ch + 32);
+                    }
+                }
+                if (m.find("mouth") != std::string::npos) {
+                    return part;
+                }
+            }
+            return nullptr;
+        }
+
+        // True if any registered head part is a CEF pool part (CFW_*). The teeth-drop
+        // bug only manifests while a CFW Misc head part shares the facegen head.
+        bool AnyCfwHeadPart(RE::TESNPC* a_base)
+        {
+            if (!a_base || !a_base->headParts) {
+                return false;
+            }
+            for (std::int8_t i = 0; i < a_base->numHeadParts; ++i) {
+                auto* part = a_base->headParts[i];
+                const char* ed = part ? part->GetFormEditorID() : nullptr;
+                if (ed && std::string_view(ed).starts_with("CFW_")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // True if a node named a_name exists anywhere under a_root (the facegen head
+        // renames each head part's geometry to its editorID - HANDOVER §9-18).
+        bool NodeNamePresent(RE::NiAVObject* a_root, const char* a_name)
+        {
+            if (!a_root || !a_name || !*a_name) {
+                return false;
+            }
+            bool found = false;
+            RE::BSVisit::TraverseScenegraphObjects(a_root, [&](RE::NiAVObject* a_obj) {
+                if (a_obj->name == a_name) {
+                    found = true;
+                    return RE::BSVisit::BSVisitControl::kStop;
+                }
+                return RE::BSVisit::BSVisitControl::kContinue;
+            });
+            return found;
+        }
     }
 
     bool ReconcilePersistHeadParts(const std::vector<RE::BGSHeadPart*>& a_desired,
@@ -1382,6 +1803,56 @@ namespace CostumeFW
             base->AddChange(RE::TESNPC::ChangeFlags::kFace);
         }
         return changed;
+    }
+
+    // Rebuild count guard so a persistent failure can't loop DoReset3D (each retains
+    // an FSMP physics arena). Reset once the mouth is confirmed present.
+    std::atomic<int> g_mouthRestoreRetries{ 0 };
+
+    // Teeth-drop watchdog. The engine's load-time facegen build can drop the mouth
+    // from the assembled head (GetFaceNodeSkinned) when a persist head-carrier (a
+    // Misc HDPT) shares it - the mouth stays in the headParts ARRAY but is absent
+    // from the built head, so racemenu / a persist re-toggle (a clean rebuild after
+    // the engine settled) brings it back. This does that automatically: if a CFW
+    // head part is registered and the mouth's geometry is missing from the facegen
+    // head, one clean DoReset3D restores it. Main thread only. (HANDOVER teeth bug.)
+    void RestoreMouthIfDropped(const char* a_reason)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* base = player ? player->GetActorBase() : nullptr;
+        if (!player || !base) {
+            return;
+        }
+        if (!AnyCfwHeadPart(base)) {
+            g_mouthRestoreRetries = 0;
+            return;  // no CFW head part registered -> the drop bug isn't in play
+        }
+        auto* mouth = FindPlayerMouth(base);
+        if (!mouth) {
+            return;  // can't identify the mouth head part -> stay inert
+        }
+        auto* faceNode = player->GetFaceNodeSkinned();
+        if (!faceNode) {
+            return;
+        }
+        const char* eid = mouth->GetFormEditorID();
+        if (NodeNamePresent(faceNode, eid)) {
+            g_mouthRestoreRetries = 0;
+            return;  // mouth geometry present in the assembled head -> nothing to do
+        }
+        if (g_mouthRestoreRetries.load() >= 2) {
+            SKSE::log::warn("mouth: '{}' still dropped after {} rebuild(s) - giving up ({})",
+                eid ? eid : "?", g_mouthRestoreRetries.load(), a_reason ? a_reason : "");
+            return;
+        }
+        ++g_mouthRestoreRetries;
+        SKSE::log::info("mouth: '{}' registered but ABSENT from facegen head ({}) - clean "
+                        "rebuild #{} (persist head-carrier teeth drop)",
+            eid ? eid : "?", a_reason ? a_reason : "", g_mouthRestoreRetries.load());
+        player->DoReset3D(false);
+        g_headRebuildGraceUntil = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        RunAfterDelayMs(1500, [] { Reconcile(); });
+        RunAfterDelayMs(2600, [] { RestoreMouthIfDropped("recheck"); });
     }
 
     bool PlayerHasHeadPart(RE::BGSHeadPart* a_part)
@@ -1448,6 +1919,9 @@ namespace CostumeFW
         // Load3D hook does not fire on DoReset3D (C §9-11(ii)): re-inject
         // explicitly once the rebuild settles; the watchdog converges the rest.
         RunAfterDelayMs(1500, [] { Reconcile(); });
+        // ...then check the mouth survived this rebuild (belt-and-suspenders; the
+        // runtime re-toggle path is usually clean, but the load path is not).
+        RunAfterDelayMs(2600, [] { RestoreMouthIfDropped("post-rebuild"); });
     }
 
     void RequestPersistHeadRebuild(const char* a_reason)

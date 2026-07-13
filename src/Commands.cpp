@@ -101,7 +101,7 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | recover | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
             return;
         }
 
@@ -296,6 +296,64 @@ namespace CostumeFW
                                  .c_str());
                 }
             });
+        } else if (sub == "shapes") {
+            // List a content's skinned shapes (name + dismember biped slot) so the
+            // user knows what to hide. Loads the NIF on the main thread and caches
+            // the result for the MCM.  cef shapes <FormID:Plugin.esp>
+            if (rest.empty()) {
+                Print("[CEF] usage: cef shapes <FormID:Plugin.esp>");
+                return;
+            }
+            const std::string id = Trim(rest);
+            SKSE::GetTaskInterface()->AddTask([id] {
+                const auto shapes = EnumerateContentShapes(id);
+                auto* c = RE::ConsoleLog::GetSingleton();
+                if (shapes.empty()) {
+                    SKSE::log::warn("shapes: '{}' - none (unresolved content or empty NIF)", id);
+                    if (c) {
+                        c->Print(("[CEF] shapes '" + id + "': none (unresolved / empty NIF)").c_str());
+                    }
+                    return;
+                }
+                SKSE::log::info("shapes for '{}': {} shape(s)", id, shapes.size());
+                if (c) {
+                    c->Print(("[CEF] shapes for " + id + " (ON = hidden):").c_str());
+                }
+                for (const auto& [name, slot] : shapes) {
+                    const std::string line = std::string("  ") +
+                        (IsHideShape(id, name) ? "ON  " : "off ") + name +
+                        " [slot " + std::to_string(slot) + "]";
+                    SKSE::log::info("{}", line);
+                    if (c) {
+                        c->Print(line.c_str());
+                    }
+                }
+            });
+        } else if (sub == "hideshape") {
+            // Toggle ONE shape of a content in its hide set, then re-inject.
+            //   cef hideshape <FormID:Plugin.esp> <shapeName>
+            const auto shapeSp = rest.find_last_of(' ');
+            if (rest.empty() || shapeSp == std::string::npos) {
+                Print("[CEF] usage: cef hideshape <FormID:Plugin.esp> <shapeName>");
+                return;
+            }
+            const std::string id = Trim(rest.substr(0, shapeSp));
+            const std::string shape = Trim(rest.substr(shapeSp + 1));
+            if (id.empty() || shape.empty()) {
+                Print("[CEF] usage: cef hideshape <FormID:Plugin.esp> <shapeName>");
+                return;
+            }
+            SKSE::GetTaskInterface()->AddTask([id, shape] {
+                const bool now = !IsHideShape(id, shape);
+                SetHideShape(id, shape, now);
+                HideInjectedNodes(id);  // drop the node so Reconcile re-injects with the new decision
+                Reconcile();
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print((std::string("[CEF] hideshape ") + (now ? "ON" : "off") + " '" +
+                              shape + "' for " + id + " (re-injected)")
+                                 .c_str());
+                }
+            });
         } else if (sub == "headdiag") {
             // FSMP approach-C passive PoC: enumerate FSMP-renamed physics bones on
             // the live skeleton(s). Apply an SMP hair first to see "_Head_" bones.
@@ -330,7 +388,7 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | recover | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
         }
     }
 }

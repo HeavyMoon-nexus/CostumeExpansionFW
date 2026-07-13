@@ -63,6 +63,13 @@ namespace CostumeFW
     // Pure data reads; safe on the Papyrus VM thread.
     bool CanResolveContent(const std::string& a_contentId);
 
+    // Main thread only: resolve a content's ARMA model, load the NIF, and return its
+    // skinned shapes (name + first dismember biped slot; -1 if not dismembered),
+    // caching them for the MCM (BoxStore::ContentShapesFor). Empty on failure. Used
+    // by `cef shapes` and the MCM "scan shapes" native to populate the per-shape
+    // hide list without a VM-thread NIF load.
+    std::vector<std::pair<std::string, int>> EnumerateContentShapes(const std::string& a_id);
+
     // ROOT D (border audit 2026-07-09): normalize a colon-form id to its canonical
     // "XXXXXX:Plugin.esp" spelling (upper-hex, 6 digits, no 0x / leading-zero
     // variance). True if the string changed. Every ingest border canonicalizes so
@@ -178,6 +185,13 @@ namespace CostumeFW
     // time: the engine builds the head with the current registration anyway).
     // Main thread only.
     void RebuildPlayerHead();
+
+    // Teeth-drop watchdog: if a persist head-carrier (Misc HDPT) is registered and
+    // the player's mouth head part is missing from the assembled facegen head, do
+    // one clean DoReset3D to restore it (the load-time build can drop it; racemenu /
+    // a persist re-toggle is what the user did manually). Retry-capped. No-op when
+    // no CFW head part is registered or the mouth is present. Main thread only.
+    void RestoreMouthIfDropped(const char* a_reason);
 
     // FSMP approach-C active PoC (stage 1, `cef hair <FormID:Plugin.esp>`): drive
     // a head-part change from CEF code (TESNPC::ChangeHeadPart) + force a facegen

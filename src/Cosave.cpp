@@ -13,6 +13,12 @@ namespace CostumeFW
         constexpr std::uint32_t kSignature = 'CEFW';   // co-save unique id
         constexpr std::uint32_t kRecordActive = 'ACTV';
         constexpr std::uint32_t kVersion = 2;          // v2 adds the box token id
+        // P2 (SMF): the hidden holding container's FormID, so an SMF-only session
+        // can capture/return custody items without the MCM ever opening (the MCM
+        // handoff becomes legacy adoption). Runtime refs are save-local - always
+        // remapped through ResolveFormID on load.
+        constexpr std::uint32_t kRecordStore = 'STOR';
+        constexpr std::uint32_t kStoreVersion = 1;
 
         void WriteString(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
         {
@@ -75,6 +81,15 @@ namespace CostumeFW
             }
             SKSE::log::info("cosave: saved {} persist item(s) ({} unresolved carried)",
                 count, g_unresolvedActives.size());
+
+            // Hidden-store FormID (0 = none this save; still written so a revert
+            // to "no store" round-trips).
+            if (a_intfc->OpenRecord(kRecordStore, kStoreVersion)) {
+                const std::uint32_t store = StoreFormId();
+                a_intfc->WriteRecordData(store);
+            } else {
+                SKSE::log::error("cosave: OpenRecord(STOR) failed");
+            }
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intfc)
@@ -85,6 +100,19 @@ namespace CostumeFW
             std::uint32_t length = 0;
             int restored = 0;
             while (a_intfc->GetNextRecordInfo(type, version, length)) {
+                if (type == kRecordStore) {
+                    std::uint32_t saved = 0;
+                    if (a_intfc->ReadRecordData(saved) == sizeof(saved) && saved != 0) {
+                        RE::FormID resolved = 0;
+                        if (a_intfc->ResolveFormID(saved, resolved) && resolved != 0) {
+                            RestoreStoreFormId(resolved);
+                            SKSE::log::info("cosave: hidden store {:08X} restored", resolved);
+                        } else {
+                            SKSE::log::warn("cosave: hidden store {:08X} did not resolve", saved);
+                        }
+                    }
+                    continue;
+                }
                 if (type != kRecordActive) {
                     continue;
                 }
@@ -130,6 +158,11 @@ namespace CostumeFW
         {
             ClearRegistry();
             g_unresolvedActives.clear();
+            // The hidden store is per-save: clear at every load START so a save
+            // without a STOR record can never inherit the previous save's store
+            // (ROOT A cross-save protection, moved here from the kPostLoadGame
+            // task - which ran AFTER LoadCallback and wiped the restored id).
+            RestoreStoreFormId(0);
             SKSE::log::info("cosave: reverted (registry cleared)");
         }
     }

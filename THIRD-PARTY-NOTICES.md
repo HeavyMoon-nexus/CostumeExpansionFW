@@ -24,6 +24,7 @@ keep this notice, keep the license texts, keep the source link.
 | [spdlog](https://github.com/gabime/spdlog) / [fmt](https://github.com/fmtlib/fmt) | MIT | logging (via CommonLibSSE) |
 | [xbyak](https://github.com/herumi/xbyak) | BSD-3-Clause | runtime code generation (via CommonLibSSE) |
 | Windows CNG (bcrypt) | OS component | SHA-256 content hashing |
+| [SKSE Menu Framework](https://github.com/QTR-Modding/SKSE-Menu-Framework-3) consumer header (Thiago099 / QTR-Modding) | **LGPL-2.1** | in-game UI (v1.3+). Header-only, vendored at `src/external/` (pinned commit recorded alongside); all calls resolve the separately-installed SKSEMenuFramework.dll at runtime (dynamic linking — no SMF code is statically embedded). LGPL-2.1 is GPLv3-compatible. |
 
 ## Legacy optional tool (not part of the mod package)
 

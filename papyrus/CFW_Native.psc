@@ -174,6 +174,12 @@ Bool Function RemovePersist(String content, Bool returnStored = false) Global Na
 ; Call from OnConfigOpen; the native clears it on load until re-handed.
 Function SetStoreRef(ObjectReference akStore) Global Native
 
+; The native-owned hidden store for THIS save (None until one exists). The
+; native layer now creates + co-save-persists the store itself (SMF P2); the
+; MCM's GetStore prefers this over creating its own, so both UIs share ONE
+; custody container per save.
+ObjectReference Function GetStoreRef() Global Native
+
 ; Where a content id is already held: "" if free, "persist" if in the persist
 ; catalog, else the holding box's token. Capture flows check this BEFORE moving
 ; the physical item - the injection registry is one-entry-per-id, so a second
@@ -195,6 +201,21 @@ Bool Function SetPersistActive(String id, Bool bOn) Global Native
 ; queues a re-inject so the change shows immediately.
 Bool Function GetBodyMorph(String id) Global Native
 Function SetBodyMorph(String id, Bool bOn) Global Native
+
+; Per-content SHAPE hide (the `cef shapes` / `cef hideshape` levers). A costume
+; that ships its own body doubles the player's real one; pick which NIF shapes to
+; drop BY NAME. GetContentShapes returns "shapeName|slot" entries (cache-backed,
+; filled by injection or ScanContentShapes). SetHideShape queues a re-inject.
+String[] Function GetContentShapes(String id) Global Native
+Function ScanContentShapes(String id) Global Native
+Bool Function GetHideShape(String id, String shape) Global Native
+Function SetHideShape(String id, String shape, Bool bOn) Global Native
+
+; Per-content "inject the player's real (naked) body under this content" opt-in.
+; Pairs with hide shapes: drop the costume's own body, then substitute the player's
+; morphed skin body so garments sit on the real body. Set queues a re-inject.
+Bool Function GetShowRealBody(String id) Global Native
+Function SetShowRealBody(String id, Bool bOn) Global Native
 
 ; Diagnostics page: compact status lines composed natively. Lines starting
 ; "# " are section headers.

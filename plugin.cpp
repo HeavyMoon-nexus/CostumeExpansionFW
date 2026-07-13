@@ -12,6 +12,7 @@
 #include "LoreBox.h"
 #include "Papyrus.h"
 #include "SkinRebind.h"
+#include "SmfUI.h"
 
 #include "RE/P/PlayerCharacter.h"
 #include "RE/S/ScriptEventSourceHolder.h"
@@ -134,6 +135,7 @@ namespace
             Load3DHook::Install();
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration
             CostumeFW::InstallConsoleHook();
+            CostumeFW::SmfUI::Register();  // SKSE Menu Framework section (soft; no-op without SMF)
             if (auto* holder = RE::ScriptEventSourceHolder::GetSingleton()) {
                 holder->AddEventSink(EquipSink::GetSingleton());
                 holder->AddEventSink(ContainerSink::GetSingleton());
@@ -155,16 +157,21 @@ namespace
             // save (a CTD rollback can predate the registration - C §9-18); it
             // rebuilds the head only when something actually changed.
             SKSE::GetTaskInterface()->AddTask([] {
-                // The hidden-store ref is per-save; drop the stale handle until the
-                // MCM re-hands it (OnConfigOpen), so a console removal between load
-                // and menu-open can't touch the wrong save's store (ROOT A).
-                CostumeFW::SetStoreRef(nullptr);
+                // Hidden-store handling moved to the co-save (P2): RevertCallback
+                // clears the per-save store id at load START, LoadCallback restores
+                // THIS save's (ROOT A protection preserved). Clearing it here ran
+                // AFTER the restore and wiped it.
                 CostumeFW::ClearBoxSpellCache();
                 CostumeFW::ReapplyBoxes();
                 CostumeFW::ApplyCarrierOverrides(false);
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
             });
+            // Teeth-drop watchdog: the engine's load-time facegen build can drop the
+            // mouth from the assembled head when a persist head-carrier (Misc HDPT)
+            // shares it. Once the build has settled, one clean rebuild restores it
+            // (what racemenu / a persist re-toggle did manually). No-op otherwise.
+            CostumeFW::RunAfterDelayMs(4000, [] { CostumeFW::RestoreMouthIfDropped("post-load"); });
             break;
         default:
             break;

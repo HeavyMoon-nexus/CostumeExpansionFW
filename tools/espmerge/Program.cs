@@ -52,16 +52,20 @@ internal static class Program
         var basePath = args.Length > 0 ? args[0] : kDefaultBase;
         var patchPath = args.Length > 1 ? args[1] : kDefaultPatch;
         var outDir = args.Length > 2 ? args[2] : kDefaultOutDir;
+        // Optional 4th arg: patch-new renumber offset in hex (default 0x100).
+        // v1.3.0 VanillaSlots fold uses 0x200 (0x9xx is taken by the v1.2.1
+        // renumber). CONTRACT: MigrateLegacyColonId mirrors this per patch.
+        var offset = args.Length > 3 ? Convert.ToUInt32(args[3], 16) : kRenumberOffset;
 
         try {
-            return Run(basePath, patchPath, outDir);
+            return Run(basePath, patchPath, outDir, offset);
         } catch (Exception ex) {
             Console.Error.WriteLine("FATAL: " + ex);
             return 1;
         }
     }
 
-    private static int Run(string basePath, string patchPath, string outDir)
+    private static int Run(string basePath, string patchPath, string outDir, uint offset)
     {
         if (!File.Exists(basePath)) { Console.Error.WriteLine("missing base: " + basePath); return 1; }
         if (!File.Exists(patchPath)) { Console.Error.WriteLine("missing patch: " + patchPath); return 1; }
@@ -70,8 +74,12 @@ internal static class Program
         var patchMod = SkyrimMod.CreateFromBinaryOverlay(ModPath.FromPath(patchPath), SkyrimRelease.SkyrimSE);
         var outKey = ModKey.FromNameAndExtension(kOutName);
 
-        var drop = new HashSet<FormKey>(
-            kDropPatchIds.Select(id => new FormKey(patchMod.ModKey, id)));
+        // The PoC drop list belongs to the ORIGINAL v1.2.1 patch only - other
+        // patches (e.g. VanillaSlots) legitimately use ids 0x806-0x808.
+        var drop = patchMod.ModKey.FileName.String.StartsWith("CostumeFW_Boxes_FSMPCarrier",
+                StringComparison.OrdinalIgnoreCase)
+            ? new HashSet<FormKey>(kDropPatchIds.Select(id => new FormKey(patchMod.ModKey, id)))
+            : new HashSet<FormKey>();
 
         // ---- collect winners ------------------------------------------------
         // base records (may be overridden by the patch), keyed by base FormKey
@@ -105,13 +113,13 @@ internal static class Program
             remap[key] = new FormKey(outKey, key.ID);  // base ids kept verbatim
         }
         foreach (var rec in patchNew) {
-            remap[rec.FormKey] = new FormKey(outKey, rec.FormKey.ID + kRenumberOffset);
+            remap[rec.FormKey] = new FormKey(outKey, rec.FormKey.ID + offset);
         }
 
         // renumbered ids must not collide with kept base ids
         var used = new HashSet<uint>(winners.Keys.Select(k => k.ID));
         foreach (var rec in patchNew) {
-            var nid = rec.FormKey.ID + kRenumberOffset;
+            var nid = rec.FormKey.ID + offset;
             if (!used.Add(nid)) {
                 Console.Error.WriteLine($"renumber collision at {nid:X6} for {rec.FormKey}");
                 return 1;
@@ -144,7 +152,7 @@ internal static class Program
 
         Console.WriteLine("merged -> " + outPath);
         Console.WriteLine($"  base records: {winners.Count} (of which {overrides} folded patch overrides)");
-        Console.WriteLine($"  patch-new records carried: {patchNew.Count} (renumbered +0x{kRenumberOffset:X}), dropped: {kDropPatchIds.Length} (PoC)");
+        Console.WriteLine($"  patch-new records carried: {patchNew.Count} (renumbered +0x{offset:X}), dropped: {drop.Count} (PoC)");
         foreach (var row in rows) {
             Console.WriteLine("  " + row);
         }
@@ -154,6 +162,9 @@ internal static class Program
         int nRecords = 0;
         var badLinks = new List<string>();
         var oldKeys = new HashSet<ModKey> { baseMod.ModKey, patchMod.ModKey };
+        // Re-merging INTO the same plugin name (v1.3.0: base already IS
+        // CostumeFW.esp): links to the output key are the goal, not stale.
+        oldKeys.Remove(outKey);
         foreach (var rec in check.EnumerateMajorRecords()) {
             nRecords++;
             if (rec.FormKey.ID > 0xFFF) {

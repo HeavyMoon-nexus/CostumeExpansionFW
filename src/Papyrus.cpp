@@ -613,6 +613,17 @@ namespace CostumeFW
 
         // --- C-phase MCM support (Diagnostics / body morph / M2 activation) ----
 
+        // P2b: the native-owned hidden store (None until one exists). The MCM's
+        // GetStore prefers it over creating its own, so both UIs share ONE
+        // custody container per save. Read-only resolve - creation stays on the
+        // main thread (EnsureStoreRef) / the MCM's own PlaceAtMe fallback.
+        RE::TESObjectREFR* GetStoreRefNative(RE::StaticFunctionTag*)
+        {
+            const std::uint32_t id = StoreFormId();
+            auto* f = id ? RE::TESForm::LookupByID(id) : nullptr;
+            return f ? f->As<RE::TESObjectREFR>() : nullptr;
+        }
+
         std::vector<RE::BSFixedString> GetDiagLinesNative(RE::StaticFunctionTag*)
         {
             std::vector<RE::BSFixedString> out;
@@ -634,6 +645,57 @@ namespace CostumeFW
                 SetBodyMorphOn(id, a_on);   // def + json
                 HideInjectedNodes(id);      // drop the node so Reconcile re-injects
                 Reconcile();                // with the new decision
+            });
+        }
+
+        std::vector<RE::BSFixedString> GetContentShapesNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            // "shapeName|slot" per skinned shape (slot -1 = not dismembered). Reads the
+            // MCM cache (populated by injection / ScanContentShapes) - never loads a NIF
+            // on the VM thread.
+            std::vector<RE::BSFixedString> out;
+            for (const auto& [name, slot] : ContentShapesFor(a_id.c_str())) {
+                out.push_back((name + "|" + std::to_string(slot)).c_str());
+            }
+            return out;
+        }
+
+        bool GetHideShapeNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, RE::BSFixedString a_shape)
+        {
+            return IsHideShape(a_id.c_str(), a_shape.c_str());
+        }
+
+        void SetHideShapeNative(RE::StaticFunctionTag*, RE::BSFixedString a_id,
+            RE::BSFixedString a_shape, bool a_on)
+        {
+            const std::string id = a_id.c_str();
+            const std::string shape = a_shape.c_str();
+            SKSE::GetTaskInterface()->AddTask([id, shape, a_on] {
+                SetHideShape(id, shape, a_on);  // def + json
+                HideInjectedNodes(id);          // drop the node so Reconcile re-injects
+                Reconcile();                    // with that shape now shown/hidden
+            });
+        }
+
+        void ScanContentShapesNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            // Populate the shape cache for a content that is not currently worn so the
+            // MCM can list its shapes. Runs on the main thread (loads the NIF once).
+            const std::string id = a_id.c_str();
+            SKSE::GetTaskInterface()->AddTask([id] { EnumerateContentShapes(id); });
+        }
+
+        bool GetShowRealBodyNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            return ShowRealBodyOn(a_id.c_str());
+        }
+
+        void SetShowRealBodyNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, bool a_on)
+        {
+            const std::string id = a_id.c_str();
+            SKSE::GetTaskInterface()->AddTask([id, a_on] {
+                SetShowRealBodyOn(id, a_on);  // def + json
+                Reconcile();                  // inject/detach the real body accordingly
             });
         }
 
@@ -924,6 +986,12 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetDiagLines", kClass, GetDiagLinesNative);
         a_vm->RegisterFunction("GetBodyMorph", kClass, GetBodyMorphNative);
         a_vm->RegisterFunction("SetBodyMorph", kClass, SetBodyMorphNative);
+        a_vm->RegisterFunction("GetContentShapes", kClass, GetContentShapesNative);
+        a_vm->RegisterFunction("GetHideShape", kClass, GetHideShapeNative);
+        a_vm->RegisterFunction("SetHideShape", kClass, SetHideShapeNative);
+        a_vm->RegisterFunction("ScanContentShapes", kClass, ScanContentShapesNative);
+        a_vm->RegisterFunction("GetShowRealBody", kClass, GetShowRealBodyNative);
+        a_vm->RegisterFunction("SetShowRealBody", kClass, SetShowRealBodyNative);
         a_vm->RegisterFunction("GetPersistActive", kClass, GetPersistActiveNative);
         a_vm->RegisterFunction("IsPersistActive", kClass, IsPersistActiveNative);
         a_vm->RegisterFunction("SetPersistActive", kClass, SetPersistActiveNative);
@@ -940,8 +1008,131 @@ namespace CostumeFW
         a_vm->RegisterFunction("ClearPersistPreset", kClass, ClearPersistPresetNative);
         a_vm->RegisterFunction("CaptureContentEnchant", kClass, CaptureContentEnchantNative);
         a_vm->RegisterFunction("ContentHasScript", kClass, ContentHasScriptNative);
+        a_vm->RegisterFunction("GetStoreRef", kClass, GetStoreRefNative);
 
         SKSE::log::info("Papyrus natives registered ({})", kClass);
         return true;
+    }
+
+    // --- UiOps (P2): the SMF UI's entry into the SAME native-op bodies the
+    // Papyrus natives run. Forwarding wrappers ONLY (same TU, so the anonymous-
+    // namespace natives are reachable) - behavior lives in the natives above,
+    // and the two UIs cannot drift.
+    namespace UiOps
+    {
+        bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content)
+        {
+            return AddBoxNative(nullptr, a_label.c_str(), a_token.c_str(), a_content.c_str());
+        }
+
+        bool RemoveBoxContent(const std::string& a_token, const std::string& a_content, bool a_returnStored)
+        {
+            return RemoveBoxContentNative(nullptr, a_token.c_str(), a_content.c_str(), a_returnStored);
+        }
+
+        bool RemoveBox(const std::string& a_token, bool a_returnStored)
+        {
+            return RemoveBoxNative(nullptr, a_token.c_str(), a_returnStored);
+        }
+
+        bool SetBoxEnabled(const std::string& a_token, bool a_on)
+        {
+            return SetBoxEnabledNative(nullptr, a_token.c_str(), a_on);
+        }
+
+        bool SetBoxArmorType(const std::string& a_token, int a_type)
+        {
+            return SetBoxArmorTypeNative(nullptr, a_token.c_str(), a_type);
+        }
+
+        bool SetContentGender(const std::string& a_id, int a_mode)
+        {
+            return SetContentGenderNative(nullptr, a_id.c_str(), a_mode);
+        }
+
+        bool SetHideSlotsStr(const std::string& a_id, const std::string& a_slots)
+        {
+            return SetHideSlotsNative(nullptr, a_id.c_str(), a_slots.c_str());
+        }
+
+        std::string GetHideSlotsStr(const std::string& a_id)
+        {
+            return GetHideSlots(nullptr, a_id.c_str()).c_str();
+        }
+
+        void SetHideShape(const std::string& a_id, const std::string& a_shape, bool a_on)
+        {
+            SetHideShapeNative(nullptr, a_id.c_str(), a_shape.c_str(), a_on);
+        }
+
+        void SetBodyMorph(const std::string& a_id, bool a_on)
+        {
+            SetBodyMorphNative(nullptr, a_id.c_str(), a_on);
+        }
+
+        void SetShowRealBody(const std::string& a_id, bool a_on)
+        {
+            SetShowRealBodyNative(nullptr, a_id.c_str(), a_on);
+        }
+
+        void ScanContentShapes(const std::string& a_id)
+        {
+            ScanContentShapesNative(nullptr, a_id.c_str());
+        }
+
+        bool AssignPreset(const std::string& a_token, const std::string& a_file)
+        {
+            return AssignPresetNative(nullptr, a_token.c_str(), a_file.c_str());
+        }
+
+        bool ClearPreset(const std::string& a_token)
+        {
+            return ClearPresetNative(nullptr, a_token.c_str());
+        }
+
+        std::string ExportPreset(const std::string& a_token, const std::string& a_name)
+        {
+            return ExportPresetNative(nullptr, a_token.c_str(), a_name.c_str()).c_str();
+        }
+
+        std::string FindContentHolder(const std::string& a_id)
+        {
+            return FindContentHolderNative(nullptr, a_id.c_str()).c_str();
+        }
+
+        bool ContentHasScript(const std::string& a_id)
+        {
+            return ContentHasScriptNative(nullptr, a_id.c_str());
+        }
+
+        bool AddPersist(const std::string& a_id)
+        {
+            return AddPersistNative(nullptr, a_id.c_str());
+        }
+
+        bool RemovePersist(const std::string& a_id, bool a_returnStored)
+        {
+            return RemovePersistNative(nullptr, a_id.c_str(), a_returnStored);
+        }
+
+        bool SetPersistActive(const std::string& a_id, bool a_on)
+        {
+            return SetPersistActiveNative(nullptr, a_id.c_str(), a_on);
+        }
+
+        bool AssignPersistPreset(const std::string& a_file)
+        {
+            return AssignPersistPresetNative(nullptr, a_file.c_str());
+        }
+
+        bool ClearPersistPreset()
+        {
+            return ClearPersistPresetNative(nullptr);
+        }
+
+        std::string ExportPersist(const std::string& a_name)
+        {
+            return ExportPersistNative(nullptr, a_name.c_str()).c_str();
+        }
     }
 }

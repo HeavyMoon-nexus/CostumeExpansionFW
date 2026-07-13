@@ -79,6 +79,32 @@ namespace CostumeFW
     bool BodyMorphOn(const std::string& a_id);
     bool SetBodyMorphOn(const std::string& a_id, bool a_on);  // def + json  // def + json
 
+    // --- Show the player's real body under this content (per content) --------
+    // Opt-in (default off). Pairs with HideShapes: after dropping a costume's own
+    // body shape, inject the player's morphed skin (naked) body so the garments
+    // sit on the real body. Intended for body-slot tokens that mask the real body.
+    bool ShowRealBodyOn(const std::string& a_id);
+    bool SetShowRealBodyOn(const std::string& a_id, bool a_on);  // def + json
+
+    // --- Per-content SHAPE hide (default none) -------------------------------
+    // A costume that ships its own body doubles the player's real BodySlide body
+    // (identical meshes overlap invisibly, but a minor variant - 3BA vs 3BAv2 -
+    // clips). The biped slot can't tell the naked-body shape from a garment (a
+    // whole slot-32 outfit skins every shape to slot 32), so the user picks WHICH
+    // shapes to drop BY NAME. The injection skips a shape whose NIF name is in this
+    // content's set. GLOBAL config (CEF_settings.json), keyed by content id.
+    std::vector<std::string> HideShapesFor(const std::string& a_id);
+    bool IsHideShape(const std::string& a_id, const std::string& a_shape);
+    bool SetHideShape(const std::string& a_id, const std::string& a_shape, bool a_on);  // def + json
+
+    // Runtime cache of a content's injected shapes (shape NIF name -> biped slot,
+    // -1 if not dismembered), populated on the main thread by the injection and by
+    // `cef shapes` so the MCM can list them without loading the NIF on the VM
+    // thread. NOT persisted; empty until the content is injected/scanned once.
+    std::vector<std::pair<std::string, int>> ContentShapesFor(const std::string& a_id);
+    void SetContentShapes(const std::string& a_id,
+        const std::vector<std::pair<std::string, int>>& a_shapes);
+
     // --- LoreBox tooltip integration (soft dependency) -----------------------
     // The comma-joined in-game names of the contents of the box on biped slot
     // a_slot ("" if there is no box on that slot, or it is empty). Fed to the
@@ -251,6 +277,27 @@ namespace CostumeFW
     // base copy (the accepted cross-save duplication, CEF_STATE_SCOPE.md §4).
     // Returns true if a copy reached the player. Main thread (touches inventory).
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate);
+
+    // --- SMF-era custody (P2): the native layer OWNS the hidden store ---------
+    // The store FormID is co-save persisted ('STOR'), so an SMF-only session can
+    // capture/return without the MCM ever opening. The MCM's SetStoreRef handoff
+    // becomes the legacy-adoption path (first resolving store wins per save).
+    std::uint32_t StoreFormId();                    // 0 = none recorded
+    void RestoreStoreFormId(std::uint32_t a_id);    // co-save load/revert path
+    // Resolve the recorded store, else CREATE it (PlaceAtMe CFW_Storage 0x80D at
+    // the player, disabled, force-persist) and record it. Main thread only.
+    RE::TESObjectREFR* EnsureStoreRef();
+    // Move ONE physical copy of a_id from the player into the hidden store,
+    // preferring the worn / instance-data ExtraDataList so tempering + player
+    // enchants travel with it (what the MCM's Papyrus move preserved). Main
+    // thread only.
+    bool CaptureItemToStore(const std::string& a_id);
+    // Equip (adding one if absent) / unequip a box token, silent - the native
+    // twin of the MCM's ToggleBoxToken. Main thread only.
+    bool WearBoxToken(const std::string& a_token, bool a_wear);
+    // Distribute-toggle item side: give one token, or unequip + remove all
+    // copies - the native twin of the MCM's ToggleDistribute. Main thread only.
+    void GiveOrRemoveToken(const std::string& a_token, bool a_give);
 
     // --- Box abilities (Phase C) ---------------------------------------------
     // The shipped ability-spell catalog (CostumeFW.esp SPEL named

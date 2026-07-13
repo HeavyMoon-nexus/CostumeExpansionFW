@@ -91,6 +91,23 @@ namespace CostumeFW
         // content. GLOBAL config, content-keyed.
         std::unordered_set<std::string> g_bodyMorphOn;
 
+        // Per-content set of SHAPE NAMES to drop at injection (default none). Lets
+        // the user hide a costume's bundled body shape by name so it doesn't double
+        // the player's real body. GLOBAL config, content-keyed. PERSISTED.
+        std::unordered_map<std::string, std::vector<std::string>> g_hideShapes;
+
+        // Runtime cache: content id -> its injected shapes (NIF name, biped slot;
+        // slot -1 if not dismembered). Populated on the main thread by the injection
+        // / `cef shapes`. NOT persisted (re-derived from the NIF each session).
+        std::unordered_map<std::string, std::vector<std::pair<std::string, int>>> g_contentShapes;
+
+        // Per-content "inject the player's real (naked) body under this content"
+        // opt-in (default off). Pairs with hideShapes: drop the costume's own body
+        // shape, then substitute the player's morphed skin body so garments sit on
+        // the real body. For body-slot tokens that mask the real body; on custom
+        // slots (real body already shows) it would double. GLOBAL config, content-keyed.
+        std::unordered_set<std::string> g_showRealBody;
+
         // Captured worn enchantment per content: content colon-id -> effect list
         // (MGEF colon-id + magnitude). Snapshots the EFFECTIVE enchantment at
         // capture (base OR player/instance), since the base ARMO alone misses
@@ -216,6 +233,22 @@ namespace CostumeFW
             }
             doc["bodyMorph"] = std::move(morphs);
 
+            // Per-content hidden shape names: { content-id: [shapeName, ...] }.
+            auto hideShapes = nlohmann::json::object();
+            for (const auto& [id, names] : g_hideShapes) {
+                if (!names.empty()) {
+                    hideShapes[id] = names;
+                }
+            }
+            doc["hideShapes"] = std::move(hideShapes);
+
+            // Show-real-body opt-in: store the ON content-ids (default off = absent).
+            auto realBodies = nlohmann::json::array();
+            for (const auto& id : g_showRealBody) {
+                realBodies.push_back(id);
+            }
+            doc["showRealBody"] = std::move(realBodies);
+
             auto enchants = nlohmann::json::object();
             for (const auto& [id, effs] : g_contentEnchants) {
                 auto arr2 = nlohmann::json::array();
@@ -309,6 +342,26 @@ namespace CostumeFW
                 }
                 char buf[8]{};
                 std::snprintf(buf, sizeof(buf), "%06X", lid + 0x100u);
+                a_id = std::string(buf) + ":" + std::string(kTokenPlugin);
+                return true;
+            }
+            // v1.3.0 fold: CostumeFW_VanillaSlots_001.esp (F1 vanilla-slot tokens,
+            // dev-only patch, ids 0x800-0x815) folded into CostumeFW.esp with
+            // +0x200 (0x8xx -> 0xAxx; +0x100 would collide with the v1.2.1
+            // renumber range 0x9xx). ROOT J: mirror tools/espmerge's per-patch
+            // offset - change both together. No drop list for this patch.
+            constexpr std::string_view kVanilla = ":CostumeFW_VanillaSlots_001.esp";
+            if (endsWithCI(a_id, kVanilla)) {
+                const std::string prefix = a_id.substr(0, a_id.size() - kVanilla.size());
+                const bool okHex = !prefix.empty() && prefix.size() <= 6 &&
+                    prefix.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+                if (!okHex) {
+                    SKSE::log::warn("settings: unparseable legacy vanilla-slot id '{}' - left as-is", a_id);
+                    return false;
+                }
+                const auto lid = static_cast<std::uint32_t>(std::strtoul(prefix.c_str(), nullptr, 16));
+                char buf[8]{};
+                std::snprintf(buf, sizeof(buf), "%06X", lid + 0x200u);
                 a_id = std::string(buf) + ":" + std::string(kTokenPlugin);
                 return true;
             }
@@ -957,6 +1010,9 @@ namespace CostumeFW
         g_hideRules.clear();
         g_genderModes.clear();
         g_bodyMorphOn.clear();
+        g_hideShapes.clear();
+        g_contentShapes.clear();
+        g_showRealBody.clear();
         g_contentEnchants.clear();
         g_persistPreset.clear();
         g_cefEnabled = true;
@@ -1134,6 +1190,29 @@ namespace CostumeFW
                 healed |= MigrateLegacyColonId(s);
                 healed |= CanonicalizeColonId(s);  // ROOT D
                 g_bodyMorphOn.insert(std::move(s));
+            }
+        }
+        for (const auto& id : doc.value("showRealBody", nlohmann::json::array())) {
+            if (id.is_string()) {
+                auto s = id.get<std::string>();
+                healed |= MigrateLegacyColonId(s);
+                healed |= CanonicalizeColonId(s);  // ROOT D
+                g_showRealBody.insert(std::move(s));
+            }
+        }
+        const auto hideShapes = doc.value("hideShapes", nlohmann::json::object());
+        for (auto it = hideShapes.begin(); it != hideShapes.end(); ++it) {
+            std::vector<std::string> names;
+            for (const auto& n : it.value()) {
+                if (n.is_string()) {
+                    names.push_back(n.get<std::string>());
+                }
+            }
+            if (!names.empty()) {
+                std::string key = it.key();
+                healed |= MigrateLegacyColonId(key);
+                healed |= CanonicalizeColonId(key);  // ROOT D
+                g_hideShapes[std::move(key)] = std::move(names);
             }
         }
         const auto enchants = doc.value("enchants", nlohmann::json::object());
@@ -1695,6 +1774,87 @@ namespace CostumeFW
         }
         WriteJson();
         return true;
+    }
+
+    bool ShowRealBodyOn(const std::string& a_id)
+    {
+        return g_showRealBody.contains(a_id);
+    }
+
+    bool SetShowRealBodyOn(const std::string& a_id, bool a_on)
+    {
+        if (a_id.empty()) {
+            return false;
+        }
+        std::string id = a_id;
+        CanonicalizeColonId(id);  // ROOT D
+        if (a_on) {
+            if (ContentHolder(id).empty()) {  // ROOT E: no orphan entries
+                SKSE::log::warn("realbody: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            g_showRealBody.insert(id);
+        } else {
+            g_showRealBody.erase(id);
+        }
+        WriteJson();
+        return true;
+    }
+
+    std::vector<std::string> HideShapesFor(const std::string& a_id)
+    {
+        const auto it = g_hideShapes.find(a_id);
+        return it != g_hideShapes.end() ? it->second : std::vector<std::string>{};
+    }
+
+    bool IsHideShape(const std::string& a_id, const std::string& a_shape)
+    {
+        const auto it = g_hideShapes.find(a_id);
+        return it != g_hideShapes.end() &&
+               std::find(it->second.begin(), it->second.end(), a_shape) != it->second.end();
+    }
+
+    bool SetHideShape(const std::string& a_id, const std::string& a_shape, bool a_on)
+    {
+        if (a_id.empty() || a_shape.empty()) {
+            return false;
+        }
+        std::string id = a_id;
+        CanonicalizeColonId(id);  // ROOT D
+        if (a_on) {
+            if (ContentHolder(id).empty()) {  // ROOT E: no orphan hide-shape entries
+                SKSE::log::warn("hideshape: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            auto& names = g_hideShapes[id];
+            if (std::find(names.begin(), names.end(), a_shape) == names.end()) {
+                names.push_back(a_shape);
+            }
+        } else {
+            const auto it = g_hideShapes.find(id);
+            if (it != g_hideShapes.end()) {
+                auto& names = it->second;
+                names.erase(std::remove(names.begin(), names.end(), a_shape), names.end());
+                if (names.empty()) {
+                    g_hideShapes.erase(it);
+                }
+            }
+        }
+        WriteJson();
+        return true;
+    }
+
+    std::vector<std::pair<std::string, int>> ContentShapesFor(const std::string& a_id)
+    {
+        const auto it = g_contentShapes.find(a_id);
+        return it != g_contentShapes.end() ? it->second
+                                           : std::vector<std::pair<std::string, int>>{};
+    }
+
+    void SetContentShapes(const std::string& a_id,
+        const std::vector<std::pair<std::string, int>>& a_shapes)
+    {
+        g_contentShapes[a_id] = a_shapes;
     }
 
     std::vector<WornItem> WornArmors()
@@ -2465,7 +2625,143 @@ namespace CostumeFW
 
     void SetStoreRef(RE::TESObjectREFR* a_store)
     {
-        g_storeFormId = a_store ? a_store->GetFormID() : 0;
+        if (!a_store) {
+            g_storeFormId = 0;
+            return;
+        }
+        // First resolving store wins per save (P2): once the native layer owns a
+        // live store (co-save restored or self-created), a LATER MCM handoff of a
+        // DIFFERENT container must not re-point custody mid-save - items already
+        // captured would strand in the first one. The legacy-adoption path (save
+        // predates the co-save 'STOR' record; native has nothing yet) still
+        // adopts the MCM's container as before.
+        if (g_storeFormId && g_storeFormId != a_store->GetFormID() &&
+            RE::TESForm::LookupByID(g_storeFormId)) {
+            SKSE::log::warn("custody: MCM handed store {:08X} but native owns {:08X} - keeping "
+                            "native's (one custody home per save)",
+                a_store->GetFormID(), g_storeFormId);
+            return;
+        }
+        g_storeFormId = a_store->GetFormID();
+    }
+
+    std::uint32_t StoreFormId()
+    {
+        return g_storeFormId;
+    }
+
+    void RestoreStoreFormId(std::uint32_t a_id)
+    {
+        g_storeFormId = a_id;
+    }
+
+    RE::TESObjectREFR* EnsureStoreRef()
+    {
+        if (g_storeFormId) {
+            auto* f = RE::TESForm::LookupByID(g_storeFormId);
+            if (auto* r = f ? f->As<RE::TESObjectREFR>() : nullptr) {
+                return r;
+            }
+            SKSE::log::warn("custody: recorded store {:08X} no longer resolves - creating a new one",
+                g_storeFormId);
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        auto* base = dh ? dh->LookupForm<RE::TESObjectCONT>(0x00080D, "CostumeFW.esp") : nullptr;
+        if (!player || !base) {
+            SKSE::log::warn("custody: cannot create hidden store (player or CostumeFW.esp 0x80D missing)");
+            return nullptr;
+        }
+        // Force-persist: unlike the MCM's container (pinned by a persistent
+        // Papyrus ObjectReference property), nothing else holds this ref.
+        auto ref = player->PlaceObjectAtMe(base, true);
+        if (!ref) {
+            SKSE::log::warn("custody: PlaceObjectAtMe failed for the hidden store");
+            return nullptr;
+        }
+        ref->Disable();
+        g_storeFormId = ref->GetFormID();
+        SKSE::log::info("custody: created hidden store {:08X}", g_storeFormId);
+        return ref.get();
+    }
+
+    bool CaptureItemToStore(const std::string& a_id)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t formId = ResolveFormId(a_id);
+        auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        auto* store = EnsureStoreRef();
+        if (!player || !obj || !store) {
+            return false;
+        }
+        auto inv = player->GetInventory([&](RE::TESBoundObject& o) { return &o == obj; });
+        const auto it = inv.find(obj);
+        if (it == inv.end() || it->second.first <= 0) {
+            SKSE::log::warn("custody: capture '{}' - player has none", a_id);
+            return false;
+        }
+        // Prefer the worn / any instance-data list so tempering + player enchants
+        // travel with the stored copy (the engine unequips a worn list on remove).
+        RE::ExtraDataList* xlist = nullptr;
+        if (const auto& entry = it->second.second; entry && entry->extraLists) {
+            for (auto* x : *entry->extraLists) {
+                if (x && (x->HasType<RE::ExtraWorn>() || x->HasType<RE::ExtraWornLeft>())) {
+                    xlist = x;
+                    break;
+                }
+            }
+            if (!xlist && !entry->extraLists->empty()) {
+                xlist = entry->extraLists->front();
+            }
+        }
+        player->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, xlist, store);
+        SKSE::log::info("custody: captured 1x '{}' into the hidden store", a_id);
+        return true;
+    }
+
+    bool WearBoxToken(const std::string& a_token, bool a_wear)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t formId = ResolveFormId(a_token);
+        auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        auto* em = RE::ActorEquipManager::GetSingleton();
+        if (!player || !obj || !em) {
+            return false;
+        }
+        if (a_wear) {
+            const auto counts = player->GetInventoryCounts();
+            const auto it = counts.find(obj);
+            if (it == counts.end() || it->second <= 0) {
+                player->AddObjectToContainer(obj, nullptr, 1, nullptr);
+            }
+            em->EquipObject(player, obj, nullptr, 1, nullptr, true, false, false);
+        } else {
+            em->UnequipObject(player, obj, nullptr, 1, nullptr, true, false, false);
+        }
+        return true;
+    }
+
+    void GiveOrRemoveToken(const std::string& a_token, bool a_give)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t formId = ResolveFormId(a_token);
+        auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+        if (!player || !obj) {
+            return;
+        }
+        if (a_give) {
+            const auto counts = player->GetInventoryCounts();
+            const auto it = counts.find(obj);
+            if (it == counts.end() || it->second <= 0) {
+                player->AddObjectToContainer(obj, nullptr, 1, nullptr);
+            }
+        } else {
+            WearBoxToken(a_token, false);
+            player->RemoveItem(obj, 99, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+        }
     }
 
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate)
@@ -2649,6 +2945,9 @@ namespace CostumeFW
         g_hideRules.erase(a_content);       // drop any hide rule for the removed content
         g_genderModes.erase(a_content);     // and its gender override
         g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
+        g_hideShapes.erase(a_content);      // and its per-shape hide choices
+        g_contentShapes.erase(a_content);   // and its cached shape list
+        g_showRealBody.erase(a_content);    // and its show-real-body opt-in
         g_contentEnchants.erase(a_content);  // and its captured enchantment
         WriteJson();
         SetTokenStats(box);  // recompute token armor/weight
