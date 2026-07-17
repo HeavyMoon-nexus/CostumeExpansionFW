@@ -1704,27 +1704,66 @@ namespace CostumeFW
             return true;
         }
 
-        // The player's mouth/teeth head part: a Misc-type HDPT whose model is a
-        // mouth mesh (path contains "mouth"). nullptr if none (a custom head can
-        // bake the mouth in) - then the mouth watchdog stays inert.
-        RE::BGSHeadPart* FindPlayerMouth(RE::TESNPC* a_base)
+        // Misc-type HDPT whose model path OR editorID names a mouth.
+        bool IsMouthPart(RE::BGSHeadPart* a_part)
         {
-            if (!a_base || !a_base->headParts) {
-                return nullptr;
+            if (!a_part || a_part->type.get() != RE::BGSHeadPart::HeadPartType::kMisc) {
+                return false;
             }
-            for (std::int8_t i = 0; i < a_base->numHeadParts; ++i) {
-                auto* part = a_base->headParts[i];
-                if (!part || part->type.get() != RE::BGSHeadPart::HeadPartType::kMisc) {
-                    continue;
-                }
-                std::string m = part->model.c_str() ? part->model.c_str() : "";
+            const auto lower = [](const char* a_s) {
+                std::string m = a_s ? a_s : "";
                 for (auto& ch : m) {
                     if (ch >= 'A' && ch <= 'Z') {
                         ch = static_cast<char>(ch + 32);
                     }
                 }
-                if (m.find("mouth") != std::string::npos) {
-                    return part;
+                return m;
+            };
+            if (lower(a_part->model.c_str()).find("mouth") != std::string::npos) {
+                return true;
+            }
+            return lower(a_part->GetFormEditorID()).find("mouth") != std::string::npos;
+        }
+
+        // The player's mouth/teeth head part. The vanilla mouth usually is NOT a
+        // top-level entry of the NPC's headParts array - it rides as an extraPart
+        // of the face HDPT, or comes from the RACE's chargen defaults (2026-07-17
+        // in-game: the watchdog stayed silently inert on a real teeth drop because
+        // only top-level NPC entries were scanned). Scan all three tiers. nullptr
+        // if none (a custom head can bake the mouth in) - watchdog stays inert.
+        RE::BGSHeadPart* FindPlayerMouth(RE::TESNPC* a_base)
+        {
+            if (!a_base) {
+                return nullptr;
+            }
+            const auto scan = [](RE::BGSHeadPart* a_part) -> RE::BGSHeadPart* {
+                if (!a_part) {
+                    return nullptr;
+                }
+                if (IsMouthPart(a_part)) {
+                    return a_part;
+                }
+                for (auto* extra : a_part->extraParts) {
+                    if (IsMouthPart(extra)) {
+                        return extra;
+                    }
+                }
+                return nullptr;
+            };
+            if (a_base->headParts) {
+                for (std::int8_t i = 0; i < a_base->numHeadParts; ++i) {
+                    if (auto* hit = scan(a_base->headParts[i])) {
+                        return hit;
+                    }
+                }
+            }
+            auto* race = a_base->race;
+            const int si = (a_base->GetSex() == RE::SEXES::kFemale) ? 1 : 0;
+            if (race && race->faceRelatedData[si] && race->faceRelatedData[si]->headParts) {
+                for (auto* part : *race->faceRelatedData[si]->headParts) {
+                    if (auto* hit = scan(part)) {
+                        return hit;
+                    }
                 }
             }
             return nullptr;
@@ -1829,23 +1868,72 @@ namespace CostumeFW
         }
         auto* mouth = FindPlayerMouth(base);
         if (!mouth) {
-            return;  // can't identify the mouth head part -> stay inert
+            // Loud, not silent: a CFW head part IS registered, so the drop bug is
+            // in play and an unidentifiable mouth means the watchdog cannot help.
+            SKSE::log::warn("mouth: no mouth head part identifiable (npc + extras + race "
+                            "chargen scanned) - watchdog inert ({})",
+                a_reason ? a_reason : "");
+            return;
         }
         auto* faceNode = player->GetFaceNodeSkinned();
         if (!faceNode) {
             return;
         }
         const char* eid = mouth->GetFormEditorID();
-        if (NodeNamePresent(faceNode, eid)) {
+        // Present = exact editorID match OR any node whose name contains "mouth"
+        // (ci). A vanilla extra-part mouth's facegen geometry is NOT reliably
+        // named by its HDPT editorID (2026-07-17 in-game: two rebuilds judged
+        // "still dropped" - HANDOVER branch (b), presence-check false negative).
+        // On a miss, collect the node names so the log shows what IS there.
+        bool present = false;
+        std::string seen;
+        RE::BSVisit::TraverseScenegraphObjects(faceNode, [&](RE::NiAVObject* a_obj) {
+            const char* n = a_obj->name.c_str();
+            if (n && *n) {
+                if (eid && a_obj->name == eid) {
+                    present = true;
+                    return RE::BSVisit::BSVisitControl::kStop;
+                }
+                std::string m = n;
+                for (auto& ch : m) {
+                    if (ch >= 'A' && ch <= 'Z') {
+                        ch = static_cast<char>(ch + 32);
+                    }
+                }
+                if (m.find("mouth") != std::string::npos) {
+                    present = true;
+                    return RE::BSVisit::BSVisitControl::kStop;
+                }
+                if (seen.size() < 700) {
+                    seen += n;
+                    seen += " | ";
+                }
+            }
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+        if (present) {
             g_mouthRestoreRetries = 0;
             return;  // mouth geometry present in the assembled head -> nothing to do
         }
+        SKSE::log::info("mouth: facegen head nodes = {}", seen.empty() ? "<none>" : seen);
         if (g_mouthRestoreRetries.load() >= 2) {
             SKSE::log::warn("mouth: '{}' still dropped after {} rebuild(s) - giving up ({})",
                 eid ? eid : "?", g_mouthRestoreRetries.load(), a_reason ? a_reason : "");
             return;
         }
         ++g_mouthRestoreRetries;
+        // Escalation (2026-07-17 in-game: a plain DoReset3D reassembles the head
+        // the SAME way and drops the mouth again - the node diag showed it
+        // genuinely absent after every rebuild): from the 2nd attempt, PROMOTE
+        // the extra-part/race-default mouth to an EXPLICIT NPC head part so the
+        // assembly cannot lose it in the Misc-type race. Save-persistent like
+        // RaceMenu; ChangeHeadPart APPENDS - it never replaces a same-type part
+        // (C 9-16), so the CFW carrier parts stay.
+        if (g_mouthRestoreRetries.load() >= 2 && !HasHeadPart(base, mouth)) {
+            base->ChangeHeadPart(mouth);
+            base->AddChange(RE::TESNPC::ChangeFlags::kFace);
+            SKSE::log::info("mouth: promoted '{}' to an explicit head part", eid ? eid : "?");
+        }
         SKSE::log::info("mouth: '{}' registered but ABSENT from facegen head ({}) - clean "
                         "rebuild #{} (persist head-carrier teeth drop)",
             eid ? eid : "?", a_reason ? a_reason : "", g_mouthRestoreRetries.load());
