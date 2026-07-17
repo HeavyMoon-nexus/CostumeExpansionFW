@@ -35,6 +35,27 @@ worn gear.
 - *(optional)* [Faster HDT-SMP (FSMP)](https://www.nexusmods.com/skyrimspecialedition/mods/57339)
   — custom-bone SMP cloth physics on injected content (3.5.0 tested)
 
+### Skyrim VR (community beta)
+
+The same DLL runs on Skyrim VR 1.4.15 (built multi-runtime via CommonLibSSE-NG).
+Install the main package plus the **VR Patch** archive (which carries the dll +
+VR notes), and swap the runtime requirements:
+
+- [SKSEVR](https://skse.silverlock.org/) 2.0.12
+- [VR Address Library for SKSEVR](https://www.nexusmods.com/skyrimspecialedition/mods/58101) — required
+- [Skyrim VR ESL Support](https://www.nexusmods.com/skyrimspecialedition/mods/106712) —
+  required (`CostumeFW.esp` is ESL-flagged with a 1.71 header; vanilla VR loads neither)
+- [SkyUI VR](https://github.com/Odie/skyui-vr) (MCM — the primary UI on VR; the SMF
+  section also works via [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466))
+- [RaceMenu VR 0.4.14](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee)
+- *(recommended)* [VRIK Player Avatar](https://www.nexusmods.com/skyrimspecialedition/mods/23416)
+  — vanilla VR renders no player body, so without it you can't see your own costume
+
+VR support is community-tested (no VR rig here); `CEF_DISABLE.txt` (see
+"Disabling CEF from outside the game") makes the plugin fully inert if anything
+misbehaves, and the log's first lines (`runtime: Skyrim VR 1.4.15.0` + build
+stamp) identify the build in reports.
+
 ## Usage (MCM: "Costume Expansion FW")
 
 - **Main** — master on/off, dependency status, version.

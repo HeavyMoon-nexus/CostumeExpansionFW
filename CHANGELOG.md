@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Skyrim VR runtime support (community beta).** The DLL has always been
+  built multi-runtime (CommonLibSSE-NG, SE/AE/VR); this release removes the
+  two lookups that were fatal on VR and adds diagnostics:
+  - deleted the dead `NiSkinInstance::UpdateBoneMatrices` relocation
+    (`src/Offsets.h`, SE id 75655 — never called, but resolved at DLL load,
+    and the id is absent from the VR address library = instant VR crash);
+  - the `cef` console hook now uses the raw VR call-site offset
+    (`0x90E1F0 + 0xE2`, matching ConsoleUtil-Extended's shipping VR branch
+    and the VR address library auto-diff) instead of SE id 52065, which the
+    VR database does not map;
+  - startup logs the detected runtime (`runtime: Skyrim SE/AE/VR x.y.z`) and
+    the skee BodyMorph interface version (RaceMenu VR 0.4.14 exports v4).
+  VR requires SKSEVR, VR Address Library, Skyrim VR ESL Support, SkyUI VR and
+  RaceMenu VR; ships as a separate small **VR Patch** archive
+  (`tools/package_vr_patch.ps1`, dll + `README_VR.txt` only — esp/meshes/
+  scripts stay runtime-shared in the main package).
+
 ## v1.2.1 (2026-07-07)
 
 ### Fixed

@@ -211,6 +211,13 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
             fileStamp);
     }
 
+    // Runtime banner: one NG DLL serves SE/AE/VR, so community reports must show
+    // WHICH engine loaded us. VR additionally requires the VR Address Library
+    // (Data/SKSE/Plugins/version-1-4-15-0.csv) - REL fails hard without it.
+    SKSE::log::info("runtime: Skyrim {} {}",
+        REL::Module::IsVR() ? "VR" : (REL::Module::IsAE() ? "AE" : "SE"),
+        REL::Module::get().version().string("."));
+
     // Honor the external kill-switch as early as possible. When disabled we return
     // true (so the DLL still loads and its ESP masters resolve) but register
     // NOTHING - no trampoline, no serialization, no Papyrus, no message listener.

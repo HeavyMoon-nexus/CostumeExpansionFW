@@ -89,10 +89,22 @@ namespace CostumeFW
         // Call-site offset into the console runner is variant-specific:
         // SE=0xE2, AE(1.6.x incl 1.6.1170)=0x52, VR=0xE2. Using 0xE2 on AE split
         // an instruction -> ILLEGAL_INSTRUCTION crash. (ConsoleUtil-Extended.)
-        REL::Relocation<std::uintptr_t> target{
-            REL::RelocationID(52065, 52952), REL::VariantOffset(0xE2, 0x52, 0xE2)
-        };
-        ConsoleHook::func = SKSE::GetTrampoline().write_call<5>(target.address(), ConsoleHook::thunk);
+        std::uintptr_t callSite = 0;
+        if (REL::Module::IsVR()) {
+            // SkyrimVR 1.4.15.0: the console-runner fn has no address-library id
+            // (SE id 52065 is absent from the VR database, and constructing the
+            // RelocationID below would be load-fatal), so use the raw offset.
+            // Two independent sources agree on 0x90E1F0: ConsoleUtil-Extended's
+            // shipping VR branch and the VR address library's auto-diff candidate
+            // (sse_vr.csv). VR is frozen at 1.4.15.0, so a raw offset cannot rot.
+            callSite = REL::Offset(0x90E1F0 + 0xE2).address();
+        } else {
+            REL::Relocation<std::uintptr_t> target{
+                REL::RelocationID(52065, 52952), REL::VariantOffset(0xE2, 0x52, 0xE2)
+            };
+            callSite = target.address();
+        }
+        ConsoleHook::func = SKSE::GetTrampoline().write_call<5>(callSite, ConsoleHook::thunk);
         SKSE::log::info("console hook installed (Script::CompileAndRun)");
     }
 

@@ -1,7 +1,6 @@
 #include "SkinRebind.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
-#include "Offsets.h"
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
@@ -632,9 +631,12 @@ namespace CostumeFW
 
         // Apply one BGSTextureSet to a geometry's lighting-shader material IN
         // PLACE (safe: our cloned NIF owns this material). Uses only type-correct
-        // virtuals - NOT the community-REL InitializeShader that crashed on the
-        // envmap material. (skee/po3 pattern, minus the material clone we don't
-        // need because the material is private.)
+        // virtuals - NOT the community-REL InitializeShader (ids 99866/106432) or
+        // InvalidateTextures (99865/106431): those RESOLVE on 1.6.1170 but crash
+        // with an access violation in BSLightingShader when called on a cloned
+        // envmap material (and neither id exists in the VR address library).
+        // (skee/po3 pattern, minus the material clone we don't need because the
+        // material is private.)
         bool ApplyTextureSet(RE::BSGeometry* a_geom, RE::BGSTextureSet* a_txst)
         {
             if (!a_geom || !a_txst) {

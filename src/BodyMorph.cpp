@@ -34,8 +34,16 @@ namespace CostumeFW::BodyMorph
             g_bodyMorph = static_cast<IBodyMorphInterface*>(
                 msg.interfaceMap->QueryInterface("BodyMorph"));
         }
-        SKSE::log::info("skee BodyMorph interface: {}",
-            g_bodyMorph ? "acquired" : "unavailable (RaceMenu/skee not found)");
+        if (g_bodyMorph) {
+            // SE RaceMenu 0.4.19.x and RaceMenu VR 0.4.14 both export BodyMorph
+            // v4 (VR verified in expired's VR-branch source); log the version so
+            // a future ABI bump shows up in community reports instead of as a
+            // mystery misbehavior.
+            SKSE::log::info("skee BodyMorph interface: acquired (version {})",
+                g_bodyMorph->GetVersion());
+        } else {
+            SKSE::log::info("skee BodyMorph interface: unavailable (RaceMenu/skee not found)");
+        }
     }
 
     bool Available()
