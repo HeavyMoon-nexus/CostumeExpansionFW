@@ -1,4 +1,5 @@
 // espmerge - one-shot v1.2.1 plugin consolidation for Costume Expansion FW.
+// CostumeFW_NPC.esp is a PERMANENT separate add-on - NEVER fold it.
 //
 // Folds CostumeFW_Boxes_FSMPCarrier_001.esp (houseCARL patch: overrides +
 // new records) into CostumeFW_Boxes.esp and writes a single ESL-flagged
@@ -45,10 +46,26 @@ internal static class Program
     private const uint kMcmQuestLocalId = 0x802;  // CFW_MCMQuest (StartGameEnabled)
 
     // Patch-local ids NOT carried over (PoC head-carrier leftovers).
+
     private static readonly uint[] kDropPatchIds = { 0x806, 0x807, 0x808 };
 
     private static int Main(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--verify-npc") {
+            try { return VerifyNpcAddon(args[1]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 3 && args[0] == "--build-npc") {
+            try {
+                var result = BuildNpcAddon(args[1], args[2]);
+                if (result != 0) return result;
+                return VerifyNpcAddon(Path.Combine(args[2], "CostumeFW_NPC.esp"));
+            } catch (Exception ex) {
+                Console.Error.WriteLine("FATAL: " + ex);
+                return 1;
+            }
+        }
+
         var basePath = args.Length > 0 ? args[0] : kDefaultBase;
         var patchPath = args.Length > 1 ? args[1] : kDefaultPatch;
         var outDir = args.Length > 2 ? args[2] : kDefaultOutDir;
@@ -64,6 +81,171 @@ internal static class Program
             return 1;
         }
     }
+
+    private static readonly uint[] kNpcRaceIds = {
+        0x013740, 0x013741, 0x013742, 0x013743, 0x013744,
+        0x013745, 0x013746, 0x013747, 0x013748, 0x013749,
+        0x08883A, 0x08883C, 0x08883D, 0x088840, 0x088844,
+        0x088845, 0x088794, 0x0A82B9, 0x088846, 0x088884
+    };
+
+    private static int BuildNpcAddon(string corePath, string outDir)
+    {
+        if (!File.Exists(corePath)) {
+            Console.Error.WriteLine("missing core template: " + corePath);
+            return 1;
+        }
+        var source = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(corePath), SkyrimRelease.SkyrimSE);
+        var armorTemplate = source.Armors.FirstOrDefault(x => x.FormKey.ID == 0x801);
+        var addonTemplate = source.ArmorAddons.FirstOrDefault(x => x.FormKey.ID == 0x900);
+        if (armorTemplate == null || addonTemplate == null) {
+            Console.Error.WriteLine("core template records 000801/000900 are missing");
+            return 1;
+        }
+
+        var outKey = ModKey.FromNameAndExtension("CostumeFW_NPC.esp");
+        var skyrimKey = ModKey.FromNameAndExtension("Skyrim.esm");
+        var outMod = new SkyrimMod(outKey, SkyrimRelease.SkyrimSE);
+        outMod.ModHeader.Flags |= (SkyrimModHeader.HeaderFlag)0x200;
+
+        for (var i = 0; i < 8; ++i) {
+            var armorKey = new FormKey(outKey, (uint)(0x800 + i));
+            var addonKey = new FormKey(outKey, (uint)(0x808 + i));
+            var armor = armorTemplate.Duplicate(armorKey);
+            var addon = addonTemplate.Duplicate(addonKey);
+            armor.EditorID = $"CFW_PubToken{i + 1:00}";
+            armor.Name = "Costume (unpublished)";
+            armor.MajorFlags &= ~Armor.MajorFlag.NonPlayable;
+            armor.BodyTemplate.FirstPersonFlags = (BipedObjectFlag)(1u << (44 - 30));
+            armor.Armature.Clear();
+            armor.Armature.Add(new FormLink<IArmorAddonGetter>(addonKey));
+            addon.EditorID = $"CFW_PubCarrier{i + 1:00}";
+            addon.BodyTemplate.FirstPersonFlags = (BipedObjectFlag)(1u << (44 - 30));
+            // No "Meshes\" prefix: ARMA world-model paths are Data\meshes-relative
+            // (core CostumeFW.esp box carriers and RepointCarrierSexed both write
+            // "CostumeFW\..."; BSModelDB::Demand rejects a leading meshes\).
+            addon.WorldModel.Male.File = $@"CostumeFW\Pub{i + 1:00}_carrier_m_r0.nif";
+            addon.WorldModel.Female.File = $@"CostumeFW\Pub{i + 1:00}_carrier_f_r0.nif";
+            SetNpcRaces(addon, skyrimKey);
+            outMod.Armors.RecordCache.Set(armor);
+            outMod.ArmorAddons.RecordCache.Set(addon);
+        }
+
+        for (var i = 0; i < 8; ++i) {
+            var armorKey = new FormKey(outKey, (uint)(0x810 + i));
+            var addonKey = new FormKey(outKey, (uint)(0x818 + i));
+            var armor = armorTemplate.Duplicate(armorKey);
+            var addon = addonTemplate.Duplicate(addonKey);
+            armor.EditorID = $"CFW_NpcPersistTok{i + 1:00}";
+            armor.Name = "Costume NPC carrier";
+            armor.MajorFlags |= Armor.MajorFlag.NonPlayable;
+            armor.BodyTemplate.FirstPersonFlags = (BipedObjectFlag)(1u << (54 - 30));
+            armor.Armature.Clear();
+            armor.Armature.Add(new FormLink<IArmorAddonGetter>(addonKey));
+            addon.EditorID = $"CFW_NpcPersistCar{i + 1:00}";
+            addon.BodyTemplate.FirstPersonFlags = (BipedObjectFlag)(1u << (54 - 30));
+            var file = $@"CostumeFW\NpcPersist{i + 1:00}_carrier_r0.nif";
+            addon.WorldModel.Male.File = file;
+            addon.WorldModel.Female.File = file;
+            SetNpcRaces(addon, skyrimKey);
+            outMod.Armors.RecordCache.Set(armor);
+            outMod.ArmorAddons.RecordCache.Set(addon);
+        }
+
+        Directory.CreateDirectory(outDir);
+        var outPath = Path.Combine(outDir, "CostumeFW_NPC.esp");
+        outMod.WriteToBinary(outPath);
+        Console.WriteLine("npc add-on -> " + outPath);
+        return 0;
+    }
+
+    private static void SetNpcRaces(ArmorAddon addon, ModKey skyrimKey)
+    {
+        addon.Race.SetTo(new FormKey(skyrimKey, 0x000019));
+        addon.AdditionalRaces.Clear();
+        foreach (var id in kNpcRaceIds)
+            addon.AdditionalRaces.Add(new FormLink<IRaceGetter>(new FormKey(skyrimKey, id)));
+    }
+
+    private static int VerifyNpcAddon(string path)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing NPC add-on: " + path);
+            return 1;
+        }
+        var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+        if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
+            errors.Add("ESL flag missing");
+        var masters = mod.ModHeader.MasterReferences.Select(x => x.Master.FileName.String).ToList();
+        if (masters.Count != 1 || !masters[0].Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+            errors.Add("masters must be [Skyrim.esm], got [" + string.Join(", ", masters) + "]");
+        if (mod.Armors.Count != 16) errors.Add($"expected 16 ARMO, got {mod.Armors.Count}");
+        if (mod.ArmorAddons.Count != 16) errors.Add($"expected 16 ARMA, got {mod.ArmorAddons.Count}");
+
+        for (var i = 0; i < 16; ++i) {
+            var armorId = (uint)(0x800 + (i < 8 ? i : i + 8));
+            var addonId = (uint)(0x808 + (i < 8 ? i : i + 8));
+            var armor = mod.Armors.FirstOrDefault(x => x.FormKey.ID == armorId);
+            var addon = mod.ArmorAddons.FirstOrDefault(x => x.FormKey.ID == addonId);
+            if (armor == null || addon == null) {
+                errors.Add($"missing pair ARMO {armorId:X3} / ARMA {addonId:X3}");
+                continue;
+            }
+            var slot = i < 8 ? 44 : 54;
+            var mask = (BipedObjectFlag)(1u << (slot - 30));
+            if (armor.BodyTemplate.FirstPersonFlags != mask || addon.BodyTemplate.FirstPersonFlags != mask)
+                errors.Add($"slot mismatch for pair {i + 1}");
+            if (armor.Armature.Count != 1 || armor.Armature[0].FormKey != addon.FormKey)
+                errors.Add($"armature link mismatch for pair {i + 1}");
+            if (i < 8 && (armor.MajorFlags & Armor.MajorFlag.NonPlayable) != 0)
+                errors.Add($"publish token {i + 1} is non-playable");
+            if (i >= 8 && (armor.MajorFlags & Armor.MajorFlag.NonPlayable) == 0)
+                errors.Add($"NPC persist token {i - 7} is playable");
+            if (addon.Race.FormKey != new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x19) ||
+                    addon.AdditionalRaces.Count != kNpcRaceIds.Length)
+                errors.Add($"race list mismatch for pair {i + 1}");
+            if (addon.FirstPersonModel != null)
+                errors.Add($"first-person model must be empty for pair {i + 1}");
+            var number = i < 8 ? i + 1 : i - 7;
+            var expectedArmorEdid = i < 8 ? $"CFW_PubToken{number:00}" : $"CFW_NpcPersistTok{number:00}";
+            var expectedAddonEdid = i < 8 ? $"CFW_PubCarrier{number:00}" : $"CFW_NpcPersistCar{number:00}";
+            if (armor.EditorID != expectedArmorEdid || addon.EditorID != expectedAddonEdid)
+                errors.Add($"editor ID mismatch for pair {i + 1}");
+            var expectedRaceKeys = kNpcRaceIds
+                .Select(id => new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), id)).ToHashSet();
+            if (!addon.AdditionalRaces.Select(x => x.FormKey).ToHashSet().SetEquals(expectedRaceKeys))
+                errors.Add($"additional race set mismatch for pair {i + 1}");
+            // RawPath = the string physically stored in the record. ToString()
+            // normalizes to a Data-relative path (re-adding "Meshes\"), which
+            // would mask a stored prefix - the exact defect this check hunts.
+            var malePath = addon.WorldModel?.Male?.File?.RawPath?.Replace('/', '\\');
+            var femalePath = addon.WorldModel?.Female?.File?.RawPath?.Replace('/', '\\');
+            // Exact match, not EndsWith: a stray "Meshes\" prefix must FAIL here
+            // (paths are Data\meshes-relative; EndsWith let the prefix through).
+            if (i < 8) {
+                var maleExpected = $"CostumeFW\\Pub{number:00}_carrier_m_r0.nif";
+                var femaleExpected = $"CostumeFW\\Pub{number:00}_carrier_f_r0.nif";
+                if (!string.Equals(malePath, maleExpected, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(femalePath, femaleExpected, StringComparison.OrdinalIgnoreCase))
+                    errors.Add($"publish model paths mismatch for pair {i + 1} (want exact, no meshes\\ prefix)");
+            } else {
+                var expected = $"CostumeFW\\NpcPersist{number:00}_carrier_r0.nif";
+                if (!string.Equals(malePath, expected, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(femalePath, expected, StringComparison.OrdinalIgnoreCase))
+                    errors.Add($"NPC persist model paths mismatch for pair {i + 1} (want exact, no meshes\\ prefix)");
+            }
+
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify NPC: 16 ARMO + 16 ARMA, ESL, Skyrim.esm-only, links/slots/races OK");
+        return 0;
+    }
+
 
     private static int Run(string basePath, string patchPath, string outDir, uint offset)
     {

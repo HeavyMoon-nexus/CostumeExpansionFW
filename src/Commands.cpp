@@ -1,8 +1,10 @@
 #include "Commands.h"
 #include "BoxStore.h"
 #include "SkinRebind.h"
+#include "PublishStore.h"
 
 #include "RE/S/Script.h"
+#include "RE/C/Console.h"
 
 #include <algorithm>
 #include <cctype>
@@ -113,7 +115,7 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
             return;
         }
 
@@ -384,6 +386,84 @@ namespace CostumeFW
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
+        } else if (sub == "npcpersist") {
+            const auto split = rest.find(' ');
+            const auto op = Lower(split == std::string::npos ? rest : rest.substr(0, split));
+            if (op.empty() || op == "list") {
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    for (const auto& item : NprAssignmentsSnapshot()) {
+                        const auto line = std::format("[CEF] npcpersist {} actor={:08X} contents={}{}{}",
+                            item.poolSlot + 1, item.actorFormID, item.contents.size(),
+                            item.unresolved ? " (unresolved)" : "",
+                            item.restoreSuspended ? " (restore suspended)" : "");
+                        c->Print(line.c_str());
+                    }
+                }
+                return;
+            }
+            auto selected = RE::Console::GetSelectedRef();
+            auto* actor = selected ? selected->As<RE::Actor>() : nullptr;
+            if (!actor || actor == RE::PlayerCharacter::GetSingleton()) {
+                Print("[CEF] npcpersist: select an NPC in the console first");
+                return;
+            }
+            if (op == "add") {
+                const std::string id = split == std::string::npos ? "" : Trim(rest.substr(split + 1));
+                if (id.find(':') == std::string::npos) {
+                    Print("[CEF] usage: cef npcpersist add <FormID:Plugin.esp>");
+                    return;
+                }
+                const auto handle = actor->GetHandle();
+                SKSE::GetTaskInterface()->AddTask([handle, id] {
+                    auto ref = handle.get();
+                    auto* target = ref ? ref.get()->As<RE::Actor>() : nullptr;
+                    Print(AssignNpcPersist(target, { id }) ?
+                        "[CEF] NPC persist assigned" : "[CEF] NPC persist assignment failed");
+                });
+            } else if (op == "remove") {
+                const auto handle = actor->GetHandle();
+                SKSE::GetTaskInterface()->AddTask([handle] {
+                    auto ref = handle.get();
+                    Print(RemoveNpcPersist(ref ? ref.get()->As<RE::Actor>() : nullptr) ?
+                        "[CEF] NPC persist removed" : "[CEF] NPC has no persist assignment");
+                });
+            }
+        } else if (sub == "pub") {
+            if (rest.empty() || rest == "list") {
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    const auto bindings = PubBindingsSnapshot();
+                    for (const auto& snap : PublishedSnapshot()) {
+                        int holders = 0, wearers = 0, unresolved = 0;
+                        for (const auto& binding : bindings) {
+                            if (binding.pubSlot != snap.pubSlot) continue;
+                            holders += binding.holder;
+                            wearers += binding.wearer;
+                            unresolved += binding.unresolved;
+                        }
+                        const auto line = std::format(
+                            "[CEF] pub {} '{}' slot={} contents={} holders={} wearers={} unresolved={}",
+                            snap.pubSlot + 1, snap.label, snap.sourceSlot, snap.contents.size(),
+                            holders, wearers, unresolved);
+                        c->Print(line.c_str());
+                    }
+                    const auto cap = std::format("[CEF] injected NPCs: {} / {}",
+                        InjectedNpcCount(), MaxNpcInjected());
+                    c->Print(cap.c_str());
+                }
+            } else if (rest == "diag") {
+                if (auto* c = RE::ConsoleLog::GetSingleton())
+                    for (const auto& line : NpcDiagLines()) c->Print(line.c_str());
+            } else {
+                const auto split = rest.find(' ');
+                const auto op = Lower(split == std::string::npos ? rest : rest.substr(0, split));
+                int slot = -1;
+                try { slot = std::stoi(split == std::string::npos ? "" : rest.substr(split + 1)) - 1; }
+                catch (...) { Print("[CEF] usage: cef pub refresh|recall <1-8>"); return; }
+                if (op == "refresh")
+                    SKSE::GetTaskInterface()->AddTask([slot] { RefreshPubWearers(slot); });
+                else if (op == "recall")
+                    SKSE::GetTaskInterface()->AddTask([slot] { RecallPublished(slot); });
+            }
         } else if (sub == "recover") {
             // Deliberate escape hatch for the STORE-ONLY return rule: the MCM
             // return flows never fabricate an item (a store miss on this save
@@ -400,7 +480,7 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
         }
     }
 }

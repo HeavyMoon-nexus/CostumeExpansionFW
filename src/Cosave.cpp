@@ -1,6 +1,7 @@
 #include "Cosave.h"
 #include "BoxStore.h"
 #include "SkinRebind.h"
+#include "PublishStore.h"
 
 #include <cstdint>
 #include <string>
@@ -19,6 +20,12 @@ namespace CostumeFW
         // remapped through ResolveFormID on load.
         constexpr std::uint32_t kRecordStore = 'STOR';
         constexpr std::uint32_t kStoreVersion = 1;
+        constexpr std::uint32_t kRecordPubState = 'PUBS';
+        constexpr std::uint32_t kRecordPubBind = 'PUBB';
+        constexpr std::uint32_t kPubVersion = 1;
+        constexpr std::uint32_t kRecordNprState = 'NPRS';
+        constexpr std::uint32_t kNprVersion = 1;
+        constexpr std::uint32_t kMaxBindCount = 1024;
 
         void WriteString(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
         {
@@ -90,6 +97,36 @@ namespace CostumeFW
             } else {
                 SKSE::log::error("cosave: OpenRecord(STOR) failed");
             }
+
+            const auto states = PubStatesForSave();
+            if (a_intfc->OpenRecord(kRecordPubState, kPubVersion)) {
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(states.size()));
+                for (const auto& state : states) {
+                    a_intfc->WriteRecordData(state.pubSlot);
+                    a_intfc->WriteRecordData(static_cast<std::uint8_t>(state.hidden ? 1 : 0));
+                }
+            }
+            const auto bindings = PubBindingsForSave();
+            if (a_intfc->OpenRecord(kRecordPubBind, kPubVersion)) {
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(bindings.size()));
+                for (const auto& binding : bindings) {
+                    a_intfc->WriteRecordData(binding.pubSlot);
+                    a_intfc->WriteRecordData(binding.actorFormID);
+                    a_intfc->WriteRecordData(binding.flags);
+                }
+            }
+            const auto npr = NprAssignmentsForSave();
+            if (a_intfc->OpenRecord(kRecordNprState, kNprVersion)) {
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(npr.size()));
+                for (const auto& item : npr) {
+                    a_intfc->WriteRecordData(item.poolSlot);
+                    a_intfc->WriteRecordData(item.actorFormID);
+                    a_intfc->WriteRecordData(static_cast<std::uint32_t>(item.contents.size()));
+                    for (const auto& id : item.contents) WriteString(a_intfc, id);
+                }
+            } else {
+                SKSE::log::error("cosave: OpenRecord(NPRS) failed");
+            }
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intfc)
@@ -113,7 +150,74 @@ namespace CostumeFW
                     }
                     continue;
                 }
-                if (type != kRecordActive) {
+                if (type == kRecordPubState) {
+                    std::uint32_t count = 0;
+                    if (a_intfc->ReadRecordData(count) != sizeof(count) || count > kMaxBindCount)
+                        continue;
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        std::uint8_t slot = 0, flags = 0;
+                        if (a_intfc->ReadRecordData(slot) != sizeof(slot) ||
+                            a_intfc->ReadRecordData(flags) != sizeof(flags)) break;
+                        RestorePubState(slot, (flags & 1) != 0);
+                    }
+                    continue;
+                }
+                if (type == kRecordPubBind) {
+                    std::uint32_t count = 0;
+                    if (a_intfc->ReadRecordData(count) != sizeof(count) || count > kMaxBindCount)
+                        continue;
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        std::uint8_t slot = 0, flags = 0;
+                        RE::FormID saved = 0, resolved = 0;
+                        if (a_intfc->ReadRecordData(slot) != sizeof(slot) ||
+                            a_intfc->ReadRecordData(saved) != sizeof(saved) ||
+                            a_intfc->ReadRecordData(flags) != sizeof(flags)) break;
+                        if (a_intfc->ResolveFormID(saved, resolved) && resolved)
+                            RestorePubBinding(slot, resolved, flags);
+                        else
+                            CarryUnresolvedPubBinding(slot, saved, flags);
+                    }
+                    continue;
+                }
+                if (type != kRecordActive && type != kRecordNprState) {
+                    continue;
+                }
+                if (type == kRecordNprState) {
+                    std::uint32_t count = 0;
+                    if (a_intfc->ReadRecordData(count) != sizeof(count) || count > kMaxBindCount)
+                        continue;
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        std::uint8_t slot = 0;
+                        RE::FormID saved = 0, resolved = 0;
+                        std::uint32_t contentCount = 0;
+                        if (a_intfc->ReadRecordData(slot) != sizeof(slot) ||
+                            a_intfc->ReadRecordData(saved) != sizeof(saved) ||
+                            a_intfc->ReadRecordData(contentCount) != sizeof(contentCount) ||
+                            contentCount > kMaxItemCount) {
+                            SKSE::log::error("cosave: corrupt NPRS assignment {}/{}", i, count);
+                            break;
+                        }
+                        std::vector<std::string> contents;
+                        bool valid = true;
+                        for (std::uint32_t j = 0; j < contentCount; ++j) {
+                            std::string id;
+                            if (!ReadStringChecked(a_intfc, id)) {
+                                valid = false;
+                                break;
+                            }
+                            contents.push_back(std::move(id));
+                        }
+                        if (!valid) break;
+                        if (a_intfc->ResolveFormID(saved, resolved) && resolved) {
+                            auto* form = RE::TESForm::LookupByID(resolved);
+                            auto* actor = form ? form->As<RE::Actor>() : nullptr;
+                            const bool female = actor && actor->GetActorBase() &&
+                                actor->GetActorBase()->GetSex() == RE::SEXES::kFemale;
+                            RestoreNprAssignment(slot, resolved, std::move(contents), female);
+                        } else {
+                            CarryUnresolvedNprAssignment(slot, saved, std::move(contents), false);
+                        }
+                    }
                     continue;
                 }
                 std::uint32_t count = 0;
@@ -151,12 +255,14 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([] {
                 Reconcile();
                 SyncPersistManifest();
+                ReapplyNpcBindings();
             });
         }
 
         void RevertCallback(SKSE::SerializationInterface*)
         {
             ClearRegistry();
+            ClearNpcBindings();
             g_unresolvedActives.clear();
             // The hidden store is per-save: clear at every load START so a save
             // without a STOR record can never inherit the previous save's store

@@ -10,7 +10,7 @@ Scriptname CostumeFW_MCM extends SKI_ConfigBase
 ; Native mutators are deferred to the main thread, so we set option values to the
 ; user's intent and reconcile the display on the next ForcePageReset.
 
-int property CURRENT_VERSION = 22 autoReadonly
+int property CURRENT_VERSION = 23 autoReadonly
 
 ; --- Main page state ---
 int _optEnable
@@ -167,7 +167,7 @@ endFunction
 ; after closing + reopening the MCM).
 function BuildPages()
     int n = CFW_Native.GetBoxCount()
-    string[] p = Utility.CreateStringArray(n + 5, "")
+    string[] p = Utility.CreateStringArray(n + 6, "")
     p[0] = "Main"
     p[1] = "Persist"
     p[2] = "Boxes"
@@ -182,8 +182,9 @@ function BuildPages()
         _boxPageSlots[i] = slot
         i += 1
     endWhile
-    p[3 + n] = "Presets"
-    p[4 + n] = "Diagnostics"
+    p[3 + n] = "NPC"
+    p[4 + n] = "Presets"
+    p[5 + n] = "Diagnostics"
     Pages = p
 endFunction
 
@@ -202,6 +203,8 @@ event OnPageReset(string a_page)
         ResetBoxesOverviewPage()
     elseIf a_page == "Persist"
         ResetPersistPage()
+    elseIf a_page == "NPC"
+        ResetNpcStubPage()
     elseIf a_page == "Presets"
         ResetPresetsPage()
     elseIf a_page == "Diagnostics"
@@ -221,9 +224,25 @@ event OnPageReset(string a_page)
             ResetSingleBoxPage(boxIdx)
         else
             ResetDeletedBoxPage()  ; box was deleted this session
+
         endIf
     endIf
 endEvent
+
+function ResetNpcStubPage()
+    SetCursorFillMode(TOP_TO_BOTTOM)
+    AddHeaderOption("NPC Distribution")
+    AddTextOption("NPC distribution is managed in the", "")
+    AddTextOption("SKSE Menu Framework (SMF) menu, not in this MCM.", "")
+    AddTextOption("Costume Expansion FW's UI is migrating to", "")
+    AddTextOption("SKSE Menu Framework going forward; this MCM", "")
+    AddTextOption("remains for transition purposes only.", "")
+    if !CFW_Native.NpcEspLoaded()
+        AddEmptyOption()
+        AddTextOption("Note: the NPC token add-on plugin", "")
+        AddTextOption("(CostumeFW_NPC.esp) is not installed.", "")
+    endif
+endFunction
 
 string Function ArmorTypeName(int a_type)
     if a_type == 1

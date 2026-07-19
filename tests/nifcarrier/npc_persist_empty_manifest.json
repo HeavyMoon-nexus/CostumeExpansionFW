@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "boxes": [],
+  "npcPersist": [
+    {
+      "pool": 0,
+      "sex": "f",
+      "contents": []
+    }
+  ]
+}

@@ -5,6 +5,7 @@
 #   2. psc compile (pex deployed - HANDOVER 8.6d recipe)
 #   3. tools/espmerge fold of any patch esp into CostumeFW.esp  <-- v1.3.0 blocker:
 #      CostumeFW_VanillaSlots_001.esp must be folded (HANDOVER 9.2 F1 release note)
+# CostumeFW_NPC.esp is a permanent separate add-on: NEVER fold or stage it here.
 param(
     [Parameter(Mandatory = $true)][string]$Version
 )
@@ -29,6 +30,17 @@ Copy-Item "$mod\SEQ\CostumeFW.seq" "$stage\SEQ\"
 # would redistribute them (caught 2026-07-13 staging v1.3.0: 85MB vs 234-byte
 # placeholders). package_assets/meshes = the 1.2.1 pool + vanilla-slot boxes.
 Copy-Item "$repo\package_assets\meshes" "$stage\meshes" -Recurse
+# The Pub*/NpcPersist* rotation pools are ADDON-ONLY (CostumeFW_NPC zip via
+# package_npc_addon.ps1). Shipping them here too would put the same virtual
+# paths in two mods, making the in-proc sync's VFS write-through target depend
+# on MO2 priority. Prune them from the core staging and fail loud on leaks.
+Remove-Item "$stage\meshes\CostumeFW\Pub*_carrier_*.nif"
+Remove-Item "$stage\meshes\CostumeFW\NpcPersist*_carrier_*.nif"
+Remove-Item "$stage\meshes\CostumeFW\XML\Pub*_physics_*.xml"
+Remove-Item "$stage\meshes\CostumeFW\XML\NpcPersist*_physics_*.xml"
+$npcLeak = Get-ChildItem "$stage\meshes" -Recurse -File |
+    Where-Object { $_.Name -like 'Pub*' -or $_.Name -like 'NpcPersist*' }
+if ($npcLeak) { throw "addon-only pool leaked into core staging ($($npcLeak.Count) file(s))" }
 New-Item -ItemType Directory -Force "$stage\Scripts" | Out-Null
 Copy-Item "$mod\Scripts\CFW_Native.pex" "$stage\Scripts\"
 Copy-Item "$mod\Scripts\CostumeFW_MCM.pex" "$stage\Scripts\"

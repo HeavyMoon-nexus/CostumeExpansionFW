@@ -1,5 +1,7 @@
 Scriptname CFW_Native Hidden
 
+Bool Function NpcEspLoaded() Global Native
+
 ; Costume Expansion FW - native API (Phase A).
 ; Backed by CostumeExpansionFW.dll (RegisterPapyrus). All scene-graph mutators
 ; are deferred to the game's main thread, so they return True meaning

@@ -1,6 +1,7 @@
 #include "BoxStore.h"
 #include "BodyMorph.h"
 #include "SkinRebind.h"
+#include "PublishStore.h"
 #include "nifcarrier/NifCarrierCore.h"
 
 #include "RE/A/ActorEquipManager.h"
@@ -258,6 +259,7 @@ namespace CostumeFW
                 enchants[id] = std::move(arr2);
             }
             doc["enchants"] = std::move(enchants);
+            EmitPublishJson(doc);
 
             if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
                 SKSE::log::error("settings: cannot write {}", kSettingsPath);
@@ -446,6 +448,41 @@ namespace CostumeFW
                 }
                 return { { "id", id }, { "nif", nif } };
             };
+            // Published snapshots are sex-split and frozen. Resolve from the
+            // snapshot's gender override, never from the live box setting.
+            const auto resolvePublishedContent = [&](const std::string& id, RE::SEX requested,
+                                                     const PubSnapshot& snap) -> nlohmann::json {
+                const auto colon = id.find(':');
+                if (colon == std::string::npos) {
+                    return nullptr;
+                }
+                const auto lid = static_cast<std::uint32_t>(
+                    std::strtoul(id.substr(0, colon).c_str(), nullptr, 16));
+                const std::string plugin = id.substr(colon + 1);
+                auto* arma = dh->LookupForm<RE::TESObjectARMA>(lid, plugin);
+                if (!arma) {
+                    if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin)) {
+                        arma = PickAddonForPlayer(armo);
+                    }
+                }
+                if (!arma) {
+                    return nullptr;
+                }
+                RE::SEX sex = requested;
+                if (const auto it = snap.settings.find(id); it != snap.settings.end() && it->second) {
+                    if (it->second->genderMode == 1) sex = RE::SEXES::kMale;
+                    if (it->second->genderMode == 2) sex = RE::SEXES::kFemale;
+                }
+                const RE::SEX other = sex == RE::SEXES::kMale ? RE::SEXES::kFemale : RE::SEXES::kMale;
+                const char* nif = arma->bipedModels[sex].model.c_str();
+                if (!nif || !*nif) {
+                    nif = arma->bipedModels[other].model.c_str();
+                }
+                if (!nif || !*nif) {
+                    return nullptr;
+                }
+                return { { "id", id }, { "nif", nif } };
+            };
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
                 nlohmann::json jb;
@@ -461,6 +498,48 @@ namespace CostumeFW
                 arr.push_back(std::move(jb));
             }
             doc["boxes"] = std::move(arr);
+            if (NpcEspLoaded()) {
+                auto published = nlohmann::json::array();
+                for (const auto& snap : PublishedSnapshot()) {
+                    nlohmann::json entry;
+                    entry["pub"] = snap.pubSlot;
+                    auto male = nlohmann::json::array();
+                    auto female = nlohmann::json::array();
+                    for (const auto& id : snap.contents) {
+                        if (auto c = resolvePublishedContent(id, RE::SEXES::kMale, snap); !c.is_null())
+                            male.push_back(std::move(c));
+                        if (auto c = resolvePublishedContent(id, RE::SEXES::kFemale, snap); !c.is_null())
+                            female.push_back(std::move(c));
+                    }
+                    entry["contents_m"] = std::move(male);
+                    entry["contents_f"] = std::move(female);
+                    published.push_back(std::move(entry));
+                }
+                doc["published"] = std::move(published);
+                auto npcPersist = nlohmann::json::array();
+                for (const auto& assignment : NprAssignmentsSnapshot()) {
+                    if (assignment.unresolved) continue;
+                    PubSnapshot live;
+                    for (const auto& id : assignment.contents) {
+                        auto cfg = std::make_shared<ContentSettings>();
+                        cfg->genderMode = GenderModeFor(id);
+                        live.settings.emplace(id, std::move(cfg));
+                    }
+                    auto contents = nlohmann::json::array();
+                    const RE::SEX sex = assignment.female ?
+                        RE::SEXES::kFemale : RE::SEXES::kMale;
+                    for (const auto& id : assignment.contents) {
+                        if (auto c = resolvePublishedContent(id, sex, live); !c.is_null())
+                            contents.push_back(std::move(c));
+                    }
+                    npcPersist.push_back({
+                        { "pool", assignment.poolSlot },
+                        { "sex", assignment.female ? "f" : "m" },
+                        { "contents", std::move(contents) }
+                    });
+                }
+                doc["npcPersist"] = std::move(npcPersist);
+            }
             // approach-C persist section: the token-less class rides the facegen
             // head path. sync builds Persist_carrier/_partNN (+ the per-*-shape
             // renamed physics XML) from these; CEF registers the head-part pool
@@ -506,6 +585,25 @@ namespace CostumeFW
         // 2026-07-03), which is exactly why the slots are pre-created. Repointing
         // the token ARMA at the new slot path makes the next equip load a path the
         // engine has not cached this session = the freshly built carrier. This is
+        bool RepointCarrierSexed(RE::TESObjectARMO* a_armo, const std::string& a_male,
+            const std::string& a_female)
+        {
+            if (!a_armo || a_armo->armorAddons.empty()) {
+                return false;
+            }
+            auto* arma = a_armo->armorAddons.front();
+            bool changed = false;
+            if (a_male != arma->bipedModels[RE::SEXES::kMale].model.c_str()) {
+                arma->bipedModels[RE::SEXES::kMale].model = a_male.c_str();
+                changed = true;
+            }
+            if (a_female != arma->bipedModels[RE::SEXES::kFemale].model.c_str()) {
+                arma->bipedModels[RE::SEXES::kFemale].model = a_female.c_str();
+                changed = true;
+            }
+            return changed;
+        }
+
         // a volatile in-memory form edit - reapplied on every settings load.
         constexpr const char* kCarriersJsonPath = "Data\\meshes\\CostumeFW\\carriers.json";
 
@@ -759,6 +857,50 @@ namespace CostumeFW
                     SKSE::log::info("carrier override: slot {} token '{}' -> {} (re-equip to apply)",
                         key, b.token, file);
                     anyChanged = true;
+                }
+            }
+            if (NpcEspLoaded()) {
+                const auto pit = doc.find("published");
+                if (pit != doc.end() && pit->is_object()) {
+                    for (const auto& snap : PublishedSnapshot()) {
+                        const auto key = std::to_string(snap.pubSlot);
+                        const auto entry = pit->find(key);
+                        if (entry == pit->end() || !entry->is_object()) {
+                            continue;
+                        }
+                        const std::string male = entry->value("fileM", "");
+                        const std::string female = entry->value("fileF", "");
+                        if (!CarrierFileOnDisk(male) || !CarrierFileOnDisk(female)) {
+                            SKSE::log::warn("published carrier {} missing/invalid - keeping ESP defaults", key);
+                            continue;
+                        }
+                        if (RepointCarrierSexed(PubTokenArmo(snap.pubSlot), male, female)) {
+                            SKSE::log::info("published carrier {} -> male={}, female={} (Refresh to apply)",
+                                key, male, female);
+                            anyChanged = true;
+                        }
+                    }
+                }
+            }
+            if (NpcEspLoaded()) {
+                const auto nit = doc.find("npcPersist");
+                if (nit != doc.end() && nit->is_object()) {
+                    for (const auto& assignment : NprAssignmentsSnapshot()) {
+                        if (assignment.unresolved) continue;
+                        const auto key = std::to_string(assignment.poolSlot);
+                        const auto entry = nit->find(key);
+                        if (entry == nit->end() || !entry->is_object()) continue;
+                        const std::string file = entry->value("file", "");
+                        if (!CarrierFileOnDisk(file)) {
+                            SKSE::log::warn("NPC persist carrier {} missing/invalid - keeping ESP default", key);
+                            continue;
+                        }
+                        if (RepointCarrier(NprTokenArmo(assignment.poolSlot), file)) {
+                            SKSE::log::info("NPC persist carrier {} -> {} (manual Refresh applies FSMP)",
+                                key, file);
+                            anyChanged = true;
+                        }
+                    }
                 }
             }
             // Runtime content change (not the load-time pass): prompt the user to re-equip.
@@ -1231,6 +1373,7 @@ namespace CostumeFW
                 g_contentEnchants[std::move(key)] = std::move(effs);
             }
         }
+        ParsePublishJson(doc);
         } catch (const std::exception& e) {
             // ROOT B: a wrong-typed field threw mid-extraction. Discard the partial
             // state and leave CEF_settings.json untouched so the user can fix it -
@@ -1683,6 +1826,8 @@ namespace CostumeFW
             out.push_back("head parts registered: " + std::to_string(reg) + "/" +
                           std::to_string(pool.size()));
         }
+        const auto npc = NpcDiagLines();
+        out.insert(out.end(), npc.begin(), npc.end());
         out.push_back("# Churn (this session)");
         out.push_back(PersistDiagString());
         return out;
@@ -2415,6 +2560,24 @@ namespace CostumeFW
         }
     }
 
+    std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content)
+    {
+        std::vector<EnchantEffectInfo> out;
+        if (const auto it = g_contentEnchants.find(a_content); it != g_contentEnchants.end()) {
+            for (const auto& effect : it->second)
+                out.push_back({ effect.mgef, effect.magnitude });
+            return out;
+        }
+        if (auto* armor = ResolveArmo(a_content); armor && armor->formEnchanting) {
+            for (auto* effect : armor->formEnchanting->effects) {
+                if (effect && effect->baseEffect) {
+                    out.push_back({ MakeColonId(effect->baseEffect), effect->effectItem.magnitude });
+                }
+            }
+        }
+        return out;
+    }
+
     bool CaptureEnchant(const std::string& a_content)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -2521,6 +2684,10 @@ namespace CostumeFW
         // Persist class: no token, always shown while CEF is enabled -> grant its
         // aggregate enchant ability whenever CEF is on.
         SyncSpell(player, PersistAbilityFor(), CefEnabled());
+        // Publish bindings (NPC wearers + the player wearing a publish token)
+        // follow the same master-switch contract - converge them in the same
+        // pass so a master toggle can never strand spells on an NPC (§7.6).
+        SyncNpcAbilities();
     }
 
     void RebuildBoxAbility(const std::string& a_token)
@@ -3086,5 +3253,10 @@ namespace CostumeFW
         g_boxes[idx].preset.clear();  // contents remain (now manual)
         WriteJson();
         return true;
+    }
+
+    void SaveGlobalSettings()
+    {
+        WriteJson();
     }
 }

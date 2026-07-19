@@ -1788,6 +1788,67 @@ namespace nifcarrier {
             return -1;
         }
 
+        bool BuildRotatingCarrier(std::vector<SmpContent> smp, const std::string& tag,
+            const std::string& tmpTag, const std::filesystem::path& mergedXmlDisk,
+            const std::string& mergedXmlRel, const std::filesystem::path& tmpDir,
+            const std::filesystem::path& emptyNif, const std::filesystem::path& outTmp,
+            std::string& log)
+        {
+            int rc = 0;
+            if (smp.empty()) {
+                if (emptyNif.empty() || !std::filesystem::exists(emptyNif) ||
+                    !CopyOverwrite(emptyNif, outTmp)) {
+                    Log(log, "%s no SMP contents and no usable --empty template", tag.c_str());
+                    return false;
+                }
+            } else if (smp.size() == 1) {
+                const auto za = ZeroAlpha(smp[0].nif, outTmp);
+                log += za.log;
+                rc = za.ok ? 0 : 1;
+            } else {
+                if (!IsolateSmpSet(smp, tmpDir, tmpTag, tag, log)) {
+                    Log(log, "%s FAILED namespace isolation", tag.c_str());
+                    return false;
+                }
+                const auto mergedNif = tmpDir / (tmpTag + "_mg.nif");
+                const auto zeroNif = tmpDir / (tmpTag + "_za.nif");
+                std::vector<std::filesystem::path> nifs;
+                std::vector<std::filesystem::path> xmls;
+                for (const auto& content : smp) {
+                    nifs.push_back(content.nif);
+                    xmls.push_back(content.xmlDisk);
+                }
+                const auto mg = Merge(mergedNif, nifs);
+                log += mg.log;
+                rc = mg.ok ? 0 : 1;
+                if (rc == 0) {
+                    const auto za = ZeroAlpha(mergedNif, zeroNif);
+                    log += za.log;
+                    rc = za.ok ? 0 : 1;
+                }
+                if (rc == 0) {
+                    const auto mx = MergeXml(mergedXmlDisk, xmls);
+                    log += mx.log;
+                    rc = mx.ok ? 0 : 1;
+                }
+                if (rc == 0) {
+                    const auto sx = SetXml(zeroNif, outTmp, mergedXmlRel);
+                    log += sx.log;
+                    rc = sx.ok ? 0 : 1;
+                }
+            }
+            std::string reason;
+            if (rc == 0 && !ValidateNifPathImpl(outTmp, reason)) {
+                Log(log, "%s BUILT CARRIER REJECTED - %s", tag.c_str(), reason.c_str());
+                rc = 3;
+            }
+            if (rc != 0) {
+                Log(log, "%s FAILED (rc=%d)", tag.c_str(), rc);
+                return false;
+            }
+            return true;
+        }
+
         std::optional<std::string> SyncPersistBuild(const nlohmann::json& persistEl,
             const std::vector<std::filesystem::path>& dataRoots, const std::filesystem::path& carrierDir,
             const std::filesystem::path& xmlDir, const std::filesystem::path& tmpDir,
@@ -2262,12 +2323,22 @@ namespace nifcarrier {
             const auto carriersJsonPath = carrierDir / "carriers.json";
             std::map<std::string, std::pair<int, std::string>> carriers;  // slot -> (rev, file)
             std::optional<std::string> persistFragment;
+            nlohmann::json publishedCarriers = nlohmann::json::object();
+            nlohmann::json npcPersistCarriers = nlohmann::json::object();
             if (std::filesystem::exists(carriersJsonPath)) {
                 try {
                     const auto cj = nlohmann::json::parse(ReadTextFile(carriersJsonPath));
                     for (auto it = cj.begin(); it != cj.end(); ++it) {
                         if (it.key() == "persist") {
                             persistFragment = it.value().dump();
+                            continue;
+                        }
+                        if (it.key() == "published") {
+                            if (it.value().is_object()) publishedCarriers = it.value();
+                            continue;
+                        }
+                        if (it.key() == "npcPersist") {
+                            if (it.value().is_object()) npcPersistCarriers = it.value();
                             continue;
                         }
                         carriers[it.key()] = { it.value().at("rev").get<int>(),
@@ -2277,6 +2348,8 @@ namespace nifcarrier {
                     Log(res.log, "[sync] WARNING: carriers.json unreadable, starting fresh");
                     carriers.clear();
                     persistFragment.reset();
+                    publishedCarriers = nlohmann::json::object();
+                    npcPersistCarriers = nlohmann::json::object();
                 }
             }
 
@@ -2458,6 +2531,234 @@ namespace nifcarrier {
             }
 
             // approach-C persist pipeline (after boxes: shares tmp + pools)
+            // Published carriers are frozen and sex-split.  Both sides are built
+            // and validated before the shared revision becomes visible.
+            if (doc.contains("published") && doc["published"].is_array()) {
+                nlohmann::json nextPublished = nlohmann::json::object();
+                for (const auto& pub : doc["published"]) {
+                    const int slot = pub.value("pub", -1);
+                    if (slot < 0 || slot >= 8) {
+                        Log(res.log, "[publish] invalid pool slot %d - skipped", slot);
+                        ++res.failed;
+                        continue;
+                    }
+                    char nn[4]{};
+                    std::snprintf(nn, sizeof(nn), "%02d", slot + 1);
+                    const std::string key = std::to_string(slot);
+                    const std::string stem = "Pub" + std::string(nn);
+                    const std::string tag = "[publish] " + stem + ":";
+                    const nlohmann::json empty = nlohmann::json::array();
+                    const auto& maleRef = pub.contains("contents_m") ? pub.at("contents_m") : empty;
+                    const auto& femaleRef = pub.contains("contents_f") ? pub.at("contents_f") : empty;
+                    auto male = ResolveSmpContents(maleRef, opts.dataRoots, tag + "m",
+                        "; published carrier built from the rest", nullptr, res.log);
+                    auto female = ResolveSmpContents(femaleRef, opts.dataRoots, tag + "f",
+                        "; published carrier built from the rest", nullptr, res.log);
+
+                    nlohmann::json oldEntry;
+                    if (const auto it = publishedCarriers.find(key);
+                        it != publishedCarriers.end() && it->is_object()) {
+                        oldEntry = *it;
+                    }
+                    const int oldRev = oldEntry.is_object() ? oldEntry.value("rev", 0) : 0;
+                    const std::string oldM = oldEntry.is_object() ? oldEntry.value("fileM", "") : "";
+                    const std::string oldF = oldEntry.is_object() ? oldEntry.value("fileF", "") : "";
+                    const auto diskOf = [&](const std::string& rel) {
+                        return opts.outRoot / "meshes" / std::filesystem::path(rel);
+                    };
+                    const bool oldGood = !oldM.empty() && !oldF.empty() &&
+                        std::filesystem::exists(diskOf(oldM)) && std::filesystem::exists(diskOf(oldF));
+                    const auto ensurePool = [&](char sex, const std::string& oldFile) {
+                        const auto oldDisk = oldFile.empty() ? std::filesystem::path{} : diskOf(oldFile);
+                        const auto seed = std::filesystem::exists(oldDisk) ? oldDisk : opts.emptyNif;
+                        const bool haveSeed = !seed.empty() && std::filesystem::exists(seed);
+                        for (int revision = 0; revision < kSlots; ++revision) {
+                            const auto nif = carrierDir /
+                                (stem + "_carrier_" + sex + "_r" + std::to_string(revision) + ".nif");
+                            const auto xml = xmlDir /
+                                (stem + "_" + sex + "_physics_r" + std::to_string(revision) + ".xml");
+                            if (!std::filesystem::exists(nif) && haveSeed && CopyOverwrite(seed, nif)) {
+                                ++poolCreated;
+                            }
+                            if (!std::filesystem::exists(xml) && WriteTextFile(xml, kEmptyXmlPlaceholder)) {
+                                ++poolCreated;
+                            }
+                        }
+                    };
+                    ensurePool('m', oldM);
+                    ensurePool('f', oldF);
+
+                    if (((maleRef.size() > 0 && male.empty()) ||
+                         (femaleRef.size() > 0 && female.empty())) && oldGood) {
+                        Log(res.log, "%s one sex resolved no declared content - keeping previous pair", tag.c_str());
+                        nextPublished[key] = oldEntry;
+                        ++res.skipped;
+                        continue;
+                    }
+                    const std::string hash = Sha256HexUpper(
+                        "pub3|" + HashContents("m|", male) + "|" + HashContents("f|", female));
+                    const auto hashPath = carrierDir / (stem + "_carrier.hash");
+                    if (oldGood && std::filesystem::exists(hashPath) && ReadTextFile(hashPath) == hash) {
+                        nextPublished[key] = oldEntry;
+                        ++res.skipped;
+                        continue;
+                    }
+
+                    const auto maleTmp = tmpDir / (stem + "_m_out.nif");
+                    const auto femaleTmp = tmpDir / (stem + "_f_out.nif");
+                    const auto maleXml = xmlDir / (stem + "_m_physics.xml");
+                    const auto femaleXml = xmlDir / (stem + "_f_physics.xml");
+                    const std::string maleXmlRel = "meshes\\CostumeFW\\XML\\" + stem + "_m_physics.xml";
+                    const std::string femaleXmlRel = "meshes\\CostumeFW\\XML\\" + stem + "_f_physics.xml";
+                    Log(res.log, "%s male=%zu female=%zu SMP content(s)", tag.c_str(), male.size(), female.size());
+                    if (!BuildRotatingCarrier(male, tag + "m", stem + "_m", maleXml, maleXmlRel,
+                            tmpDir, opts.emptyNif, maleTmp, res.log) ||
+                        !BuildRotatingCarrier(female, tag + "f", stem + "_f", femaleXml, femaleXmlRel,
+                            tmpDir, opts.emptyNif, femaleTmp, res.log)) {
+                        if (oldGood) nextPublished[key] = oldEntry;
+                        ++res.failed;
+                        continue;
+                    }
+
+                    const int rev = oldRev + 1;
+                    const int index = rev % kSlots;
+                    const std::string relM = "CostumeFW/" + stem + "_carrier_m_r" +
+                        std::to_string(index) + ".nif";
+                    const std::string relF = "CostumeFW/" + stem + "_carrier_f_r" +
+                        std::to_string(index) + ".nif";
+                    const auto outM = diskOf(relM);
+                    const auto outF = diskOf(relF);
+                    const auto publishSex = [&](const std::vector<SmpContent>& contents, char sex,
+                                                const std::filesystem::path& built,
+                                                const std::filesystem::path& mergedXml,
+                                                const std::filesystem::path& target) {
+                        if (contents.size() < 2) {
+                            return CopyOverwrite(built, target);
+                        }
+                        const auto slotXml = xmlDir / (stem + "_" + sex + "_physics_r" +
+                            std::to_string(index) + ".xml");
+                        const std::string slotXmlRel = "meshes\\CostumeFW\\XML\\" + stem + "_" +
+                            sex + "_physics_r" + std::to_string(index) + ".xml";
+                        if (!CopyOverwrite(mergedXml, slotXml)) return false;
+                        const auto sx = SetXml(built, target, slotXmlRel);
+                        res.log += sx.log;
+                        return sx.ok;
+                    };
+                    if (!publishSex(male, 'm', maleTmp, maleXml, outM) ||
+                        !publishSex(female, 'f', femaleTmp, femaleXml, outF)) {
+                        Log(res.log, "%s FAILED to publish revision pair - revision NOT bumped", tag.c_str());
+                        if (oldGood) nextPublished[key] = oldEntry;
+                        ++res.failed;
+                        continue;
+                    }
+                    if (!WriteTextFile(hashPath, hash)) {
+                        Log(res.log, "%s WARNING failed to write hash file - rebuilds next run", tag.c_str());
+                    }
+                    nextPublished[key] = { { "rev", rev }, { "fileM", relM }, { "fileF", relF } };
+                    ++res.built;
+                    Log(res.log, "%s rev=%d -> m=%s f=%s", tag.c_str(), rev, relM.c_str(), relF.c_str());
+                }
+                publishedCarriers = std::move(nextPublished);
+            }
+            if (doc.contains("npcPersist") && doc["npcPersist"].is_array()) {
+                nlohmann::json nextNpc = nlohmann::json::object();
+                for (const auto& assignment : doc["npcPersist"]) {
+                    const int slot = assignment.value("pool", -1);
+                    if (slot < 0 || slot >= 8) {
+                        Log(res.log, "[npcPersist] invalid pool slot %d - skipped", slot);
+                        ++res.failed;
+                        continue;
+                    }
+                    char nn[4]{};
+                    std::snprintf(nn, sizeof(nn), "%02d", slot + 1);
+                    const std::string key = std::to_string(slot);
+                    const std::string stem = "NpcPersist" + std::string(nn);
+                    const std::string tag = "[npcPersist] " + stem + ":";
+                    const nlohmann::json empty = nlohmann::json::array();
+                    const auto& contentsRef = assignment.contains("contents") ?
+                        assignment.at("contents") : empty;
+                    auto contents = ResolveSmpContents(contentsRef, opts.dataRoots, tag,
+                        "; NPC persist carrier built from the rest", nullptr, res.log);
+                    nlohmann::json oldEntry;
+                    if (const auto it = npcPersistCarriers.find(key);
+                        it != npcPersistCarriers.end() && it->is_object()) oldEntry = *it;
+                    const int oldRev = oldEntry.is_object() ? oldEntry.value("rev", 0) : 0;
+                    const std::string oldFile = oldEntry.is_object() ? oldEntry.value("file", "") : "";
+                    const auto diskOf = [&](const std::string& rel) {
+                        return opts.outRoot / "meshes" / std::filesystem::path(rel);
+                    };
+                    const bool oldGood = !oldFile.empty() && std::filesystem::exists(diskOf(oldFile));
+                    const auto seed = oldGood ? diskOf(oldFile) : opts.emptyNif;
+                    const bool haveSeed = !seed.empty() && std::filesystem::exists(seed);
+                    for (int revision = 0; revision < kSlots; ++revision) {
+                        const auto nif = carrierDir /
+                            (stem + "_carrier_r" + std::to_string(revision) + ".nif");
+                        const auto xml = xmlDir /
+                            (stem + "_physics_r" + std::to_string(revision) + ".xml");
+                        if (!std::filesystem::exists(nif) && haveSeed && CopyOverwrite(seed, nif))
+                            ++poolCreated;
+                        if (!std::filesystem::exists(xml) && WriteTextFile(xml, kEmptyXmlPlaceholder))
+                            ++poolCreated;
+                    }
+                    if (contentsRef.size() > 0 && contents.empty() && oldGood) {
+                        Log(res.log, "%s all declared content unresolved - keeping previous carrier", tag.c_str());
+                        nextNpc[key] = oldEntry;
+                        ++res.skipped;
+                        continue;
+                    }
+                    const std::string hash = Sha256HexUpper("npr2|" +
+                        assignment.value("sex", std::string("m")) + "|" + HashContents("c|", contents));
+                    const auto hashPath = carrierDir / (stem + "_carrier.hash");
+                    if (oldGood && std::filesystem::exists(hashPath) && ReadTextFile(hashPath) == hash) {
+                        nextNpc[key] = oldEntry;
+                        ++res.skipped;
+                        continue;
+                    }
+                    const auto built = tmpDir / (stem + "_out.nif");
+                    const auto mergedXml = xmlDir / (stem + "_physics.xml");
+                    const std::string mergedXmlRel =
+                        "meshes\\CostumeFW\\XML\\" + stem + "_physics.xml";
+                    if (!BuildRotatingCarrier(contents, tag, stem, mergedXml, mergedXmlRel,
+                            tmpDir, opts.emptyNif, built, res.log)) {
+                        if (oldGood) nextNpc[key] = oldEntry;
+                        ++res.failed;
+                        continue;
+                    }
+                    const int rev = oldRev + 1;
+                    const int index = rev % kSlots;
+                    const std::string rel = "CostumeFW/" + stem + "_carrier_r" +
+                        std::to_string(index) + ".nif";
+                    const auto target = diskOf(rel);
+                    bool published = false;
+                    if (contents.size() < 2) {
+                        published = CopyOverwrite(built, target);
+                    } else {
+                        const auto slotXml = xmlDir /
+                            (stem + "_physics_r" + std::to_string(index) + ".xml");
+                        const std::string slotXmlRel = "meshes\\CostumeFW\\XML\\" + stem +
+                            "_physics_r" + std::to_string(index) + ".xml";
+                        if (CopyOverwrite(mergedXml, slotXml)) {
+                            const auto sx = SetXml(built, target, slotXmlRel);
+                            res.log += sx.log;
+                            published = sx.ok;
+                        }
+                    }
+                    if (!published) {
+                        Log(res.log, "%s FAILED to publish carrier - revision NOT bumped", tag.c_str());
+                        if (oldGood) nextNpc[key] = oldEntry;
+                        ++res.failed;
+                        continue;
+                    }
+                    if (!WriteTextFile(hashPath, hash))
+                        Log(res.log, "%s WARNING failed to write hash file - rebuilds next run", tag.c_str());
+                    nextNpc[key] = { { "rev", rev }, { "file", rel } };
+                    ++res.built;
+                    Log(res.log, "%s rev=%d -> %s", tag.c_str(), rev, rel.c_str());
+                }
+                npcPersistCarriers = std::move(nextNpc);
+            }
+
+
             if (doc.contains("persist")) {
                 persistFragment = SyncPersistBuild(doc["persist"], opts.dataRoots, carrierDir, xmlDir,
                     tmpDir, opts.emptyNif, persistFragment, res.built, res.skipped, res.failed,
@@ -2475,6 +2776,20 @@ namespace nifcarrier {
                 first = false;
                 jsonOut += " \"" + kv.first + "\": { \"rev\": " + std::to_string(kv.second.first) +
                            ", \"file\": \"" + kv.second.second + "\" }";
+            }
+            if (!publishedCarriers.empty()) {
+                if (!first) {
+                    jsonOut += ",\n";
+                }
+                first = false;
+                jsonOut += " \"published\": " + publishedCarriers.dump();
+            }
+            if (!npcPersistCarriers.empty()) {
+                if (!first) {
+                    jsonOut += ",\n";
+                }
+                first = false;
+                jsonOut += " \"npcPersist\": " + npcPersistCarriers.dump();
             }
             if (persistFragment) {
                 if (!first) {

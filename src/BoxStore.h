@@ -318,6 +318,12 @@ namespace CostumeFW
     // still snapshots player enchantments. Stores the effect list (MGEF colon-id
     // + magnitude); def + json. Returns true if an enchantment was found and
     // stored. Main/VM thread (inventory read only).
+    struct EnchantEffectInfo
+    {
+        std::string mgef;
+        float magnitude{ 0.0f };
+    };
+    std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content);
     bool CaptureEnchant(const std::string& a_content);
 
     // Sync every box's abilities to the player: token worn -> AddSpell, else

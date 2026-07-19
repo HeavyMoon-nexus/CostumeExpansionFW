@@ -12,7 +12,9 @@
 #include "LoreBox.h"
 #include "Papyrus.h"
 #include "SkinRebind.h"
+#include "PublishStore.h"
 #include "SmfUI.h"
+#include "RE/C/Character.h"
 
 #include "RE/P/PlayerCharacter.h"
 #include "RE/S/ScriptEventSourceHolder.h"
@@ -50,6 +52,41 @@ namespace
         }
     };
 
+    // Character has a distinct vtable from PlayerCharacter. The hook fires for
+    // every NPC, but actors without CEF bindings are an immediate no-op.
+    struct NpcLoad3DHook
+    {
+        static RE::NiAVObject* thunk(RE::Character* a_this, bool a_backgroundLoading)
+        {
+            auto* result = func(a_this, a_backgroundLoading);
+            // Bail before queueing anything unless CEF actually tracks NPC data:
+            // this fires for EVERY Character 3D load game-wide, and one task
+            // allocation per NPC load taxes city cells even when the NPC feature
+            // is unused. OnNpcActorLoaded services npc-persist assignments only
+            // (publish wearers re-register through their re-fired equip event),
+            // so their emptiness is the gate.
+            if (CostumeFW::HasNprWork()) {
+                const auto npcHandle = a_this->GetHandle();
+                SKSE::GetTaskInterface()->AddTask([npcHandle] { CostumeFW::OnNpcActorLoaded(npcHandle); });
+            }
+            if (CostumeFW::HasActorBindings(a_this)) {
+                const auto handle = a_this->GetHandle();
+                SKSE::GetTaskInterface()->AddTask(
+                    [handle] { CostumeFW::ReconcileActorByHandle(handle); });
+                CostumeFW::RunAfterDelayMs(4000,
+                    [handle] { CostumeFW::ReconcileActorByHandle(handle); });
+            }
+            return result;
+        }
+        static inline REL::Relocation<decltype(thunk)> func;
+        static void Install()
+        {
+            REL::Relocation<std::uintptr_t> vtbl{ RE::Character::VTABLE[0] };
+            func = vtbl.write_vfunc(0x6A, thunk);
+            SKSE::log::info("Character::Load3D hook installed (0x6A)");
+        }
+    };
+
     // Box mechanism: when the player equips/unequips a tracked box token, the
     // box contents must show/hide. Reconcile re-evaluates the worn predicate.
     // §8.10 hide-when-worn also needs a reconcile when the player equips/unequips
@@ -70,11 +107,30 @@ namespace
             const RE::TESEquipEvent* a_event,
             RE::BSTEventSource<RE::TESEquipEvent>*) override
         {
-            if (a_event && a_event->actor &&
-                a_event->actor.get() == RE::PlayerCharacter::GetSingleton()) {
+            if (!a_event || !a_event->actor) return RE::BSEventNotifyControl::kContinue;
+            auto* actor = a_event->actor.get()->As<RE::Actor>();
+            if (!actor) return RE::BSEventNotifyControl::kContinue;
+            if (actor == RE::PlayerCharacter::GetSingleton() &&
+                CostumeFW::IsPublishToken(a_event->baseObject)) {
+                const auto handle = actor->GetHandle();
+                const auto base = a_event->baseObject;
+                const bool equipped = a_event->equipped;
+                SKSE::GetTaskInterface()->AddTask([handle, base, equipped] {
+                    CostumeFW::OnNpcTokenEquip(handle, base, equipped);
+                });
+            }
+            if (actor == RE::PlayerCharacter::GetSingleton()) {
                 SKSE::GetTaskInterface()->AddTask([] {
                     CostumeFW::Reconcile();
                     CostumeFW::ApplyBoxAbilities();
+                });
+            } else if (CostumeFW::IsPublishToken(a_event->baseObject) ||
+                       CostumeFW::IsNpcPersistCarrier(a_event->baseObject)) {
+                const auto handle = actor->GetHandle();
+                const auto base = a_event->baseObject;
+                const bool equipped = a_event->equipped;
+                SKSE::GetTaskInterface()->AddTask([handle, base, equipped] {
+                    CostumeFW::OnNpcTokenEquip(handle, base, equipped);
                 });
             }
             return RE::BSEventNotifyControl::kContinue;
@@ -108,6 +164,14 @@ namespace
                     const RE::FormID token = a_event->baseObj;
                     SKSE::GetTaskInterface()->AddTask([token] { CostumeFW::ReplenishToken(token); });
                 }
+                if (CostumeFW::IsPublishToken(a_event->baseObj)) {
+                    const auto base = a_event->baseObj;
+                    const auto from = a_event->oldContainer;
+                    const auto to = a_event->newContainer;
+                    SKSE::GetTaskInterface()->AddTask([base, from, to] {
+                        CostumeFW::OnPublishTokenMoved(base, from, to);
+                    });
+                }
             }
             return RE::BSEventNotifyControl::kContinue;
         }
@@ -133,6 +197,7 @@ namespace
             break;
         case SKSE::MessagingInterface::kDataLoaded:
             Load3DHook::Install();
+            NpcLoad3DHook::Install();
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration
             CostumeFW::InstallConsoleHook();
             CostumeFW::SmfUI::Register();  // SKSE Menu Framework section (soft; no-op without SMF)
@@ -145,6 +210,7 @@ namespace
                 CostumeFW::LoadBoxes();
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
+                CostumeFW::ReapplyNpcBindings();
             });
             break;
         case SKSE::MessagingInterface::kPostLoadGame:

@@ -3,10 +3,12 @@
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Preset.h"
+#include "PublishStore.h"
 #include "SkinRebind.h"
 #include "UiOps.h"
 
 #include "RE/T/TESDataHandler.h"
+#include "RE/C/CrosshairPickData.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -509,6 +511,29 @@ namespace CostumeFW::SmfUI
                 }
 
                 ImGui::Spacing();
+                const bool npcReady = NpcEspLoaded();
+                const auto publishPopup = std::format("Publish box for NPC?###pubp{}", slot);
+                ImGui::BeginDisabled(!npcReady);
+                if (ImGui::Button(std::format("Publish for NPC##pub{}", slot).c_str()))
+                    ImGui::OpenPopup(publishPopup.c_str());
+                ImGui::EndDisabled();
+                if (!npcReady && ImGui::IsItemHovered(ImGui::ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Requires the CostumeFW_NPC.esp add-on.");
+                ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
+                if (ImGui::BeginPopupModal(publishPopup.c_str())) {
+                    ImGui::TextWrapped(
+                        "Freeze this box's contents and settings into a distributable NPC token? "
+                        "The source box will be removed and its normal token slot freed.");
+                    if (ImGui::Button("Publish")) {
+                        const int index = i;
+                        SKSE::GetTaskInterface()->AddTask([index] { PublishBox(index); });
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
+                ImGui::Spacing();
                 const std::string popupId = std::format("Delete box?###delp{}", slot);
                 if (ImGui::Button(std::format("Delete box##delb{}", slot).c_str())) {
                     ImGui::OpenPopup(popupId.c_str());
@@ -753,6 +778,168 @@ namespace CostumeFW::SmfUI
             }
         }
 
+        void __stdcall RenderNpc()
+        {
+            if (!NpcEspLoaded()) {
+                ImGui::TextWrapped("The NPC token add-on plugin (CostumeFW_NPC.esp) is not installed. Install it to use NPC distribution.");
+                const auto dormant = PublishedSnapshot().size();
+                if (dormant) ImGui::Text("%d published definition(s) are dormant.",
+                    static_cast<int>(dormant));
+                return;
+            }
+            const auto published = PublishedSnapshot();
+            const auto bindings = PubBindingsSnapshot();
+            ImGui::Text("Injected NPCs: %d / %d", static_cast<int>(InjectedNpcCount()),
+                MaxNpcInjected());
+            ImGui::SeparatorText("NPC persist");
+            const auto assignments = NprAssignmentsSnapshot();
+            for (const auto& item : assignments) {
+                ImGui::BulletText("Pool %02d  actor %08X  %d item(s)%s%s",
+                    item.poolSlot + 1, item.actorFormID, static_cast<int>(item.contents.size()),
+                    item.unresolved ? " (unresolved)" : "",
+                    item.restoreSuspended ? " (restore suspended)" : "");
+            }
+            const auto catalog = PersistContents();
+            if (catalog.empty()) {
+                ImGui::TextDisabled("Add contents to the shared Persist catalog before assigning an NPC.");
+            } else if (ImGui::Button("Assign Persist catalog to crosshair NPC")) {
+                auto* pick = RE::CrosshairPickData::GetSingleton();
+                auto ref = pick ? pick->targetActor.get() : RE::NiPointer<RE::TESObjectREFR>{};
+                if (!ref && pick) ref = pick->target.get();
+                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+                if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
+                    const auto handle = actor->GetHandle();
+                    SKSE::GetTaskInterface()->AddTask([handle, catalog] {
+                        auto resolved = handle.get();
+                        AssignNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr, catalog);
+                    });
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove from crosshair NPC")) {
+                auto* pick = RE::CrosshairPickData::GetSingleton();
+                auto ref = pick ? pick->targetActor.get() : RE::NiPointer<RE::TESObjectREFR>{};
+                if (!ref && pick) ref = pick->target.get();
+                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+                if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
+                    const auto handle = actor->GetHandle();
+                    SKSE::GetTaskInterface()->AddTask([handle] {
+                        auto resolved = handle.get();
+                        RemoveNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr);
+                    });
+                }
+            }
+            ImGui::SeparatorText("Published costumes");
+            if (published.empty()) {
+                ImGui::TextDisabled("(nothing published)");
+                return;
+            }
+            auto* playerRef = RE::PlayerCharacter::GetSingleton();
+            const RE::FormID playerID = playerRef ? playerRef->GetFormID() : 0x14;
+            for (const auto& snap : published) {
+                int holders = 0, wearers = 0, unresolved = 0, npcHolders = 0;
+                for (const auto& binding : bindings) {
+                    if (binding.pubSlot != snap.pubSlot) continue;
+                    holders += binding.holder;
+                    // The player's own copies never block unpublish (the flow
+                    // reclaims them itself) - gate on NON-player holders only.
+                    npcHolders += (binding.holder && binding.actorFormID != playerID) ? 1 : 0;
+                    wearers += binding.wearer;
+                    unresolved += binding.unresolved;
+                }
+                const auto title = std::format("Pub {:02}: {} (slot {}, {} item(s), {}/{} worn/held, {} unresolved)###npc{}",
+                    snap.pubSlot + 1, snap.label, snap.sourceSlot, snap.contents.size(), wearers,
+                    holders, unresolved, snap.pubSlot);
+                const bool hidden = PubHidden(snap.pubSlot);
+                if (ImGui::Button(std::format("{}##npv{}", hidden ? "Show" : "Hide",
+                        snap.pubSlot).c_str())) {
+                    const int slot = snap.pubSlot;
+                    SKSE::GetTaskInterface()->AddTask([slot, hidden] { SetPubHidden(slot, !hidden); });
+                }
+                ImGui::SameLine();
+                if (!ImGui::TreeNode(title.c_str())) continue;
+                if (ImGui::Button(std::format("Refresh##npr{}", snap.pubSlot).c_str())) {
+                    const int slot = snap.pubSlot;
+                    SKSE::GetTaskInterface()->AddTask([slot] { RefreshPubWearers(slot); });
+                }
+                ImGui::SameLine();
+                const auto recallPopup = std::format("Recall published costume?###npr{}", snap.pubSlot);
+                if (ImGui::Button(std::format("Recall##npr{}", snap.pubSlot).c_str()))
+                    ImGui::OpenPopup(recallPopup.c_str());
+                ImGui::SameLine();
+                const bool canUnpublish = npcHolders == 0 && unresolved == 0;
+                const auto unpublishPopup = std::format("Unpublish costume?###npu{}", snap.pubSlot);
+                ImGui::BeginDisabled(!canUnpublish);
+                if (ImGui::Button(std::format("Unpublish##npu{}", snap.pubSlot).c_str()))
+                    ImGui::OpenPopup(unpublishPopup.c_str());
+                ImGui::EndDisabled();
+                if (!canUnpublish)
+                    ImGui::TextDisabled("Recall all known holders before unpublishing.");
+
+                ImGui::SetNextWindowSize(ImGui::ImVec2(480, 0), ImGui::ImGuiCond_Appearing);
+                if (ImGui::BeginPopupModal(recallPopup.c_str())) {
+                    ImGui::TextWrapped("Recall every tracked copy to the player and clear this slot's binding table?");
+                    if (unresolved > 0)
+                        ImGui::TextWrapped("Warning: %d unresolved binding(s) are outside the recovery net and will be dropped.", unresolved);
+                    if (ImGui::Button("Recall")) {
+                        const int slot = snap.pubSlot;
+                        SKSE::GetTaskInterface()->AddTask([slot] { RecallPublished(slot); });
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
+
+                ImGui::SetNextWindowSize(ImGui::ImVec2(480, 0), ImGui::ImGuiCond_Appearing);
+                if (ImGui::BeginPopupModal(unpublishPopup.c_str())) {
+                    ImGui::TextWrapped("Restore this frozen snapshot as a normal box and free the published slot?");
+                    if (ImGui::Button("Unpublish")) {
+                        const int slot = snap.pubSlot;
+                        SKSE::GetTaskInterface()->AddTask([slot] { UnpublishToBox(slot); });
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
+
+                ImGui::SeparatorText("Contents");
+                for (const auto& id : snap.contents)
+                    ImGui::BulletText("%s", ItemDisplayName(id).c_str());
+
+                ImGui::SeparatorText("Tracked holders");
+                bool anyBinding = false;
+                const auto* player = RE::PlayerCharacter::GetSingleton();
+                const auto playerId = player ? player->GetFormID() : 0;
+                for (const auto& binding : bindings) {
+                    if (binding.pubSlot != snap.pubSlot) continue;
+                    anyBinding = true;
+                    const auto name = binding.actorName.empty() ?
+                        std::format("FormID {:08X}", binding.actorFormID) : binding.actorName;
+                    const auto state = binding.unresolved ? "unresolved" :
+                        (binding.loaded ? "loaded" : "unloaded");
+                    ImGui::BulletText("%s (%s%s%s)", name.c_str(), state,
+                        binding.holder ? ", held" : "", binding.wearer ? ", worn" : "");
+                    if (binding.loaded && binding.holder && binding.actorFormID != playerId) {
+                        ImGui::SameLine();
+                        const auto button = std::format("{}##npwear{}{}",
+                            binding.wearer ? "Unequip" : "Equip", snap.pubSlot,
+                            binding.actorFormID);
+                        if (ImGui::Button(button.c_str())) {
+                            const auto handle = binding.handle;
+                            const int slot = snap.pubSlot;
+                            const bool worn = !binding.wearer;
+                            SKSE::GetTaskInterface()->AddTask(
+                                [handle, slot, worn] { SetNpcTokenWorn(handle, slot, worn); });
+                        }
+                    }
+                }
+                if (!anyBinding) ImGui::TextDisabled("(no tracked holders)");
+                ImGui::TreePop();
+            }
+        }
+
         void __stdcall RenderDiagnostics()
         {
             // Snapshot once per open/click, not per frame - DiagLines() walks the
@@ -784,8 +971,9 @@ namespace CostumeFW::SmfUI
         SKSEMenuFramework::AddSectionItem("Main", RenderMain);
         SKSEMenuFramework::AddSectionItem("Boxes", RenderBoxes);
         SKSEMenuFramework::AddSectionItem("Persist", RenderPersist);
+        SKSEMenuFramework::AddSectionItem("NPC", RenderNpc);
         SKSEMenuFramework::AddSectionItem("Presets", RenderPresets);
         SKSEMenuFramework::AddSectionItem("Diagnostics", RenderDiagnostics);
-        SKSE::log::info("SMF: registered section 'Costume Expansion FW' (5 pages)");
+        SKSE::log::info("SMF: registered section 'Costume Expansion FW' (6 pages)");
     }
 }

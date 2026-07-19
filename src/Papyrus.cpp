@@ -2,6 +2,7 @@
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Preset.h"
+#include "PublishStore.h"
 #include "SkinRebind.h"
 
 #include "RE/B/BSAtomic.h"
@@ -27,6 +28,11 @@ namespace CostumeFW
         // --- Queries (read-only; safe on the Papyrus VM thread) ---------------
         // g_active is mutated only by main-thread tasks; while the MCM is open the
         // game is paused, so no Reconcile/equip task races these reads.
+
+        bool NpcEspLoadedNative(RE::StaticFunctionTag*)
+        {
+            return NpcEspLoaded();
+        }
 
         std::vector<RE::BSFixedString> GetActive(RE::StaticFunctionTag*)
         {
@@ -925,6 +931,7 @@ namespace CostumeFW
 
     bool RegisterPapyrus(RE::BSScript::IVirtualMachine* a_vm)
     {
+        a_vm->RegisterFunction("NpcEspLoaded", kClass, NpcEspLoadedNative);
         a_vm->RegisterFunction("GetActive", kClass, GetActive);
         a_vm->RegisterFunction("IsActive", kClass, IsActive);
         a_vm->RegisterFunction("ResolveForm", kClass, ResolveForm);

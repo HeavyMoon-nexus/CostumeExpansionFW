@@ -1,6 +1,7 @@
 #include "SkinRebind.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "PublishStore.h"
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
@@ -78,14 +79,65 @@ namespace CostumeFW
             std::string tokenId;        // box token colon-form id; empty = persist class
             RE::FormID tokenForm{ 0 };  // resolved token FormID (0 if persist)
             RE::SEX resolvedSex{ RE::SEXES::kFemale };  // sex m3p/m1p were resolved for
+            std::shared_ptr<const ContentSettings> settings;
         };
-        std::vector<ActiveItem> g_active;
+        constexpr int kRebindRetryBudget = 4;
+        struct ActorState
+        {
+            RE::ActorHandle handle;
+            bool isPlayer{ false };
+            std::vector<ActiveItem> items;
+            std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> bonePins;
+            std::vector<std::string> rebindRetryIds;
+            int rebindRetryBudget{ kRebindRetryBudget };
+            bool rebindRetryQueued{ false };
+            bool inRebindRetry{ false };
+            bool realBodyShown{ false };
+        };
+        std::vector<ActorState> g_actors;
 
-        void Register(const std::string& a_id, const ModelRef& a_m3p, const ModelRef& a_m1p,
+        ActorState& PlayerState()
+        {
+            if (g_actors.empty()) {
+                g_actors.push_back({ {}, true });
+            }
+            return g_actors.front();
+        }
+
+        RE::Actor* ResolveActor(ActorState& a_state)
+        {
+            if (a_state.isPlayer) {
+                return RE::PlayerCharacter::GetSingleton();
+            }
+            auto ref = a_state.handle.get();
+            return ref ? ref.get()->As<RE::Actor>() : nullptr;
+        }
+
+        ActorState* FindState(RE::Actor* a_actor)
+        {
+            if (!a_actor) {
+                return nullptr;
+            }
+            for (auto& state : g_actors) {
+                if (ResolveActor(state) == a_actor) {
+                    return &state;
+                }
+            }
+            return nullptr;
+        }
+
+        ActorState* FindState(RE::ActorHandle a_handle)
+        {
+            auto ref = a_handle.get();
+            return ref ? FindState(ref.get()->As<RE::Actor>()) : nullptr;
+        }
+
+        void Register(ActorState& a_state, const std::string& a_id,
+            const ModelRef& a_m3p, const ModelRef& a_m1p,
             const std::string& a_tokenId = {}, RE::FormID a_tokenForm = 0,
             RE::SEX a_sex = RE::SEXES::kFemale)
         {
-            for (auto& it : g_active) {
+            for (auto& it : a_state.items) {
                 if (it.id == a_id) {
                     it.m3p = a_m3p;
                     it.m1p = a_m1p;
@@ -95,7 +147,7 @@ namespace CostumeFW
                     return;
                 }
             }
-            g_active.push_back({ a_id, a_m3p, a_m1p, a_tokenId, a_tokenForm, a_sex });
+            a_state.items.push_back({ a_id, a_m3p, a_m1p, a_tokenId, a_tokenForm, a_sex });
         }
 
         // Remove the CostumeFW_<id> nodes from both skeletons WITHOUT touching the
@@ -111,16 +163,14 @@ namespace CostumeFW
         // 18:23, ucrtbase strlen on 0x2A6, BSDismemberSkinInstance in RBX). Pin
         // every bone an item is bound to with a NiPointer for as long as the
         // item is attached; DetachNodes releases the pins.
-        std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> g_boundBoneRefs;
-        std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
-
-        void DetachNodes(const std::string& a_id)
+        void DetachNodes(ActorState& a_state, const std::string& a_id)
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player) {
+            auto* actor = ResolveActor(a_state);
+            if (!actor) {
+                a_state.bonePins.erase(a_id);
                 return;
             }
-            g_boundBoneRefs.erase(a_id);  // release the bone pins with the attach
+            a_state.bonePins.erase(a_id);  // release the bone pins with the attach
             const std::string nodeName = NodeName(a_id);
             auto detachFrom = [&](RE::NiAVObject* a_root, const char* a_tag) {
                 if (!a_root) {
@@ -138,8 +188,8 @@ namespace CostumeFW
                 }
                 SKSE::log::debug("  DetachNodes[{}] '{}' removed {}", a_tag, nodeName, removed);
             };
-            detachFrom(player->Get3D(false), "3p");
-            detachFrom(player->Get3D(true), "1p");
+            detachFrom(actor->Get3D(false), "3p");
+            detachFrom(a_state.isPlayer ? actor->Get3D(true) : nullptr, "1p");
         }
 
         // Recursively collect every node whose name starts with kNodePrefix. Does
@@ -160,9 +210,9 @@ namespace CostumeFW
             }
         }
 
-        void Unregister(const std::string& a_id)
+        void Unregister(ActorState& a_state, const std::string& a_id)
         {
-            std::erase_if(g_active, [&](const ActiveItem& it) { return it.id == a_id; });
+            std::erase_if(a_state.items, [&](const ActiveItem& it) { return it.id == a_id; });
         }
 
         // BSModelDB::Demand expects a Data\Meshes-relative path: strip a leading
@@ -306,22 +356,15 @@ namespace CostumeFW
         // the carrier had time to attach. Budgeted per external trigger so
         // contents whose custom bones genuinely have no carrier (persist items)
         // cost at most kRebindRetryBudget extra passes, never a loop.
-        constexpr int kRebindRetryBudget = 4;  // heavy carriers load async for seconds
         constexpr auto kRebindRetryDelay = std::chrono::milliseconds(1000);
 
-        std::atomic<int> g_rebindRetryBudget{ 0 };
-        std::atomic<bool> g_rebindRetryQueued{ false };
-        bool g_inRebindRetry = false;          // main-thread only (tasks + Reconcile)
-        bool g_injectStatic3p = false;         // set by RebindGeometry, read by InjectInternal
-        std::vector<std::string> g_rebindRetryIds;  // items to detach+re-inject on retry
-
-        // Per-content carrier bone prefix of the item currently being injected
-        // (v1.2.1 multi-content namespace isolation, nifcarrier IsolateContent):
-        // a multi-content carrier's copy of this content's custom bones is
-        // "C<fnv1a32>_<bone>", so the FSMP-renamed lookup must try the prefixed
-        // name first, then the plain one (single-content carriers stay plain).
-        // Set by InjectInternal, read by RebindGeometry. Main thread only.
-        std::string g_rebindPrefix;
+        struct InjectCtx
+        {
+            std::vector<RE::NiPointer<RE::NiAVObject>>* boneSink{ nullptr };
+            std::string rebindPrefix;
+            bool static3p{ false };
+            RE::NiAVObject* firstPersonRoot{ nullptr };
+        };
 
         // --- persist head-rebuild debounce + diagnostics (Codex Phase 2) -------
         // ApplyPersistCarrier can fire in bursts (settings writes, sync
@@ -347,7 +390,7 @@ namespace CostumeFW
         };
         PersistDiag g_persistDiag;
 
-        void DetachNodes(const std::string& a_id);  // fwd (defined below)
+        // Reconcile is declared in the public header and is safe to call from delayed retries.
 
         void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
         {
@@ -368,34 +411,37 @@ namespace CostumeFW
             }).detach();
         }
 
-        void RequestRebindRetry(const std::string& a_id)
+        void RequestRebindRetry(ActorState& a_state, const std::string& a_id)
         {
-            if (std::find(g_rebindRetryIds.begin(), g_rebindRetryIds.end(), a_id) ==
-                g_rebindRetryIds.end()) {
-                g_rebindRetryIds.push_back(a_id);
+            if (std::find(a_state.rebindRetryIds.begin(), a_state.rebindRetryIds.end(), a_id) ==
+                a_state.rebindRetryIds.end()) {
+                a_state.rebindRetryIds.push_back(a_id);
             }
-            if (g_rebindRetryQueued.load()) {
+            if (a_state.rebindRetryQueued || a_state.rebindRetryBudget <= 0) {
                 return;
             }
-            if (g_rebindRetryBudget.fetch_sub(1) <= 0) {
-                g_rebindRetryBudget.fetch_add(1);  // keep at 0
-                return;
-            }
-            g_rebindRetryQueued = true;
+            --a_state.rebindRetryBudget;
+            a_state.rebindRetryQueued = true;
+            const auto handle = a_state.handle;
+            const bool isPlayer = a_state.isPlayer;
             SKSE::log::info("  rebind retry queued (+{}ms): FSMP carrier may still be attaching",
                 std::chrono::duration_cast<std::chrono::milliseconds>(kRebindRetryDelay).count());
-            RunAfterDelay(std::chrono::steady_clock::now() + kRebindRetryDelay, []() {
-                g_rebindRetryQueued = false;
+            RunAfterDelay(std::chrono::steady_clock::now() + kRebindRetryDelay, [handle, isPlayer]() {
+                ActorState* state = isPlayer ? &PlayerState() : FindState(handle);
+                if (!state) {
+                    return;
+                }
+                state->rebindRetryQueued = false;
                 ++g_persistDiag.rebindRetries;
-                const auto ids = std::move(g_rebindRetryIds);
-                g_rebindRetryIds.clear();
+                const auto ids = std::move(state->rebindRetryIds);
+                state->rebindRetryIds.clear();
                 SKSE::log::info("rebind retry: re-injecting {} static item(s)", ids.size());
                 for (const auto& id : ids) {
-                    DetachNodes(id);  // clear the static attach so injection re-runs
+                    DetachNodes(*state, id);
                 }
-                g_inRebindRetry = true;
-                Reconcile();  // re-injects the detached items (others skip, idempotent)
-                g_inRebindRetry = false;
+                state->inRebindRetry = true;
+                Reconcile();
+                state->inRebindRetry = false;
             });
         }
 
@@ -501,7 +547,7 @@ namespace CostumeFW
         // Rebind one geometry's skin to the LIVE actor skeleton: resolve each
         // bone by name against a_root, repoint bones[] AND boneWorldTransforms[]
         // to the live bone, set rootParent = a_root. (skee AttachMesh.)
-        bool RebindGeometry(RE::NiSkinInstance* a_skin, RE::NiAVObject* a_root)
+        bool RebindGeometry(RE::NiSkinInstance* a_skin, RE::NiAVObject* a_root, InjectCtx& a_ctx)
         {
             if (!a_skin->skinData || !a_skin->bones) {
                 SKSE::log::warn("  skin missing skinData/bones - cannot rebind");
@@ -541,8 +587,8 @@ namespace CostumeFW
                     // (namespace isolation) - try the prefixed name first so the
                     // mesh binds ITS OWN chain, not a same-named chain of another
                     // content (or of the plain worn outfit).
-                    if (!g_rebindPrefix.empty()) {
-                        const std::string prefixed = g_rebindPrefix + src->name.c_str();
+                    if (!a_ctx.rebindPrefix.empty()) {
+                        const std::string prefixed = a_ctx.rebindPrefix + src->name.c_str();
                         tgt = FindFsmpRenamedBone(a_root, prefixed.c_str());
                     }
                     if (!tgt) {
@@ -590,9 +636,8 @@ namespace CostumeFW
                 // Only a 3rd-person static fallback can mean "carrier still
                 // attaching" - FSMP never builds physics on the 1st-person
                 // skeleton, so a 1p remap is permanent and no reason to retry.
-                auto* pc = RE::PlayerCharacter::GetSingleton();
-                if (pc && a_root != pc->Get3D(true)) {
-                    g_injectStatic3p = true;  // InjectInternal turns this into a retry
+                if (a_root != a_ctx.firstPersonRoot) {
+                    a_ctx.static3p = true;
                 }
             }
 
@@ -602,8 +647,8 @@ namespace CostumeFW
                 if (haveWorldXf) {
                     a_skin->boneWorldTransforms[i] = &resolved[i]->world;
                 }
-                if (g_boneRefSink) {
-                    g_boneRefSink->emplace_back(resolved[i]);  // pin (see g_boundBoneRefs)
+                if (a_ctx.boneSink) {
+                    a_ctx.boneSink->emplace_back(resolved[i]);
                 }
             }
             a_skin->rootParent = a_root;  // bind to live actor root (skee)
@@ -741,7 +786,8 @@ namespace CostumeFW
         bool InjectOnRoot(RE::NiAVObject* a_root3D, const std::string& a_relPath,
             const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap,
             bool a_applyMorph, const std::unordered_set<std::string>& a_hideShapes,
-            const std::string& a_id, bool a_cacheShapes)
+            const std::string& a_id, bool a_cacheShapes, RE::Actor* a_morphActor,
+            InjectCtx& a_ctx)
         {
             if (!a_root3D) {
                 return false;
@@ -795,7 +841,7 @@ namespace CostumeFW
                             SKSE::log::info("  hideshape: skipping '{}' (id={})", sname, a_id);
                             return RE::BSVisit::BSVisitControl::kContinue;
                         }
-                        if (!RebindGeometry(skin.get(), a_root3D)) {
+                        if (!RebindGeometry(skin.get(), a_root3D, a_ctx)) {
                             ok = false;
                             return RE::BSVisit::BSVisitControl::kStop;
                         }
@@ -885,7 +931,7 @@ namespace CostumeFW
             // hair/head content (a wig must not get body-slider deformation).
             if (a_applyMorph) {
                 ++g_persistDiag.bodyMorphApplies;
-                BodyMorph::ApplyToNode(RE::PlayerCharacter::GetSingleton(), holder);
+                BodyMorph::ApplyToNode(a_morphActor, holder);
             }
 
             SKSE::log::debug("  attached {} ({} skinned shape(s))", a_nodeName, geoms.size());
@@ -894,50 +940,50 @@ namespace CostumeFW
 
         // Inject on player 3D: the 3P model on the 3rd-person skeleton, the 1P
         // model on the 1st-person skeleton. Each carries its own alt textures.
-        bool InjectInternal(const std::string& a_id, const ModelRef& a_m3p, const ModelRef& a_m1p)
+        bool InjectFor(ActorState& a_state, const ActiveItem& a_item)
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player) {
+            auto* actor = ResolveActor(a_state);
+            if (!actor) {
                 return false;
             }
-            const std::string nodeName = NodeName(a_id);
-            const bool applyMorph = ShouldApplyBodyMorph(a_id);
+            const std::string nodeName = NodeName(a_item.id);
+            const bool applyMorph = a_item.settings ? a_item.settings->bodyMorph :
+                ShouldApplyBodyMorph(a_item.id);
             SKSE::log::info("  bodymorph gate '{}' -> {}",
-                a_id, applyMorph ? "apply (opted in)" : "SKIP (not opted in)");
-            const auto hideList = HideShapesFor(a_id);
-            const std::unordered_set<std::string> hideShapes(hideList.begin(), hideList.end());
-            if (!hideShapes.empty()) {
-                SKSE::log::info("  hideshape gate '{}' -> dropping {} shape(s)", a_id, hideShapes.size());
+                a_item.id, applyMorph ? "apply (opted in)" : "SKIP (not opted in)");
+            std::unordered_set<std::string> hideShapes;
+            if (a_item.settings) {
+                hideShapes = a_item.settings->hideShapes;
+            } else {
+                const auto hideList = HideShapesFor(a_item.id);
+                hideShapes.insert(hideList.begin(), hideList.end());
             }
+            InjectCtx ctx;
+            ctx.rebindPrefix = nifcarrier::ContentNamePrefix(a_item.id);
+            ctx.firstPersonRoot = a_state.isPlayer ? actor->Get3D(true) : nullptr;
+            std::vector<RE::NiPointer<RE::NiAVObject>> collected;
+            ctx.boneSink = &collected;
 
             bool any = false;
-            g_injectStatic3p = false;
-            // Multi-content carriers prefix this content's custom bones
-            // (nifcarrier namespace isolation) - same id, same prefix.
-            g_rebindPrefix = nifcarrier::ContentNamePrefix(a_id);
-            // Collect the bones this injection binds to, then APPEND them to the
-            // item's pin set (append, not replace: an idempotent skip on one
-            // skeleton must not drop the pins the other skeleton still uses).
-            std::vector<RE::NiPointer<RE::NiAVObject>> collected;
-            g_boneRefSink = &collected;
-            if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
-                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap, applyMorph, hideShapes, a_id, true);
+            if (auto* root3p = actor->Get3D(false); root3p && !a_item.m3p.nifPath.empty()) {
+                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_item.m3p.nifPath), nodeName,
+                    a_item.m3p.swap, applyMorph, hideShapes, a_item.id, true, actor, ctx);
             }
-            if (g_injectStatic3p) {
-                // This item's 3p rebind fell to the static fallback - the carrier
-                // may still be attaching. Queue a detach+re-inject for it.
-                RequestRebindRetry(a_id);
+            if (ctx.static3p) {
+                RequestRebindRetry(a_state, a_item.id);
             }
-            if (auto* root1p = player->Get3D(true); root1p && !a_m1p.nifPath.empty()) {
-                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap, applyMorph, hideShapes, a_id, false);
+            if (a_state.isPlayer) {
+                if (auto* root1p = actor->Get3D(true); root1p && !a_item.m1p.nifPath.empty()) {
+                    any |= InjectOnRoot(root1p, StripMeshesPrefix(a_item.m1p.nifPath), nodeName,
+                        a_item.m1p.swap, applyMorph, hideShapes, a_item.id, false, actor, ctx);
+                }
             }
-            g_boneRefSink = nullptr;
             if (!collected.empty()) {
-                auto& refs = g_boundBoneRefs[a_id];
+                auto& refs = a_state.bonePins[a_item.id];
                 refs.insert(refs.end(), collected.begin(), collected.end());
             }
             if (!any) {
-                SKSE::log::warn("InjectInternal: nothing attached for id='{}'", a_id);
+                SKSE::log::warn("InjectFor: nothing attached for id='{}'", a_item.id);
             }
             return any;
         }
@@ -948,14 +994,14 @@ namespace CostumeFW
 
         constexpr const char* kRealBodyNode = "CEF_RealBody";
 
-        void DetachRealBody()
+        void DetachRealBody(ActorState& a_state)
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player) {
+            auto* actor = ResolveActor(a_state);
+            if (!actor) {
                 return;
             }
-            for (int fp = 0; fp <= 1; ++fp) {
-                if (auto* root = player->Get3D(fp != 0)) {
+            for (int fp = 0; fp <= (a_state.isPlayer ? 1 : 0); ++fp) {
+                if (auto* root = actor->Get3D(fp != 0)) {
                     if (auto* n = root->GetObjectByName(kRealBodyNode)) {
                         if (auto* p = n->parent) {
                             p->DetachChild(n);
@@ -1060,10 +1106,10 @@ namespace CostumeFW
         // idempotent node so a costume whose own body shape is hidden shows the
         // player's morphed body instead of nothing. Morph ON. No-op if the skin
         // can't be resolved. Main thread only (called from Reconcile).
-        bool InjectRealBody()
+        bool InjectRealBody(ActorState& a_state)
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player) {
+            auto* actor = ResolveActor(a_state);
+            if (!actor) {
                 return false;
             }
             // Engine-faithful skin resolution with a CONSERVATIVE adoption guard.
@@ -1078,8 +1124,8 @@ namespace CostumeFW
             // the race skin, which is byte-identical to the pre-2026-07-12 path
             // (anyBody leniency included). The addon's model is resolved directly
             // below (it may be a runtime form with no round-trippable lid/plugin).
-            auto* base = player->GetActorBase();
-            auto* race = player->GetRace();
+            auto* base = actor->GetActorBase();
+            auto* race = actor->GetRace();
             RE::TESObjectARMO* skin = nullptr;
             RE::TESObjectARMA* bodyAA = nullptr;
             const char* skinSrc = "race";  // logged: WHICH chain the skin came from
@@ -1141,15 +1187,19 @@ namespace CostumeFW
             RE::BGSTextureSet* skinTx = bodyAA->skinTextures[sex];
             static const std::unordered_set<std::string> kNoHide;
             bool any = false;
-            if (auto* root3p = player->Get3D(false); root3p && !m3p.nifPath.empty()) {
+            InjectCtx ctx;
+            ctx.firstPersonRoot = a_state.isPlayer ? actor->Get3D(true) : nullptr;
+            if (auto* root3p = actor->Get3D(false); root3p && !m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
-                    m3p.swap, true, kNoHide, "realbody", false);
+                    m3p.swap, true, kNoHide, "realbody", false, actor, ctx);
                 ApplySkinTextures(root3p, kRealBodyNode, skinTx);
             }
-            if (auto* root1p = player->Get3D(true); root1p && !m1p.nifPath.empty()) {
-                any |= InjectOnRoot(root1p, StripMeshesPrefix(m1p.nifPath), kRealBodyNode,
-                    m1p.swap, true, kNoHide, "realbody", false);
-                ApplySkinTextures(root1p, kRealBodyNode, skinTx);
+            if (a_state.isPlayer) {
+                if (auto* root1p = actor->Get3D(true); root1p && !m1p.nifPath.empty()) {
+                    any |= InjectOnRoot(root1p, StripMeshesPrefix(m1p.nifPath), kRealBodyNode,
+                        m1p.swap, true, kNoHide, "realbody", false, actor, ctx);
+                    ApplySkinTextures(root1p, kRealBodyNode, skinTx);
+                }
             }
             if (any) {
                 SKSE::log::info("realbody: injected player body addon {:08X}", bodyAA->GetFormID());
@@ -1174,19 +1224,19 @@ namespace CostumeFW
             return line;
         }
 
-        // The player's body sex (kMale/kFemale), used to pick which ARMA model to
-        // inject. kNone (no actor base) falls back to female (v1's assumption).
-        RE::SEX PlayerSex()
+        RE::SEX ActorSexOf(RE::Actor* a_actor)
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            auto* base = player ? player->GetActorBase() : nullptr;
+            auto* base = a_actor ? a_actor->GetActorBase() : nullptr;
             const RE::SEX sex = base ? base->GetSex() : RE::SEXES::kFemale;
-            return (sex == RE::SEXES::kMale) ? RE::SEXES::kMale : RE::SEXES::kFemale;
+            return sex == RE::SEXES::kMale ? RE::SEXES::kMale : RE::SEXES::kFemale;
         }
 
-        // The body sex to inject a_id's model for: a forced gender mode (1=male,
-        // 2=female) overrides the player's sex; mode 0 follows the player.
-        RE::SEX EffectiveSex(const std::string& a_id)
+        RE::SEX PlayerSex()
+        {
+            return ActorSexOf(RE::PlayerCharacter::GetSingleton());
+        }
+
+        RE::SEX EffectiveSexOf(RE::Actor* a_actor, const std::string& a_id)
         {
             switch (GenderModeFor(a_id)) {
             case 1:
@@ -1194,8 +1244,13 @@ namespace CostumeFW
             case 2:
                 return RE::SEXES::kFemale;
             default:
-                return PlayerSex();
+                return ActorSexOf(a_actor);
             }
+        }
+
+        RE::SEX EffectiveSex(const std::string& a_id)
+        {
+            return EffectiveSexOf(RE::PlayerCharacter::GetSingleton(), a_id);
         }
 
         // Parse a colon-form id "XXXXXX:Plugin.esp" into local FormID + plugin.
@@ -1215,13 +1270,34 @@ namespace CostumeFW
             return true;
         }
 
+        RE::TESObjectARMA* PickAddonForRace(RE::TESObjectARMO* a_armo, RE::TESRace* a_race)
+        {
+            if (!a_armo || a_armo->armorAddons.empty()) {
+                return nullptr;
+            }
+            if (a_race) {
+                for (auto* aa : a_armo->armorAddons) {
+                    if (aa && aa->race == a_race) {
+                        return aa;
+                    }
+                }
+                for (auto* aa : a_armo->armorAddons) {
+                    if (aa && std::find(aa->additionalRaces.begin(), aa->additionalRaces.end(), a_race) !=
+                        aa->additionalRaces.end()) {
+                        return aa;
+                    }
+                }
+            }
+            return a_armo->armorAddons.front();
+        }
+
         // Resolve an ARMA (or ARMO -> its race-matched ARMA) to the 3P + 1P models
         // (NIF path + alternate-texture swap) for the requested body sex. If that
         // sex has no model, falls back to the other sex so a single-sex-authored
         // accessory still shows (e.g. a female-only nail mesh on a male PC). False
         // if neither sex has a 3P model / the form isn't ARMA/ARMO.
-        bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
-            ModelRef& a_out3p, ModelRef& a_out1p)
+        bool ResolveArmaModelsFor(std::uint32_t a_localID, const std::string& a_plugin,
+            RE::SEX a_sex, RE::TESRace* a_race, ModelRef& a_out3p, ModelRef& a_out1p)
         {
             auto* dh = RE::TESDataHandler::GetSingleton();
             if (!dh) {
@@ -1230,7 +1306,7 @@ namespace CostumeFW
             RE::TESObjectARMA* arma = dh->LookupForm<RE::TESObjectARMA>(a_localID, a_plugin);
             if (!arma) {
                 if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
-                    arma = PickAddonForPlayer(armo);
+                    arma = PickAddonForRace(armo, a_race);
                 }
             }
             if (!arma) {
@@ -1267,6 +1343,14 @@ namespace CostumeFW
             return true;
         }
 
+        bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
+            ModelRef& a_out3p, ModelRef& a_out1p)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            return ResolveArmaModelsFor(a_localID, a_plugin, a_sex,
+                player ? player->GetRace() : nullptr, a_out3p, a_out1p);
+        }
+
         // Resolve a colon-form id "XXXXXX:Plugin.esp" to its full runtime FormID
         // (0 on failure). Used for the box token's worn-state check.
         RE::FormID ResolveFormID(const std::string& a_colonId)
@@ -1292,8 +1376,10 @@ namespace CostumeFW
     bool InjectSkinned(const std::string& a_nifPath, const std::string& a_id)
     {
         const ModelRef m{ a_nifPath, nullptr };
-        Register(a_id, m, m);
-        return InjectInternal(a_id, m, m);
+        auto& state = PlayerState();
+        Register(state, a_id, m, m);
+        Reconcile();
+        return true;
     }
 
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn)
@@ -1327,12 +1413,19 @@ namespace CostumeFW
         if (!r3) {
             return;
         }
-        for (const auto& it : g_active) {
-            if (HasDeadPhysicsBind(it.id, r3)) {
-                ++g_persistDiag.watchdogReconciles;
-                SKSE::log::info("bind watchdog: '{}' holds a dead merge generation - reconciling", it.id);
-                Reconcile();  // the sweep inside detaches + re-injects
-                break;
+        for (auto& state : g_actors) {
+            auto* actor = ResolveActor(state);
+            auto* root = actor ? actor->Get3D(false) : nullptr;
+            if (!root || (state.isPlayer &&
+                std::chrono::steady_clock::now() < g_headRebuildGraceUntil)) {
+                continue;
+            }
+            for (const auto& it : state.items) {
+                if (HasDeadPhysicsBind(it.id, root)) {
+                    ++g_persistDiag.watchdogReconciles;
+                    Reconcile();
+                    break;
+                }
             }
         }
     }
@@ -1366,98 +1459,152 @@ namespace CostumeFW
         }).detach();
     }
 
-    void Reconcile()
+    static void ReconcileActorImpl(ActorState& a_state)
     {
-        StartBindWatchdogOnce();
-        ++g_persistDiag.reconcileCalls;
-        if (g_active.empty()) {
+        if (!a_state.inRebindRetry) a_state.rebindRetryBudget = kRebindRetryBudget;
+        auto* actor = ResolveActor(a_state);
+        if (!actor) {
+            a_state.bonePins.clear();
             return;
         }
-        // Every externally-triggered pass re-arms the rebind-retry budget; the
-        // retry passes themselves must not, or persistently-static contents
-        // (custom bones with no carrier) would retry forever.
-        if (!g_inRebindRetry) {
-            g_rebindRetryBudget = kRebindRetryBudget;
-        }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        const bool cefOn = CefEnabled();  // master off (Main page) -> hide everything
-        SKSE::log::info("Reconcile: {} active item(s) (cef enabled={})", g_active.size(), cefOn);
-        bool anyRealBody = false;   // set if a shown content wants the real body under it
-        for (auto& it : g_active) {
-            // master off -> hide; else persist (tokenForm 0) always shows, a box
-            // item shows only while its token is worn.
-            bool show = false;
-            if (cefOn) {
-                // persist (tokenForm 0) always shows; a box item shows only while its
-                // token is worn.
-                show = (it.tokenForm == 0);
-                if (!show && player) {
-                    show = (player->GetWornArmor(it.tokenForm) != nullptr);
-                }
-            }
-            // §8.10 hide-when-worn: hide this content while any of its configured
-            // vanilla slots is occupied by NON-CEF real equipment (boots over foot
-            // nails, helmet over a wig, ...). Auto-reshows when the slot frees.
-            if (show && player) {
-                for (const int slot : HideSlotsFor(it.id)) {
-                    if (slot < 30 || slot > 61) {
-                        continue;
-                    }
-                    auto* worn = player->GetWornArmor(
+        bool anyRealBody = false;
+        for (auto& it : a_state.items) {
+            bool show = CefEnabled() && (it.tokenForm == 0 || actor->GetWornArmor(it.tokenForm));
+            if (show) {
+                const auto hideSlots = it.settings ? it.settings->hideSlots : HideSlotsFor(it.id);
+                for (const int slot : hideSlots) {
+                    if (slot < 30 || slot > 61) continue;
+                    auto* worn = actor->GetWornArmor(
                         static_cast<RE::BGSBipedObjectForm::BipedObjectSlot>(1u << (slot - 30)));
-                    if (worn && !IsBoxToken(worn->GetFormID())) {
-                        show = false;  // a real (non-token) item holds the slot
+                    if (worn && !IsCefToken(worn->GetFormID())) {
+                        show = false;
                         break;
                     }
                 }
             }
-            // Sex-aware models: if the player's body sex changed since this item
-            // was resolved (e.g. ShowRaceMenu), re-resolve the ARMA models for the
-            // current sex before injecting. The 3D rebuild that follows a sex change
-            // already dropped the old nodes, so this re-injects the right mesh.
-            if (show && player) {
-                const RE::SEX sex = EffectiveSex(it.id);
+            if (show) {
+                RE::SEX sex = ActorSexOf(actor);
+                const int mode = it.settings ? it.settings->genderMode : GenderModeFor(it.id);
+                if (mode == 1) sex = RE::SEXES::kMale;
+                if (mode == 2) sex = RE::SEXES::kFemale;
                 if (it.resolvedSex != sex) {
                     std::uint32_t lid = 0;
                     std::string plg;
                     ModelRef m3p, m1p;
                     if (ParseColonId(it.id, lid, plg) &&
-                        ResolveArmaModels(lid, plg, sex, m3p, m1p)) {
+                        ResolveArmaModelsFor(lid, plg, sex, actor->GetRace(), m3p, m1p)) {
                         it.m3p = m3p;
                         it.m1p = m1p;
                     }
-                    it.resolvedSex = sex;  // mark resolved (raw-NIF items: nothing to redo)
+                    it.resolvedSex = sex;
                 }
-            }
-            SKSE::log::debug("  item '{}' tokenForm={:08X} show={}", it.id, it.tokenForm, show);
-            if (show) {
-                // Dead-bind sweep: if this item's injected mesh holds FSMP bones of a
-                // dead merge generation (armor unequipped / head rebuilt), detach it
-                // first so the injection below rebinds to the CURRENT generation.
-                if (player) {
-                    if (auto* r3 = player->Get3D(false); r3 && HasDeadPhysicsBind(it.id, r3)) {
-                        ++g_persistDiag.deadBindReinjects;
-                        SKSE::log::info("  '{}': bound FSMP bones are DETACHED (dead merge "
-                                        "generation) - re-injecting", it.id);
-                        DetachNodes(it.id);
-                    }
+                if (auto* r3 = actor->Get3D(false); r3 && HasDeadPhysicsBind(it.id, r3)) {
+                    ++g_persistDiag.deadBindReinjects;
+                    DetachNodes(a_state, it.id);
                 }
-                InjectInternal(it.id, it.m3p, it.m1p);
-                if (ShowRealBodyOn(it.id)) {
-                    anyRealBody = true;
-                }
+                InjectFor(a_state, it);
+                anyRealBody |= it.settings ? it.settings->showRealBody : ShowRealBodyOn(it.id);
             } else {
-                DetachNodes(it.id);
+                DetachNodes(a_state, it.id);
             }
         }
-        // Substitute body (dual injection, HANDOVER §8.4 strategy 2): when a shown
-        // content opted in, inject the player's real skin body (paired with
-        // hideShapes dropping the costume's own body); else remove it.
         if (anyRealBody) {
-            InjectRealBody();
+            a_state.realBodyShown = InjectRealBody(a_state);
         } else {
-            DetachRealBody();
+            DetachRealBody(a_state);
+            a_state.realBodyShown = false;
         }
+    }
+
+    // WP0.4: drop NPC states whose actor object is gone (freed on cell unload /
+    // deleted) or that track nothing - without this g_actors grows for the whole
+    // session. A swept state is reconstructible: the actor's next equip event
+    // (publish) or OnNpcActorLoaded (npc-persist) re-registers it, and erasing
+    // the state releases its bone pins. The player slot is never swept.
+    static void SweepDeadActors()
+    {
+        std::erase_if(g_actors, [](ActorState& a_state) {
+            if (a_state.isPlayer) return false;
+            if (a_state.items.empty()) return true;
+            const auto ref = a_state.handle.get();
+            return !ref || !ref.get()->As<RE::Actor>();
+        });
+    }
+
+    void Reconcile()
+    {
+        StartBindWatchdogOnce();
+        ++g_persistDiag.reconcileCalls;
+        PlayerState();
+        for (auto& state : g_actors) ReconcileActorImpl(state);
+        SweepDeadActors();
+    }
+
+    void ReconcileActorByHandle(RE::ActorHandle a_handle)
+    {
+        if (auto* state = FindState(a_handle)) ReconcileActorImpl(*state);
+    }
+
+    bool HasActorBindings(RE::Actor* a_actor)
+    {
+        auto* state = FindState(a_actor);
+        return state && !state->items.empty();
+    }
+
+    bool RegisterActorContent(RE::Actor* a_actor, const std::string& a_contentId,
+        const std::string& a_tokenId, std::uint32_t a_tokenForm,
+        std::shared_ptr<const ContentSettings> a_settings)
+    {
+        if (!a_actor) return false;
+        ActorState* state = FindState(a_actor);
+        if (!state) {
+            g_actors.push_back({ a_actor->GetHandle(), false });
+            state = &g_actors.back();
+        }
+        std::string id = a_contentId;
+        CanonicalizeColonId(id);
+        std::uint32_t local = 0;
+        std::string plugin;
+        if (!ParseColonId(id, local, plugin)) return false;
+        const int mode = a_settings ? a_settings->genderMode : GenderModeFor(id);
+        RE::SEX sex = ActorSexOf(a_actor);
+        if (mode == 1) sex = RE::SEXES::kMale;
+        if (mode == 2) sex = RE::SEXES::kFemale;
+        ModelRef m3p, m1p;
+        if (!ResolveArmaModelsFor(local, plugin, sex, a_actor->GetRace(), m3p, m1p)) return false;
+        Register(*state, id, m3p, m1p, a_tokenId, a_tokenForm, sex);
+        for (auto& item : state->items) {
+            if (item.id == id) item.settings = std::move(a_settings);
+        }
+        return true;
+    }
+
+    void RemoveActorToken(RE::Actor* a_actor, std::uint32_t a_tokenForm)
+    {
+        auto* state = FindState(a_actor);
+        if (!state) return;
+        std::vector<std::string> ids;
+        for (const auto& item : state->items) {
+            if (item.tokenForm == a_tokenForm) ids.push_back(item.id);
+        }
+        for (const auto& id : ids) {
+            DetachNodes(*state, id);
+            Unregister(*state, id);
+        }
+    }
+
+    void RemoveActorContent(RE::Actor* a_actor, const std::string& a_contentId)
+    {
+        auto* state = FindState(a_actor);
+        if (!state) return;
+        DetachNodes(*state, a_contentId);
+        Unregister(*state, a_contentId);
+    }
+
+    std::size_t InjectedNpcCount()
+    {
+        return static_cast<std::size_t>(std::count_if(g_actors.begin(), g_actors.end(),
+            [](const ActorState& state) { return !state.isPlayer && !state.items.empty(); }));
     }
 
     std::uint32_t ResolveFormId(const std::string& a_colonId)
@@ -1470,9 +1617,9 @@ namespace CostumeFW
         if (a_form == 0) {
             return false;
         }
-        for (const auto& it : g_active) {
-            if (it.tokenForm == a_form) {
-                return true;
+        for (const auto& state : g_actors) {
+            for (const auto& it : state.items) {
+                if (it.tokenForm == a_form) return true;
             }
         }
         return false;
@@ -1480,29 +1627,8 @@ namespace CostumeFW
 
     RE::TESObjectARMA* PickAddonForPlayer(RE::TESObjectARMO* a_armo)
     {
-        if (!a_armo || a_armo->armorAddons.empty()) {
-            return nullptr;
-        }
         auto* player = RE::PlayerCharacter::GetSingleton();
-        auto* race = player ? player->GetRace() : nullptr;
-        if (race) {
-            for (auto* aa : a_armo->armorAddons) {
-                if (aa && aa->race == race) {
-                    return aa;
-                }
-            }
-            for (auto* aa : a_armo->armorAddons) {
-                if (!aa) {
-                    continue;
-                }
-                for (auto* extra : aa->additionalRaces) {
-                    if (extra == race) {
-                        return aa;
-                    }
-                }
-            }
-        }
-        return a_armo->armorAddons.front();
+        return PickAddonForRace(a_armo, player ? player->GetRace() : nullptr);
     }
 
     bool CanonicalizeColonId(std::string& a_id)
@@ -1592,7 +1718,7 @@ namespace CostumeFW
             return false;
         }
         const RE::FormID tokenForm = ResolveFormID(tid);
-        Register(cid, m3p, m1p, tid, tokenForm, sex);
+        Register(PlayerState(), cid, m3p, m1p, tid, tokenForm, sex);
         return true;
     }
 
@@ -1609,10 +1735,10 @@ namespace CostumeFW
 
     void DetachAll()
     {
-        // Copy ids first - DetachSkinned mutates g_active via Unregister.
+        auto& playerState = PlayerState();
         std::vector<std::string> ids;
-        ids.reserve(g_active.size());
-        for (const auto& it : g_active) {
+        ids.reserve(playerState.items.size());
+        for (const auto& it : playerState.items) {
             ids.push_back(it.id);
         }
         for (const auto& id : ids) {
@@ -1651,14 +1777,18 @@ namespace CostumeFW
 
     void ListActive()
     {
-        SKSE::log::info("active: {} item(s)", g_active.size());
+        std::size_t count = 0;
+        for (const auto& state : g_actors) count += state.items.size();
+        SKSE::log::info("active: {} item(s), {} actor state(s)", count, g_actors.size());
         if (auto* c = RE::ConsoleLog::GetSingleton()) {
             c->Print("[CEF] active items:");
         }
-        for (const auto& it : g_active) {
-            SKSE::log::info("  {}", it.id);
-            if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                c->Print(it.id.c_str());
+        for (auto& state : g_actors) {
+            auto* actor = ResolveActor(state);
+            const char* name = actor ? actor->GetName() : "<unloaded>";
+            for (const auto& it : state.items) {
+                SKSE::log::info("  {}: {}", name, it.id);
+                if (auto* c = RE::ConsoleLog::GetSingleton()) c->Print(it.id.c_str());
             }
         }
     }
@@ -2195,8 +2325,10 @@ namespace CostumeFW
         }
         SKSE::log::info("InjectArma {:X}:{} 3p='{}' 1p='{}'",
             a_localID, a_plugin, m3p.nifPath, m1p.nifPath);
-        Register(a_id, m3p, m1p, {}, 0, sex);
-        return InjectInternal(a_id, m3p, m1p);
+        auto& state = PlayerState();
+        Register(state, a_id, m3p, m1p, {}, 0, sex);
+        Reconcile();
+        return true;
     }
 
     bool RegisterArmaById(const std::string& a_id)
@@ -2220,7 +2352,7 @@ namespace CostumeFW
         if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
             return false;
         }
-        Register(cid, m3p, m1p, {}, 0, sex);
+        Register(PlayerState(), cid, m3p, m1p, {}, 0, sex);
         return true;
     }
 
@@ -2244,8 +2376,9 @@ namespace CostumeFW
     std::vector<ActiveItemInfo> ActiveSnapshot()
     {
         std::vector<ActiveItemInfo> v;
-        v.reserve(g_active.size());
-        for (const auto& it : g_active) {
+        const auto& items = PlayerState().items;
+        v.reserve(items.size());
+        for (const auto& it : items) {
             v.push_back({ it.id, it.tokenId });
         }
         return v;
@@ -2253,26 +2386,39 @@ namespace CostumeFW
 
     void ClearRegistry()
     {
-        g_active.clear();
+        for (auto& state : g_actors) {
+            state.items.clear();
+            state.bonePins.clear();
+            state.rebindRetryIds.clear();
+        }
+        g_actors.resize(1);
+        // resize(1) on an EMPTY vector default-constructs slot 0 as a non-player
+        // state, breaking the "[0] is ALWAYS the player" invariant for the rest
+        // of the session (ResolveActor on an empty handle returns null, so the
+        // player would never reconcile again). Force the invariant either way.
+        g_actors[0].isPlayer = true;
+        g_actors[0].handle = {};
     }
 
     void DetachSkinned(const std::string& a_id)
     {
-        Unregister(a_id);
-        DetachNodes(a_id);
+        auto& state = PlayerState();
+        Unregister(state, a_id);
+        DetachNodes(state, a_id);
         SKSE::log::debug("  detached {}", a_id);
     }
 
     void HideInjectedNodes(const std::string& a_id)
     {
-        DetachNodes(a_id);  // registry untouched: Reconcile re-injects
+        DetachNodes(PlayerState(), a_id);  // registry untouched: Reconcile re-injects
     }
 
     void RefreshGender(const std::string& a_id)
     {
-        for (auto& it : g_active) {
+        auto& state = PlayerState();
+        for (auto& it : state.items) {
             if (it.id == a_id) {
-                DetachNodes(a_id);                  // drop old-sex node, keep registered
+                DetachNodes(state, a_id);             // drop old-sex node, keep registered
                 it.resolvedSex = RE::SEXES::kNone;  // force Reconcile to re-resolve
                 break;
             }

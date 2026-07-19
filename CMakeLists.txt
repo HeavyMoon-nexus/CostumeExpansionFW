@@ -49,6 +49,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/Cosave.cpp
     src/Papyrus.cpp
     src/BoxStore.cpp
+    src/PublishStore.cpp
     src/BodyMorph.cpp
     src/Preset.cpp
     src/LoreBox.cpp
