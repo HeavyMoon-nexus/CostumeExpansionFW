@@ -8,27 +8,45 @@
   with MARA installed, picking its runtime "CORE Carrier" item in
   `+ Add worn item` crashed instantly. The capture pickers now skip, and the
   capture gate now refuses, three layers of items:
-  - **L1 structural** — runtime-created (FF) forms (their inventory data is
-    the crash surface, and the colon-id persistence model could never restore
-    them anyway) and non-playable armors (hidden by the vanilla UI; a raw
-    inventory picker must hide them too). The picker loops were reordered so
-    a skipped form's `InventoryEntryData` is **never touched**.
+  - **L1 structural (hard)** — runtime-created (FF) and no-defining-file
+    forms (their data is the crash surface, and the colon-id persistence
+    model could never restore them anyway; not user-liftable) and
+    non-playable armors (hidden by the vanilla UI; a raw inventory picker
+    must hide them too; switchable). Structural checks run **inside the
+    `GetInventory` filter**, so a blocked form's `InventoryEntryData` is
+    never even copied; `CaptureEnchant` now touches only the captured
+    form's entry.
   - **L2 deny-list** — shipped defaults (`CORE Carrier` by name, `MARA` by
     plugin prefix) + user entries (name / plugin / colon-id) managed on the
     new SMF **Blocked** page or in `CEF_settings.json` (`captureBlacklist`).
   - **L3 opt-out keyword** — any armor carrying `CEF_NoCapture` is excluded;
     mod authors and users can distribute it via the shipped
     `CostumeFW_NoCapture_KID.ini` template (KID auto-creates the keyword).
-  Every capture entrance funnels through the same gate: MCM, SMF, presets,
-  and the previously-ungated `AddBox`/`AddPersist` Papyrus natives.
+  Every capture entrance funnels through the same gate (MCM, SMF, presets,
+  the `AddBox`/`AddPersist` Papyrus natives), and a **hard admission check at
+  the registration boundary** (`RegisterBoxById`/`RegisterArmaById`/
+  `InjectArmaById`) covers the remaining routes — settings load, co-save
+  restore, `RegisterPersist`/`DefineBox`, console `cef box`. A refused id is
+  KEPT in config/co-save (quarantined: not registered, one log line).
+- The blacklist policy is published as an **immutable atomic snapshot**
+  (readers never see a mutating list), and its pure layers are covered by a
+  new host-side unit-test target (`policy_tests`, dev-only).
 - Startup logs `compat: MARA.dll detected` when MARA is present (triage aid;
   no behavior branches on it).
+- All of the above hardened per an adversarial review
+  (`MARA_GUARD_ADVERSARIAL_REVIEW.md` — all findings accepted; response in
+  `MARA_GUARD_IMPL.md` §R).
 
 ### Fixed
+- **The picker CTD mechanism itself.** `TESForm::GetLocalFormID()`
+  dereferences `GetFile(0)` unchecked; v1.3.1's pickers called it (via
+  `MakeColonId`) on every foreign armor, so a runtime form = instant null
+  deref. `MakeColonId` is now no-file-safe, and runtime forms never reach it.
 - **Runtime (FF) form ids no longer truncate.** `MakeColonId` /
   `CanonicalizeColonId` wrote 8-digit local ids into `char[8]` buffers
   (`%06X` is a *minimum* width), producing corrupt `"FF00080:"`-style ids.
-  Buffers widened; normal 6-digit ids are byte-identical.
+  Formatting unified in the new pure `CapturePolicy` module; normal 6-digit
+  ids are byte-identical.
 
 ## v1.3.1 (2026-07-17)
 

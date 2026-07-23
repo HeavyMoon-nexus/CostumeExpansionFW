@@ -1,13 +1,53 @@
 # v1.3.2 実装記録 — MARA 捕獲ブラックリスト(敵対的レビュー用)
 
-> ステータス: **実装完了・パッケージ済み(2026-07-23)**。本書は「何を・どこに・なぜ」を
-> レビュー(Codex 敵対的レビュー想定)が攻撃できる粒度で記録する。
+> ステータス: **r2 = レビュー全指摘対応済み・再パッケージ済み(2026-07-23)**。
 > ブランチ: `mara-guard-v1.3.2`(base = `main` @ 6877530 = v1.3.1)。
-> コミット列: `bf8883b` docs(計画+監査) → `f09bf40` Phase 1 (L1) → `fae79b2` Phase 2 (L2)
-> → `0e00f85` Phase 3 (L3) → release cut(本書を含む)。
+> コミット列: `bf8883b` docs → `f09bf40` L1 → `fae79b2` L2 → `0e00f85` L3 →
+> `a8ca5c5` release cut → **`d1bf735` レビュー r2 修正**(§R)。
+> 敵対的レビュー = [MARA_GUARD_ADVERSARIAL_REVIEW.md](MARA_GUARD_ADVERSARIAL_REVIEW.md)
+> (リリース停止勧告・P1×5 + P2×1)→ **全件 CONFIRMED として受理し修正**。
+> §1〜§4 は r1 時点の記録として保存し、r2 で無効になった記述には(r2 修正)を付す。
 > 設計根拠: [MARA_COMPAT_PLAN.md](MARA_COMPAT_PLAN.md) §3 / 検証根拠:
-> [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)(C1/C7 が開いていた面)。
-> 本文の file:line は release cut 時点の実ファイル。
+> [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)。
+
+---
+
+## §R. 敵対的レビュー対応(r2・コミット d1bf735)
+
+**全 6 findings を実ソース照合の上 CONFIRMED と判定**(反証できた指摘はゼロ)。
+CommonLibSSE-NG 裏取りの決定打: `TESForm.h:292-300` — `GetLocalFormID()` は
+`GetFile(0)` の戻り値を**無条件デリファレンス**する。つまり **v1.3.1 の
+「+ Add worn item 押下で即 CTD」の機械的正体 = 旧 `WornArmors()` が全外部装備に
+`MakeColonId` → 動的フォームで null deref**(レビュー P1-4 の指摘 5 が root cause を
+言い当てていた。クラッシュログとの突合は §5 チェックリストに残る)。
+
+| Finding | 判定 | 対応(d1bf735) |
+|---|---|---|
+| P1-1 判定前の entry コピー | CONFIRMED(`GetInventory` は filter 通過 entry の `InventoryEntryData`/extraLists をコピーしてから返す) | 構造/deny 判定を **`GetInventory` の filter 内**へ移動(`WornArmors`/`InventoryArmors`)。blocked フォームは **entry がコピーすらされない**。filter が安全境界であることをコメントで明文化 |
+| P1-2 CaptureEnchant の全 Armor コピー | CONFIRMED(安全なアイテム捕獲でも敵性 entry をコピー) | filter を **対象 FormID 一致のみ**に変更 — 捕獲対象以外の entry には一切触れない |
+| P1-3 最深部ゲート不在 / hand-JSON 未保護 | CONFIRMED(**r1 の「hand-JSON も store 前線で保護」は誤り** — LoadJson は AddBox を経由しない) | `RegisterBoxById` / `RegisterArmaById` / `InjectArmaById` 先頭に **hard admission**(`IsContentAdmissible`)。settings 読込・co-save 復元・ReapplyBoxes・persist 再有効化・`RegisterPersist`/`DefineBox` native・console `cef box` を全カバー。**拒否時も設定は保持**(quarantine-lite: 登録だけしない+理由ログ。co-save 側は既存 ROOT-H の未解決保全に自然合流) |
+| P1-4 動的判定の初手が不適切 / allowDynamic | CONFIRMED(上記 root cause) | `IsDynamicForm()`(formID 読みのみ)を**初手のハード判定**に、no-defining-file を第 2 ハード判定(`kNoDefiningFile` 新設)に。`MakeColonId` を no-file 安全化(file 無しは生 FormID 8 桁+空プラグインを**デリファレンスなしで**整形)。**`allowDynamic` は UI/json/policy から完全撤去** — ハード不変条件に通常経路の解除口を残さない |
+| P1-5 policy のデータ競合(UB) | CONFIRMED(「g_boxes と同類の許容」は安全性の証明にならない — 撤回) | `std::atomic<std::shared_ptr<const policy::CapturePolicy>>` の **immutable snapshot 方式**。読者は操作単位で 1 世代を取得(列挙は filter〜loop まで同一 snapshot)、変更は copy-and-publish。公開済み vector の in-place 変更は消滅 |
+| P2-1 直接 ARMA id の迂回 | CONFIRMED | `IsContentAdmissible` を層構造化: ①canonical id の**文字列 deny**(解決不能でも効く)→ ②**汎用 TESForm** 判定(dynamic/no-file/plugin deny — ARMA にも効く)→ ③ARMO 固有判定。`CanCaptureContent` = admission + resolvability |
+| 検証不足: unit test 不在 | CONFIRMED | 純粋層を `src/CapturePolicy.{h,cpp}`(std-only・colon-id parse/format の単一実装に統合、SkinRebind は委譲)へ分離し、**`tests/policy_tests.cpp`(host 実行・43 checks 緑)** を追加(`policy_tests.exe`・dev 専用ターゲット)。form-level 層(IsDynamicForm/flags/keyword)は RE 依存のため実機チェックリスト側(監査 §5) |
+| 成果物件数の不一致 | CONFIRMED(表記揺れ) | 正: **552→553 files + 9 folders**(7-Zip)。r1 の「562→563 entries」は files+folders+アーカイブ名行を含む Path 行数 — 以後 files/folders 表記に統一 |
+
+**r2 で維持した設計**(レビュー §2 の「良かった点」+ §5 提言との整合):
+hard/soft 分離(hard = dynamic/no-file、soft = non-playable/deny-list/keyword)、
+quarantine-lite(拒否は登録抑止のみ・設定とco-saveを破壊しない)、
+`AdmissionPurpose` の完全実装は見送り(現状は capture / registration の 2 面 —
+理由コード付きログで代替。フル版は beta 線での拡張候補)。
+
+**C1(不正 NIF)の主張の狭め**(レビュー §7): v1.3.2 の主張は
+「**MARA 型ランタイムフォーム(および deny 対象)を CEF の列挙・捕獲・登録経路から遮断する**」
+まで。正規 plugin レコードが参照する破損 NIF(legacy `NiTriShape`/0 頂点)の安全性は
+**保証しない**(監査 §4.1 の残余のまま。VFS 経由 bytes+隔離 validator 案はレビュー §4 を
+そのまま次版検討課題として引き継ぐ)。
+
+再検証(r2): `/W4` ビルド緑・`policy_tests` 43/43・再パッケージ後の 7z 差分 =
+1.3.1 + `CostumeFW_NoCapture_KID.ini` のみ(552→553 files)・DLL のみ更新。
+
+---
 
 ---
 
@@ -29,12 +69,12 @@ preset/native)に 3 層のブラックリストを敷き、**ブロック判定�
 | 箇所 | 内容 |
 |---|---|
 | src/BoxStore.cpp:2012-2063 | `CaptureBlockReason` — **form-level 読みのみ**の契約。順序: null → L1a 動的フォーム(`GetFile(0)==nullptr`、:2025-2028)→ L2a プラグイン(:2030)→ L1b non-playable(`formFlags & kNonPlayable`、:2036)→ L3 キーワード(:2041)→ L2b 名前(:2049)→ L2c colon-id(:2054)。**動的フォームは名前/キーワード読みに到達しない** |
-| src/BoxStore.cpp:2228 (`WornArmors`) / :2267 (`InventoryArmors`) | ループ順序組替え: `As<ARMO>` → `IsCaptureBlocked` → `IsTokenPluginFile` → **その後で初めて** count/`entry->IsWorn()`/名前読み。旧順序(v1.3.1)は IsWorn が先(v1.3.1 の :1872) |
+| src/BoxStore.cpp:2228 (`WornArmors`) / :2267 (`InventoryArmors`) | ループ順序組替え: `As<ARMO>` → `IsCaptureBlocked` → `IsTokenPluginFile` → **その後で初めて** count/`entry->IsWorn()`/名前読み。旧順序(v1.3.1)は IsWorn が先(v1.3.1 の :1872)。**(r2 修正)** この loop 側 skip は `GetInventory` の entry コピー後に走るため不十分(レビュー P1-1)→ 判定は **filter 内**へ移動(§R) |
 | src/BoxStore.cpp:2086 | `CanCaptureContent(id, why*)` = blacklist → 既存 `CanResolveContent`。未解決 id は blacklist 層をスキップし従来どおり resolve 拒否(挙動互換) |
 | ゲート敷設(全入口) | SMF: SmfUI.cpp:114 / :150。MCM: Papyrus.cpp の `CanResolveContentNative`(native 名は**据え置き** → .psc 再コンパイル不要。呼び元 .psc:1229/:1286 検証済み)。preset: Preset.cpp:235。store 直行系(native/hand-JSON): `AddBox` BoxStore.cpp:3284 周辺・`AddPersistContent` :1573 周辺 |
 | src/BoxStore.cpp:324 / src/SkinRebind.cpp:1518 | `MakeColonId`/`CanonicalizeColonId` の `char[8]` → `char[16]`。`%06X` は**最小幅**なので 0xFF ローカル id(8桁)が旧バッファで切り詰められ破損 id を生んでいた(実害経路は L1 で閉鎖、id 生成自体も修正)。正規 6 桁 id はバイト同一 |
 | plugin.cpp:22, :139-147 | kDataLoaded で `GetModuleHandleW(L"MARA.dll")` 1 回 → info ログ 1 行。**挙動分岐なし**(triage 用) |
-| CEF_settings.json | `captureBlacklist.allowNonPlayable / allowDynamic`(既定 false = skip 有効)。WriteJson :274-284 / LoadJson :1240-1269 / 初期化リセット :1054 / catch リセット :1310 |
+| CEF_settings.json | `captureBlacklist.allowNonPlayable / allowDynamic`(既定 false = skip 有効)。WriteJson :274-284 / LoadJson :1240-1269 / 初期化リセット :1054 / catch リセット :1310。**(r2 修正)** `allowDynamic` は撤去(ハード不変条件・§R P1-4。旧 json のキーは黙って無視) |
 
 ### L2 名指しリスト + SMF Blocked ページ(fae79b2)
 
@@ -77,33 +117,44 @@ preset/native)に 3 層のブラックリストを敷き、**ブロック判定�
    返す関数に**強化**であり、既存呼び元の期待(false = 捕獲しない)と互換。
 3. **なぜ動的フォームを一律拒否できる?** CEF の永続 id は `local:plugin` で、
    plugin を持たない動的フォームは**そもそもロード後に復元不能**。防御と意味論が一致
-   する(監査 C7)。逃げ道 `allowDynamic` は再現実験専用として残し、UI に警告を付けた。
+   する(監査 C7)。~~逃げ道 `allowDynamic` は再現実験専用として残し、UI に警告を付けた。~~
+   **(r2 修正)** `allowDynamic` は撤去 — ON にすると `MakeColonId`→`GetLocalFormID` の
+   null deref で**リスト構築時に即死**するため「再現専用」としてすら機能しない
+   footgun だった(§R P1-4)。再現手段は v1.3.1 導入で代替(監査 §5)。
 4. **なぜ名前既定が「CORE Carrier」だけ?** MARA のリネーム複製("Silver Ring (Left)
    Misc" 等)も全て動的フォーム = L1 で消えるため、L2 名前は「静的化された将来版への
    保険 + ユーザー速報対応」の層。過剰な既定名は誤爆リスク(実在装備名との衝突)を増やす。
 5. **non-playable 既定 skip の誤爆リスクは?** バニラ UI が隠すものをピッカーも隠す、
    という対称性が原則。正当な non-playable 衣装(稀)には `allowNonPlayable` を用意。
-6. **スレッド安全性は?** 読み(列挙・判定・UI スナップショット)はレンダ/VM スレッド、
-   変更はメインスレッド(AddTask)— SmfUI.cpp:18-25 に既存明文化された
-   「read-only snapshot tolerated + 変更は AddTask」規約に**完全に相乗り**。
-   `g_captureBlacklist` の vector 読み書き競合は既存 `g_boxes` 等と同じ許容クラス
-   (変更頻度 = ユーザー操作時のみ)。**新しい競合クラスは導入していない**。
-7. **`GetInventory` 自体が踏む面は?** マップ構築時のエントリ走査はエンジン共有面
-   (バニラ UI・全 mod が通る)で、CEF 固有の追加接触(IsWorn/名前/colon-id)だけを
-   ブロック判定の後ろへ移した。ここは**残余**として明記(§3)。
+6. **スレッド安全性は?** ~~既存規約に相乗り・新しい競合クラスは導入していない。~~
+   **(r2 修正)** レビュー P1-5 のとおり vector の並行 read/mutate は UB であり
+   「既存と同類」は安全性の証明にならない — 撤回。r2 で policy は
+   `std::atomic<std::shared_ptr<const CapturePolicy>>` の immutable snapshot に置換
+   (§R)。既存 `g_boxes` 等の同類競合は本リリースのスコープ外課題として残る(§5)。
+7. **`GetInventory` 自体が踏む面は?** ~~CEF 固有の追加接触だけを判定の後ろへ移した。~~
+   **(r2 修正)** それでは entry コピー(filter 通過分)が判定より先に走る(P1-1)。
+   r2 で判定を filter 内へ移し、**blocked フォームは entry コピー自体が発生しない**。
+   残余は「filter を呼ぶために `entry->object` を読む」engine 共有面のみ
+   (これはバニラ/全 mod と同一水準で、これ以上は GetInventory 再実装になる)。
 
 ## 3. 既知の限界(レビューで再確認してほしい点)
 
-- **C1 の legacy-NIF 面は未対処のまま**(意図的スコープ外): 正規 ESP アイテムが
-  legacy `NiTriShape`/0 頂点スキンの NIF を持つ場合、捕獲後の注入ロードで
-  エンジン側 divide-by-zero の余地が残る(直接注入経路に `ValidateNifSkinnable` 相当は
-  無い)。事前検証は BSA 不可視(std::filesystem)のため偽陰性を作る — 監査 §4.1 の判断。
-- **`GetInventory` のマップ構築**はブロック判定の外(上記 Q7)。
+- **C1 の legacy-NIF 面は未対処のまま**(意図的スコープ外・レビュー §7 の狭め主張を採用):
+  正規 ESP アイテムが legacy `NiTriShape`/0 頂点スキンの NIF を持つ場合、捕獲後の
+  注入ロードでエンジン側 divide-by-zero の余地が残る(直接注入経路に
+  `ValidateNifSkinnable` 相当は無い)。事前検証は BSA 不可視(std::filesystem)のため
+  偽陰性を作る — 監査 §4.1 の判断。恒久策候補 = レビュー §4(VFS bytes+隔離 validator)。
+- ~~`GetInventory` のマップ構築はブロック判定の外。~~ **(r2 修正)** filter 境界化で
+  blocked フォームの entry コピーは消滅(§R P1-1)。残余は filter 呼出しのための
+  `entry->object` 読みのみ(engine 共有面)。
 - **SMF Blocked ページの Add は成功/失敗を同期表示しない**(AddTask 後の実結果はログ。
   s_status は「queued」の楽観表示 — 既存 s_pendingWear と同じ思想)。
 - **`help "CORE Carrier"` 型の実機確認は未実施**(MARA 非導入環境)。再現・確認手順は
-  監査 §5(テスター向け)に依存。allowDynamic+disableDefaults で意図的に v1.3.1 相当へ
-  戻せる設計にしてある。
+  監査 §5(テスター向け)。**(r2 修正)** allowDynamic 撤去に伴い、旧挙動の再現は
+  **v1.3.1 を一時導入**して行う(その方が「修正前バイナリでの再現」として証跡も正しい)。
+- **既存ストア状態(`g_boxes`/`g_persist` 等)の read/mutate 競合クラスは残存** —
+  レビュー P1-5 は blacklist を snapshot 化したが、既存状態の同型競合は v1.3.2 の
+  スコープ外(beta 線での一般化候補。SmfUI.cpp:18-25 の従来規約のまま)。
 - CHANGELOG の過去節修復(v1.3.0/v1.3.1)は**遡及記載** — 出荷済み Nexus 文面
   (NEXUS_CHANGELOG_*.txt)を正とし、要約のみ。
 

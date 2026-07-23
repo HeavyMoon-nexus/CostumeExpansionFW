@@ -1,7 +1,12 @@
 # MARA 互換問題 — 捕獲ブラックリスト設計・実装計画
 
-> ステータス: **v1.3.2 として実装完了(2026-07-23)** — 実装記録 =
-> [MARA_GUARD_IMPL.md](MARA_GUARD_IMPL.md)/検証 = [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)。
+> ステータス: **v1.3.2 実装完了 + 敵対的レビュー r2 対応済み(2026-07-23)** — 実装記録 =
+> [MARA_GUARD_IMPL.md](MARA_GUARD_IMPL.md)(§R = レビュー対応)/検証 =
+> [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)/レビュー =
+> [MARA_GUARD_ADVERSARIAL_REVIEW.md](MARA_GUARD_ADVERSARIAL_REVIEW.md)(全指摘受理)。
+> §3.3 の「ループ先頭 skip」は r2 で「**GetInventory filter 境界**」へ強化、
+> allowDynamic 構想は**撤去**(ハード不変条件)、§2-H1 の機序は
+> **GetLocalFormID の null deref と確定**(TESForm.h:292-300)。
 > リリース判断: §4 の「beta-2 か 1.3.2 hotfix か」は**安定版 v1.3.2 で確定**(報告環境が
 > 安定版 v1.3.1 だったため)。beta 線への merge は §8-3 の後続作業。
 > 以下は計画時点(2026-07-23 午前)の本文を保存 — 実装との差分は実装記録側が正。
