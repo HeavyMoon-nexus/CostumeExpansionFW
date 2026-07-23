@@ -1943,6 +1943,12 @@ namespace CostumeFW
         // MARA bug #1059563 (both: third-party UI touches the carrier -> CTD).
         constexpr std::string_view kDefaultBlockNames[] = { "CORE Carrier" };
         constexpr std::string_view kDefaultBlockPlugins[] = { "MARA" };
+        // L3 opt-out keyword: any ARMO carrying it is barred from capture.
+        // Other mod authors (or users, via the shipped CostumeFW_NoCapture_KID.ini
+        // template) tag their utility armors with it - KID auto-creates the
+        // keyword, so no ESP dependency in either direction. Static forms only;
+        // runtime forms can't receive KID keywords (L1 blocks those anyway).
+        constexpr const char* kNoCaptureKeyword = "CEF_NoCapture";
 
         bool EqualsCI(std::string_view a_lhs, std::string_view a_rhs)
         {
@@ -2031,6 +2037,10 @@ namespace CostumeFW
             !g_captureBlacklist.allowNonPlayable) {
             return CaptureBlock::kNonPlayable;
         }
+        // L3: CEF_NoCapture opt-out keyword (static keyword-array read).
+        if (a_armo->HasKeywordString(kNoCaptureKeyword)) {
+            return CaptureBlock::kKeyword;
+        }
         // L2b: name deny-list (defaults + user). The name read sits BELOW the
         // dynamic-form skip on purpose: with allowDynamic off (the default) a
         // runtime form never reaches it, and with allowDynamic on the user
@@ -2067,6 +2077,7 @@ namespace CostumeFW
             case CaptureBlock::kPlugin: return "plugin on the deny-list";
             case CaptureBlock::kName: return "name on the deny-list";
             case CaptureBlock::kId: return "id on the deny-list";
+            case CaptureBlock::kKeyword: return "carries the CEF_NoCapture keyword";
             default: return "not blocked";
             }
         }

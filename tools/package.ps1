@@ -21,6 +21,9 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 # --- from the deployed mod folder (explicit manifest) ---
 Copy-Item "$mod\CostumeFW.esp" $stage
 Copy-Item "$mod\CostumeFW_KID.ini" $stage
+# v1.3.2 L3 opt-out template: a static repo file (never modified at runtime),
+# staged from the repo like the licenses.
+Copy-Item "$repo\CostumeFW_NoCapture_KID.ini" $stage
 New-Item -ItemType Directory -Force "$stage\SEQ" | Out-Null
 Copy-Item "$mod\SEQ\CostumeFW.seq" "$stage\SEQ\"
 # Carrier placeholders come from the PRISTINE repo tree, NEVER the live mod

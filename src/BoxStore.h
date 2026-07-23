@@ -224,6 +224,7 @@ namespace CostumeFW
         kPlugin,        // L2: source-plugin deny-list (defaults or user)
         kName,          // L2: name deny-list (defaults or user)
         kId,            // L2: colon-id deny-list (user)
+        kKeyword,       // L3: carries the CEF_NoCapture keyword (KID-distributable)
     };
     // Form-level reads ONLY (defining file, record flags, static name/keywords):
     // safe to call on an armor whose inventory ENTRY must not be touched. The
