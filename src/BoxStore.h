@@ -249,9 +249,13 @@ namespace CostumeFW
     // Admission WITHOUT resolvability (review P1-3/P2-1): textual id deny ->
     // generic-form hard checks (dynamic / no file / plugin deny; works for
     // ARMA ids too) -> full ARMO reason. Used by the registration boundary
-    // (RegisterBoxById / RegisterArmaById / InjectArmaById), where a refusal
-    // KEEPS the configured id (quarantine-lite: not registered, one log line).
-    bool IsContentAdmissible(const std::string& a_id, std::string* a_why = nullptr);
+    // (RegisterBoxById / RegisterArmaById / InjectArma*), where a refusal
+    // KEEPS the configured id (quarantined: not registered, one log line),
+    // and - with a_log=false (re-review P1-2) - by the derived processors
+    // (stats/keywords/abilities/carrier manifest/UI summaries), which must
+    // skip blocked contents without spamming per-item refusal logs.
+    bool IsContentAdmissible(const std::string& a_id, std::string* a_why = nullptr,
+        bool a_log = true);
     // The semantic capture gate: IsContentAdmissible + mesh resolvability
     // (CanResolveContent). Every capture entrance funnels here - MCM (via the
     // CanResolveContent native), SMF QueueCapture*, preset Validate, and the

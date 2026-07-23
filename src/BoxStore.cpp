@@ -444,6 +444,23 @@ namespace CostumeFW
 
         void ScheduleAutoSync();  // fwd (defined below)
 
+        // r3 (re-review P1-2): the quiet admitted-contents snapshot every
+        // derived processor iterates INSTEAD of raw box.contents / persist
+        // actives - a configured-but-blocked (quarantined) content must not
+        // be read by stats/keyword/ability/manifest/UI code either. Loud
+        // refusal logs stay at the explicit gates; this filter is silent.
+        std::vector<std::string> AdmittedContents(const std::vector<std::string>& a_ids)
+        {
+            std::vector<std::string> out;
+            out.reserve(a_ids.size());
+            for (const auto& id : a_ids) {
+                if (IsContentAdmissible(id, nullptr, false)) {
+                    out.push_back(id);
+                }
+            }
+            return out;
+        }
+
         void WriteCarrierManifest()
         {
             auto* dh = RE::TESDataHandler::GetSingleton();
@@ -497,7 +514,7 @@ namespace CostumeFW
                 jb["slot"] = SlotNumberOf(ResolveArmo(b.token));
                 jb["token"] = b.token;
                 auto contents = nlohmann::json::array();
-                for (const auto& id : b.contents) {
+                for (const auto& id : AdmittedContents(b.contents)) {  // r3: quarantined ids stay out
                     if (auto c = resolveContent(id); !c.is_null()) {
                         contents.push_back(std::move(c));
                     }
@@ -515,7 +532,7 @@ namespace CostumeFW
             // doesn't show (CEF_STATE_SCOPE.md §5).
             {
                 auto pcontents = nlohmann::json::array();
-                for (const auto& id : ActivePersistIds()) {
+                for (const auto& id : AdmittedContents(ActivePersistIds())) {  // r3
                     if (auto c = resolveContent(id); !c.is_null()) {
                         pcontents.push_back(std::move(c));
                     }
@@ -2041,15 +2058,19 @@ namespace CostumeFW
         }
     }
 
-    bool IsContentAdmissible(const std::string& a_id, std::string* a_why)
+    bool IsContentAdmissible(const std::string& a_id, std::string* a_why, bool a_log)
     {
         // Layered admission (review P1-3/P2-1), one policy snapshot for the
         // whole evaluation. Deliberately WITHOUT the resolvability check so
         // the registration boundary can use it on ids whose resolve failure
-        // is already fail-soft (ROOT H unresolved-actives).
+        // is already fail-soft (ROOT H unresolved-actives). a_log=false is
+        // the quiet mode for derived processing (re-review P1-2) - refusals
+        // there are expected steady state, not events worth a log line each.
         const auto pol = CapturePolicySnapshot();
         const auto refuse = [&](CaptureBlock a_reason) {
-            SKSE::log::warn("capture: '{}' blocked - {}", a_id, BlockReasonText(a_reason));
+            if (a_log) {
+                SKSE::log::warn("capture: '{}' blocked - {}", a_id, BlockReasonText(a_reason));
+            }
             if (a_why) {
                 *a_why = std::string("blocked: ") + BlockReasonText(a_reason) +
                          " (capture blacklist)";
@@ -2107,6 +2128,26 @@ namespace CostumeFW
         return true;
     }
 
+    namespace
+    {
+        // r3 (re-review P1-2): a policy edit must not leave an already-active
+        // blocked content injected - and lifting an entry must re-admit
+        // configured contents. ReloadSettingsFromDisk is the existing,
+        // battle-tested primitive with exactly that shape: detach every
+        // active, clear the registry, re-read the just-written json,
+        // re-register everything through the (gated) registration boundary,
+        // restore this save's persist actives, reconcile, rebuild abilities;
+        // the trailing WriteJson/manifest pass then regenerates carriers from
+        // AdmittedContents only. Configured ids are never dropped: a blocked
+        // one fails registration with one log line (= quarantined) and every
+        // derived reader filters through AdmittedContents. Runs on the main
+        // thread (the UI mutators are AddTask'd there).
+        void ReevaluateContentAdmissions()
+        {
+            ReloadSettingsFromDisk();
+        }
+    }
+
     bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on)
     {
         // Copy-and-publish (review P1-5): never mutate the published policy.
@@ -2126,6 +2167,7 @@ namespace CostumeFW
             PublishPolicy(std::move(next));
             WriteJson();
             SKSE::log::info("capture: blacklist switch {} = {}", a_flag, a_on);
+            ReevaluateContentAdmissions();  // r3: detach newly-blocked / re-admit freed
         }
         return true;
     }
@@ -2203,6 +2245,7 @@ namespace CostumeFW
         PublishPolicy(std::move(next));
         WriteJson();
         SKSE::log::info("capture: blacklist {} entry added '{}'", a_kind, value);
+        ReevaluateContentAdmissions();  // r3: detach a now-blocked active immediately
         return true;
     }
 
@@ -2223,6 +2266,7 @@ namespace CostumeFW
         PublishPolicy(std::move(next));
         WriteJson();
         SKSE::log::info("capture: blacklist {} entry removed '{}'", a_kind, a_value);
+        ReevaluateContentAdmissions();  // r3: re-admit configured contents this entry blocked
         return true;
     }
 
@@ -2545,7 +2589,9 @@ namespace CostumeFW
         RE::SpellItem* BuildEnchantSpell(const std::vector<std::string>& a_contents, const char* a_name)
         {
             std::vector<std::pair<RE::EffectSetting*, float>> effs;
-            for (const auto& c : a_contents) {
+            // r3 (re-review P1-2): single ability choke - box AND persist
+            // ability synthesis skip quarantined contents here.
+            for (const auto& c : AdmittedContents(a_contents)) {
                 const auto snap = g_contentEnchants.find(c);
                 if (snap != g_contentEnchants.end()) {
                     for (const auto& e : snap->second) {
@@ -2652,7 +2698,7 @@ namespace CostumeFW
             ClearTokenKeywords(a_tokenId, token);
             auto& mine = g_boxKeywords[a_tokenId];
             if (a_box.enabled) {
-                for (const auto& c : a_box.contents) {
+                for (const auto& c : AdmittedContents(a_box.contents)) {  // r3: skip quarantined
                     auto* armo = ResolveArmo(c);
                     if (!armo) {
                         continue;
@@ -2702,7 +2748,7 @@ namespace CostumeFW
             float armorSum = 0.0f;
             float weightSum = 0.0f;
             if (a_box.enabled) {
-                for (const auto& c : a_box.contents) {
+                for (const auto& c : AdmittedContents(a_box.contents)) {  // r3: skip quarantined
                     if (auto* armo = ResolveArmo(c)) {
                         armorSum += armo->GetArmorRating();
                         weightSum += armo->weight;
@@ -2802,6 +2848,17 @@ namespace CostumeFW
 
     bool CaptureEnchant(const std::string& a_content)
     {
+        // v1.3.2 r3 (re-review P2-2): function-boundary admission. The UIs
+        // pre-gate for UX, but this native is public to any mod - without
+        // this line an external caller could point it at a blocked static
+        // armor and have its worn entry (extra lists, enchantment) read.
+        {
+            std::string why;
+            if (!IsContentAdmissible(a_content, &why)) {
+                SKSE::log::warn("boxes: CaptureEnchant refuses '{}' - {}", a_content, why);
+                return false;
+            }
+        }
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t baseId = ResolveFormId(a_content);
         if (!player || baseId == 0) {
@@ -2954,7 +3011,7 @@ namespace CostumeFW
         float armorSum = 0.0f;
         float weightSum = 0.0f;
         std::vector<std::string> effs;
-        for (const auto& c : box.contents) {
+        for (const auto& c : AdmittedContents(box.contents)) {  // r3: skip quarantined
             auto* armo = ResolveArmo(c);
             if (!armo) {
                 continue;

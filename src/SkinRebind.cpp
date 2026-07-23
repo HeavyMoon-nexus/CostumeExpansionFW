@@ -1229,6 +1229,30 @@ namespace CostumeFW
                 SKSE::log::error("ResolveArma: {:X}:{} is not ARMA/ARMO", a_localID, a_plugin);
                 return false;
             }
+            // v1.3.2 r3 (re-review P1-1): the form whose bipedModels this
+            // function reads NEXT is the SELECTED ARMA - not necessarily the
+            // form the admission gate inspected. A permitted ARMO can
+            // reference a denied plugin's ARMA (case A), and a foreign DLL
+            // can swap a static ARMO's armorAddons to a runtime/half-built
+            // ARMA (case B). Enforce the hard + plugin layers HERE, on the
+            // same pointer that is read below - judge and use share one
+            // function, so there is no check/use gap to exploit.
+            if (arma->IsDynamicForm()) {
+                SKSE::log::warn("ResolveArma: {:X}:{} selects a runtime ARMA {:08X} - refused",
+                    a_localID, a_plugin, arma->GetFormID());
+                return false;
+            }
+            const auto* armaFile = arma->GetFile(0);
+            if (!armaFile) {
+                SKSE::log::warn("ResolveArma: {:X}:{} selects a no-file ARMA {:08X} - refused",
+                    a_localID, a_plugin, arma->GetFormID());
+                return false;
+            }
+            if (policy::PluginDenied(*CapturePolicySnapshot(), armaFile->GetFilename())) {
+                SKSE::log::warn("ResolveArma: {:X}:{} selects ARMA from deny-listed plugin '{}' - refused",
+                    a_localID, a_plugin, armaFile->GetFilename());
+                return false;
+            }
             const auto sexName = [](RE::SEX s) { return s == RE::SEXES::kMale ? "male" : "female"; };
 
             RE::SEX sex = a_sex;
@@ -2181,17 +2205,39 @@ namespace CostumeFW
         }
     }
 
+    namespace
+    {
+        // Unchecked primitive (re-review P2-1): resolve + register + inject
+        // with NO admission of its own. Reachable ONLY through the gated
+        // wrappers below - never expose it in a header.
+        bool InjectArmaUnchecked(std::uint32_t a_localID, const std::string& a_plugin,
+            const std::string& a_id)
+        {
+            const RE::SEX sex = EffectiveSex(a_id);
+            ModelRef m3p, m1p;
+            if (!ResolveArmaModels(a_localID, a_plugin, sex, m3p, m1p)) {
+                return false;
+            }
+            SKSE::log::info("InjectArma {:X}:{} 3p='{}' 1p='{}'",
+                a_localID, a_plugin, m3p.nifPath, m1p.nifPath);
+            Register(a_id, m3p, m1p, {}, 0, sex);
+            return InjectInternal(a_id, m3p, m1p);
+        }
+    }
+
     bool InjectArma(std::uint32_t a_localID, const std::string& a_plugin, const std::string& a_id)
     {
-        const RE::SEX sex = EffectiveSex(a_id);
-        ModelRef m3p, m1p;
-        if (!ResolveArmaModels(a_localID, a_plugin, sex, m3p, m1p)) {
+        // v1.3.2 r3 (re-review P2-1): the public injection entrance passes
+        // admission - console `cef inject` and the self-test route through
+        // here. a_id may be a bare label ("test"), so the admission id is
+        // synthesized from the actual local/plugin pair being injected.
+        const std::string cid = policy::FormatColonId(a_localID, a_plugin);
+        std::string why;
+        if (!IsContentAdmissible(cid, &why)) {
+            SKSE::log::warn("register: inject '{}' not admitted - {} (not registered)", cid, why);
             return false;
         }
-        SKSE::log::info("InjectArma {:X}:{} 3p='{}' 1p='{}'",
-            a_localID, a_plugin, m3p.nifPath, m1p.nifPath);
-        Register(a_id, m3p, m1p, {}, 0, sex);
-        return InjectInternal(a_id, m3p, m1p);
+        return InjectArmaUnchecked(a_localID, a_plugin, a_id);
     }
 
     bool RegisterArmaById(const std::string& a_id)
@@ -2255,7 +2301,10 @@ namespace CostumeFW
         } catch (...) {
             return false;
         }
-        return InjectArma(localID, a_id.substr(colon + 1), a_id);
+        // Already admitted above on the full id - go straight to the
+        // unchecked primitive (the public InjectArma would re-admit on a
+        // synthesized id; harmless but redundant).
+        return InjectArmaUnchecked(localID, a_id.substr(colon + 1), a_id);
     }
 
     std::vector<ActiveItemInfo> ActiveSnapshot()
