@@ -1200,19 +1200,11 @@ namespace CostumeFW
 
         // Parse a colon-form id "XXXXXX:Plugin.esp" into local FormID + plugin.
         // False if it isn't a colon-form (e.g. the raw-NIF "test" id).
+        // Delegates to the pure policy module (r2: single source of truth,
+        // host-tested in tests/policy_tests.cpp).
         bool ParseColonId(const std::string& a_id, std::uint32_t& a_localID, std::string& a_plugin)
         {
-            const auto colon = a_id.find(':');
-            if (colon == std::string::npos) {
-                return false;
-            }
-            try {
-                a_localID = static_cast<std::uint32_t>(std::stoul(a_id.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return false;
-            }
-            a_plugin = a_id.substr(colon + 1);
-            return true;
+            return policy::ParseColonId(a_id, a_localID, a_plugin);
         }
 
         // Resolve an ARMA (or ARMO -> its race-matched ARMA) to the 3P + 1P models
@@ -1507,22 +1499,9 @@ namespace CostumeFW
 
     bool CanonicalizeColonId(std::string& a_id)
     {
-        std::uint32_t localID = 0;
-        std::string plugin;
-        if (!ParseColonId(a_id, localID, plugin)) {
-            return false;  // unparseable - leave it for the resolver to reject
-        }
-        // buf sized for 8-digit runtime (0xFF) local ids - %06X is a minimum
-        // width, and the old char[8] truncated those (v1.3.2, parity with
-        // MakeColonId). Normal 6-digit ids are byte-identical before/after.
-        char buf[16]{};
-        std::snprintf(buf, sizeof(buf), "%06X", localID);
-        std::string canon = std::string(buf) + ":" + plugin;
-        if (canon == a_id) {
-            return false;
-        }
-        a_id = std::move(canon);
-        return true;
+        // Delegates to the pure policy module (r2: single source of truth for
+        // parse/format, incl. the never-truncate formatter - host-tested).
+        return policy::CanonicalizeColonIdStr(a_id);
     }
 
     bool CanResolveContent(const std::string& a_contentId)
@@ -1583,6 +1562,19 @@ namespace CostumeFW
         std::string tid = a_tokenId;
         if (!tid.empty()) {
             CanonicalizeColonId(tid);
+        }
+        // v1.3.2 r2 hard admission (review P1-3): every registration path
+        // funnels through here / RegisterArmaById / InjectArmaById - settings
+        // load, co-save restore, natives, console, persist re-enable. The
+        // upstream capture gates are UX; this is the enforcement line. On
+        // refusal the configured id is KEPT (quarantine-lite): it stays in
+        // settings/co-save, is simply never registered, one log line.
+        std::string why;
+        if (!IsContentAdmissible(cid, &why)) {
+            SKSE::log::warn(
+                "register: box content '{}' not admitted - {} (config kept, not registered)",
+                cid, why);
+            return false;
         }
         std::uint32_t localID = 0;
         std::string plugin;
@@ -2210,6 +2202,17 @@ namespace CostumeFW
         // under the same registry key the (canonical) catalog uses.
         std::string cid = a_id;
         CanonicalizeColonId(cid);
+        // v1.3.2 r2 hard admission (review P1-3) - see RegisterBoxById. A
+        // refusal here lands in the caller's fail-soft path (co-save restore
+        // preserves the id as unresolved - ROOT H), which is exactly the
+        // quarantine contract: kept, not registered.
+        std::string why;
+        if (!IsContentAdmissible(cid, &why)) {
+            SKSE::log::warn(
+                "register: persist content '{}' not admitted - {} (config kept, not registered)",
+                cid, why);
+            return false;
+        }
         std::uint32_t localID = 0;
         std::string plugin;
         if (!ParseColonId(cid, localID, plugin)) {
@@ -2231,6 +2234,17 @@ namespace CostumeFW
     {
         // Parse the colon-form id "XXXXXX:Plugin.esp", resolve + register + inject
         // as a persist item (no box token). The Papyrus RegisterPersist() path.
+        // v1.3.2 r2 hard admission (review P1-3) - see RegisterBoxById.
+        {
+            std::string cid = a_id;
+            CanonicalizeColonId(cid);
+            std::string why;
+            if (!IsContentAdmissible(cid, &why)) {
+                SKSE::log::warn(
+                    "register: inject '{}' not admitted - {} (not registered)", cid, why);
+                return false;
+            }
+        }
         const auto colon = a_id.find(':');
         if (colon == std::string::npos) {
             return false;

@@ -108,26 +108,25 @@ namespace CostumeFW
         // slots (real body already shows) it would double. GLOBAL config, content-keyed.
         std::unordered_set<std::string> g_showRealBody;
 
-        // --- Capture blacklist switches (v1.3.2, MARA_COMPAT_PLAN.md §3 L1) ---
-        // Which structural skips the capture surface applies. Defaults ON
-        // (= skip). The switches exist for power users / crash-repro sessions;
-        // both are persisted in CEF_settings.json under "captureBlacklist".
-        // Read on UI threads under the same read-only-snapshot contract as
-        // every other store read; mutated on the main thread via AddTask.
-        struct CaptureBlacklistCfg
+        // --- Capture blacklist policy (v1.3.2, MARA_COMPAT_PLAN.md §3; r2) ----
+        // Published as an IMMUTABLE snapshot (review P1-5): readers (render/VM
+        // thread pickers, gates) load one shared_ptr per operation; mutators
+        // (main thread via AddTask) copy the current policy, modify the copy,
+        // and publish it atomically. No vector is mutated in place while
+        // another thread may be reading it. Function-local static dodges SIOF.
+        std::atomic<std::shared_ptr<const policy::CapturePolicy>>& PolicySlot()
         {
-            // L2 user extension (Phase 2). Shipped defaults live in code next
-            // to the matcher (kDefaultBlockNames/kDefaultBlockPlugins).
-            std::vector<std::string> names;    // exact, or trailing '*' = prefix
-            std::vector<std::string> plugins;  // filename prefix, case-insensitive
-            std::vector<std::string> ids;      // colon-ids
-            bool allowNonPlayable{ false };  // true = show non-playable armors
-            bool allowDynamic{ false };      // true = show runtime (FF) forms - the
-                                             // reported MARA CTD is reproducible
-                                             // with this on; repro use only
-            bool disableDefaults{ false };   // true = shipped deny-list off
-        };
-        CaptureBlacklistCfg g_captureBlacklist;
+            static std::atomic<std::shared_ptr<const policy::CapturePolicy>> slot{
+                std::make_shared<const policy::CapturePolicy>()
+            };
+            return slot;
+        }
+
+        void PublishPolicy(policy::CapturePolicy a_next)
+        {
+            PolicySlot().store(
+                std::make_shared<const policy::CapturePolicy>(std::move(a_next)));
+        }
 
         // Captured worn enchantment per content: content colon-id -> effect list
         // (MGEF colon-id + magnitude). Snapshots the EFFECTIVE enchantment at
@@ -271,15 +270,19 @@ namespace CostumeFW
             doc["showRealBody"] = std::move(realBodies);
 
             // Capture blacklist: switches + the user's own deny-list extension.
-            // Structural skips and the shipped defaults live in code.
-            auto blacklist = nlohmann::json::object();
-            blacklist["names"] = g_captureBlacklist.names;
-            blacklist["plugins"] = g_captureBlacklist.plugins;
-            blacklist["ids"] = g_captureBlacklist.ids;
-            blacklist["allowNonPlayable"] = g_captureBlacklist.allowNonPlayable;
-            blacklist["allowDynamic"] = g_captureBlacklist.allowDynamic;
-            blacklist["disableDefaults"] = g_captureBlacklist.disableDefaults;
-            doc["captureBlacklist"] = std::move(blacklist);
+            // Structural (hard) skips and the shipped defaults live in code.
+            // No "allowDynamic" is written (or read back): the dynamic-form
+            // skip is a hard invariant (review P1-4).
+            {
+                const auto pol = CapturePolicySnapshot();
+                auto blacklist = nlohmann::json::object();
+                blacklist["names"] = pol->names;
+                blacklist["plugins"] = pol->plugins;
+                blacklist["ids"] = pol->ids;
+                blacklist["allowNonPlayable"] = pol->allowNonPlayable;
+                blacklist["disableDefaults"] = pol->disableDefaults;
+                doc["captureBlacklist"] = std::move(blacklist);
+            }
 
             auto enchants = nlohmann::json::object();
             for (const auto& [id, effs] : g_contentEnchants) {
@@ -323,15 +326,21 @@ namespace CostumeFW
         // plugin-local FormID (ESL-masked) + defining plugin filename.
         std::string MakeColonId(RE::TESForm* a_form)
         {
-            // %06X is a MINIMUM width: a runtime (0xFF) form's local id prints 8
-            // digits, and the old char[8] buffer silently truncated it to a
-            // corrupt "FF00080:"-style id. Runtime forms are refused by the
-            // capture gate (v1.3.2 L1), but the id itself must stay faithful.
-            char buf[16]{};
-            std::snprintf(buf, sizeof(buf), "%06X", a_form->GetLocalFormID());
-            auto* file = a_form->GetFile(0);
-            const std::string plugin = file ? std::string(file->GetFilename()) : std::string{};
-            return std::string(buf) + ":" + plugin;
+            // No-file safety (review P1-4): TESForm::GetLocalFormID()
+            // dereferences GetFile(0) UNCHECKED (TESForm.h:292-300) - calling
+            // it on a runtime/no-file form is the null-deref behind the
+            // original "+ Add worn item" CTD. Such forms get their raw
+            // 8-digit FormID and an empty plugin: same textual shape as
+            // before, produced without touching the missing file, and
+            // unresolvable by design (formatter never truncates - the old
+            // char[8] bug).
+            if (!a_form) {
+                return policy::FormatColonId(0, {});
+            }
+            const auto* file = a_form->GetFile(0);
+            const std::uint32_t local = file ? a_form->GetLocalFormID() : a_form->GetFormID();
+            return policy::FormatColonId(local,
+                file ? std::string_view(file->GetFilename()) : std::string_view{});
         }
 
         // v1.2.1 plugin consolidation: CostumeFW_Boxes.esp and
@@ -1051,7 +1060,7 @@ namespace CostumeFW
         g_showRealBody.clear();
         g_contentEnchants.clear();
         g_persistPreset.clear();
-        g_captureBlacklist = {};
+        PublishPolicy({});
         g_cefEnabled = true;
 
         // Read CEF_settings.json; fall back to the legacy costume_boxes.json once
@@ -1239,29 +1248,32 @@ namespace CostumeFW
         }
         {
             // Capture blacklist (v1.3.2): absent field (any pre-1.3.2 json) =
-            // structural skips active, shipped defaults active, no user
-            // entries - the safe default.
+            // hard skips active, shipped defaults active, no user entries -
+            // the safe default. A legacy "allowDynamic" key is deliberately
+            // IGNORED (hard invariant since review r2, P1-4). Built into a
+            // fresh policy and atomically published (review P1-5).
             const auto blacklist = doc.value("captureBlacklist", nlohmann::json::object());
+            policy::CapturePolicy pol;
             for (const auto& entry : blacklist.value("names", nlohmann::json::array())) {
                 if (entry.is_string() && !entry.get<std::string>().empty()) {
-                    g_captureBlacklist.names.push_back(entry.get<std::string>());
+                    pol.names.push_back(entry.get<std::string>());
                 }
             }
             for (const auto& entry : blacklist.value("plugins", nlohmann::json::array())) {
                 if (entry.is_string() && !entry.get<std::string>().empty()) {
-                    g_captureBlacklist.plugins.push_back(entry.get<std::string>());
+                    pol.plugins.push_back(entry.get<std::string>());
                 }
             }
             for (const auto& entry : blacklist.value("ids", nlohmann::json::array())) {
                 if (entry.is_string() && !entry.get<std::string>().empty()) {
                     auto id = entry.get<std::string>();
                     healed |= CanonicalizeColonId(id);  // ROOT D parity
-                    g_captureBlacklist.ids.push_back(std::move(id));
+                    pol.ids.push_back(std::move(id));
                 }
             }
-            g_captureBlacklist.allowNonPlayable = blacklist.value("allowNonPlayable", false);
-            g_captureBlacklist.allowDynamic = blacklist.value("allowDynamic", false);
-            g_captureBlacklist.disableDefaults = blacklist.value("disableDefaults", false);
+            pol.allowNonPlayable = blacklist.value("allowNonPlayable", false);
+            pol.disableDefaults = blacklist.value("disableDefaults", false);
+            PublishPolicy(std::move(pol));
         }
         const auto hideShapes = doc.value("hideShapes", nlohmann::json::object());
         for (auto it = hideShapes.begin(); it != hideShapes.end(); ++it) {
@@ -1307,7 +1319,7 @@ namespace CostumeFW
             g_bodyMorphOn.clear();
             g_contentEnchants.clear();
             g_persistPreset.clear();
-            g_captureBlacklist = {};
+            PublishPolicy({});
             g_cefEnabled = true;
             return;
         }
@@ -1934,132 +1946,77 @@ namespace CostumeFW
 
     namespace
     {
-        // Shipped L2 deny-list. MARA (Nexus 173949) has no plugin file - its
-        // "CORE Carrier" host armor is a runtime form, so the NAME entry is
-        // the effective one (L1 already skips it as a dynamic form; the name
-        // is the belt to L1's suspenders, and stays correct even if a future
-        // MARA persists the carrier differently). The plugin prefix covers a
-        // hypothetical future MARA.esp. Evidence: CEF Nexus report 2026-07-22,
-        // MARA bug #1059563 (both: third-party UI touches the carrier -> CTD).
-        constexpr std::string_view kDefaultBlockNames[] = { "CORE Carrier" };
-        constexpr std::string_view kDefaultBlockPlugins[] = { "MARA" };
         // L3 opt-out keyword: any ARMO carrying it is barred from capture.
         // Other mod authors (or users, via the shipped CostumeFW_NoCapture_KID.ini
         // template) tag their utility armors with it - KID auto-creates the
         // keyword, so no ESP dependency in either direction. Static forms only;
-        // runtime forms can't receive KID keywords (L1 blocks those anyway).
+        // runtime forms can't receive KID keywords (the hard layer blocks those).
+        // Deny-list defaults + string matchers live in src/CapturePolicy.*.
         constexpr const char* kNoCaptureKeyword = "CEF_NoCapture";
-
-        bool EqualsCI(std::string_view a_lhs, std::string_view a_rhs)
-        {
-            return a_lhs.size() == a_rhs.size() &&
-                   ::_strnicmp(a_lhs.data(), a_rhs.data(), a_lhs.size()) == 0;
-        }
-
-        bool PrefixCI(std::string_view a_str, std::string_view a_prefix)
-        {
-            return a_str.size() >= a_prefix.size() && !a_prefix.empty() &&
-                   ::_strnicmp(a_str.data(), a_prefix.data(), a_prefix.size()) == 0;
-        }
-
-        // Name pattern: exact (CI), or trailing '*' = prefix match.
-        bool NameMatches(std::string_view a_name, std::string_view a_pattern)
-        {
-            if (!a_pattern.empty() && a_pattern.back() == '*') {
-                return PrefixCI(a_name, a_pattern.substr(0, a_pattern.size() - 1));
-            }
-            return EqualsCI(a_name, a_pattern);
-        }
-
-        bool PluginDenied(std::string_view a_filename)
-        {
-            if (!g_captureBlacklist.disableDefaults) {
-                for (const auto pat : kDefaultBlockPlugins) {
-                    if (PrefixCI(a_filename, pat)) {
-                        return true;
-                    }
-                }
-            }
-            for (const auto& pat : g_captureBlacklist.plugins) {
-                if (PrefixCI(a_filename, pat)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        bool NameDenied(std::string_view a_name)
-        {
-            if (a_name.empty()) {
-                return false;
-            }
-            if (!g_captureBlacklist.disableDefaults) {
-                for (const auto pat : kDefaultBlockNames) {
-                    if (NameMatches(a_name, pat)) {
-                        return true;
-                    }
-                }
-            }
-            for (const auto& pat : g_captureBlacklist.names) {
-                if (NameMatches(a_name, pat)) {
-                    return true;
-                }
-            }
-            return false;
-        }
     }
 
-    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo)
+    std::shared_ptr<const policy::CapturePolicy> CapturePolicySnapshot()
+    {
+        return PolicySlot().load();
+    }
+
+    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo,
+        const policy::CapturePolicy& a_policy)
     {
         if (!a_armo) {
             return CaptureBlock::kDynamicForm;  // treat as never-capturable
         }
-        // L1a, and FIRST for a reason: a runtime form is the one class whose
-        // deeper data (name, keywords, inventory entry) must never be read -
-        // MARA-class mods keep half-built runtime armors in the inventory that
-        // crash third-party UIs on touch (MARA bug #1059563 hover-CTD; CEF
-        // Nexus report 2026-07-22). GetFile(0) reads only the form's
-        // source-file array. Capturing one could never work anyway: the
-        // colon-id (local id + defining plugin) has no plugin to name, so the
-        // content would be unrestorable on the next load.
-        const auto* file = a_armo->GetFile(0);
-        if (!file && !g_captureBlacklist.allowDynamic) {
+        // HARD layer, FIRST, and formID-only (review P1-4): IsDynamicForm()
+        // reads nothing but the formID, so even a half-built foreign form is
+        // safe to classify. A runtime form's deeper data (source files, name,
+        // keywords, inventory entry) must never be read - MARA-class mods keep
+        // half-built runtime armors in the inventory that crash third-party
+        // UIs on touch (MARA bug #1059563 hover-CTD; CEF Nexus report
+        // 2026-07-22), and GetLocalFormID() would null-deref on GetFile(0).
+        // Not user-liftable: capture could never work anyway (a colon-id with
+        // no plugin is unrestorable on the next load).
+        if (a_armo->IsDynamicForm()) {
             return CaptureBlock::kDynamicForm;
         }
+        // HARD: a static-range form with no defining file is equally
+        // unrestorable and equally unsafe for GetLocalFormID().
+        const auto* file = a_armo->GetFile(0);
+        if (!file) {
+            return CaptureBlock::kNoDefiningFile;
+        }
         // L2a: source-plugin deny-list (defaults + user). Filename read only.
-        if (file && PluginDenied(file->GetFilename())) {
+        if (policy::PluginDenied(a_policy, file->GetFilename())) {
             return CaptureBlock::kPlugin;
         }
-        // L1b: non-playable armors are engine/framework internals (skins,
+        // L1 soft: non-playable armors are engine/framework internals (skins,
         // tokens, hosts); the vanilla inventory UI hides them, so a raw
         // GetInventory picker must hide them too. Record-flag read only.
         if ((a_armo->formFlags & RE::TESObjectARMO::RecordFlags::kNonPlayable) != 0 &&
-            !g_captureBlacklist.allowNonPlayable) {
+            !a_policy.allowNonPlayable) {
             return CaptureBlock::kNonPlayable;
         }
         // L3: CEF_NoCapture opt-out keyword (static keyword-array read).
         if (a_armo->HasKeywordString(kNoCaptureKeyword)) {
             return CaptureBlock::kKeyword;
         }
-        // L2b: name deny-list (defaults + user). The name read sits BELOW the
-        // dynamic-form skip on purpose: with allowDynamic off (the default) a
-        // runtime form never reaches it, and with allowDynamic on the user
-        // has explicitly accepted touching runtime forms (repro mode) - the
-        // name is then read here exactly once, same as the picker row would.
-        if (NameDenied(a_armo->GetFullName() ? a_armo->GetFullName() : "")) {
+        // L2b: name deny-list (defaults + user). Only file-backed forms reach
+        // this read (the hard layer returned above for everything else).
+        if (policy::NameDenied(a_policy, a_armo->GetFullName() ? a_armo->GetFullName() : "")) {
             return CaptureBlock::kName;
         }
         // L2c: explicit colon-id deny-list (user; rare - names/plugins cover
-        // the common cases). Built from the form only when the list is used.
-        if (!g_captureBlacklist.ids.empty()) {
-            const std::string id = MakeColonId(a_armo);
-            for (const auto& entry : g_captureBlacklist.ids) {
-                if (EqualsCI(id, entry)) {
-                    return CaptureBlock::kId;
-                }
-            }
+        // the common cases). Built from the form only when the list is used;
+        // MakeColonId is no-file-safe since r2 anyway.
+        if (!a_policy.ids.empty() && policy::IdDenied(a_policy, MakeColonId(a_armo))) {
+            return CaptureBlock::kId;
         }
         return CaptureBlock::kNone;
+    }
+
+    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo)
+    {
+        const auto pol = CapturePolicySnapshot();
+        return CaptureBlockReason(a_armo, *pol);
     }
 
     bool IsCaptureBlocked(RE::TESObjectARMO* a_armo)
@@ -2073,6 +2030,7 @@ namespace CostumeFW
         {
             switch (a_reason) {
             case CaptureBlock::kDynamicForm: return "runtime-created (dynamic) form";
+            case CaptureBlock::kNoDefiningFile: return "form has no defining plugin file";
             case CaptureBlock::kNonPlayable: return "non-playable armor";
             case CaptureBlock::kPlugin: return "plugin on the deny-list";
             case CaptureBlock::kName: return "name on the deny-list";
@@ -2083,22 +2041,62 @@ namespace CostumeFW
         }
     }
 
+    bool IsContentAdmissible(const std::string& a_id, std::string* a_why)
+    {
+        // Layered admission (review P1-3/P2-1), one policy snapshot for the
+        // whole evaluation. Deliberately WITHOUT the resolvability check so
+        // the registration boundary can use it on ids whose resolve failure
+        // is already fail-soft (ROOT H unresolved-actives).
+        const auto pol = CapturePolicySnapshot();
+        const auto refuse = [&](CaptureBlock a_reason) {
+            SKSE::log::warn("capture: '{}' blocked - {}", a_id, BlockReasonText(a_reason));
+            if (a_why) {
+                *a_why = std::string("blocked: ") + BlockReasonText(a_reason) +
+                         " (capture blacklist)";
+            }
+            return false;
+        };
+        // Layer 1: textual id deny - works even when nothing resolves.
+        std::string canon = a_id;
+        CanonicalizeColonId(canon);
+        if (policy::IdDenied(*pol, canon)) {
+            return refuse(CaptureBlock::kId);
+        }
+        // Layer 2: the GENERIC form, if it resolves. This covers direct ARMA
+        // content ids too (review P2-1): hard dynamic/no-file checks and the
+        // plugin deny-list apply to any form kind; the ARMO-specific reasons
+        // (non-playable / name / keyword) apply when it is an ARMO.
+        if (const std::uint32_t fid = ResolveFormId(canon); fid != 0) {
+            if (auto* form = RE::TESForm::LookupByID(fid)) {
+                if (form->IsDynamicForm()) {
+                    return refuse(CaptureBlock::kDynamicForm);
+                }
+                const auto* file = form->GetFile(0);
+                if (!file) {
+                    return refuse(CaptureBlock::kNoDefiningFile);
+                }
+                if (policy::PluginDenied(*pol, file->GetFilename())) {
+                    return refuse(CaptureBlock::kPlugin);
+                }
+                if (auto* armo = form->As<RE::TESObjectARMO>()) {
+                    if (const auto reason = CaptureBlockReason(armo, *pol);
+                        reason != CaptureBlock::kNone) {
+                        return refuse(reason);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     bool CanCaptureContent(const std::string& a_id, std::string* a_why)
     {
-        // Blacklist first (the SEMANTIC layer), resolvability second. An id
-        // that does not resolve to a live ARMO skips the blacklist layer and
-        // falls through to CanResolveContent, which refuses it with the
+        // Admission first (the SEMANTIC layer), resolvability second. An id
+        // that does not resolve at all passes admission (nothing to inspect)
+        // and falls through to CanResolveContent, which refuses it with the
         // classic message - same end state as pre-1.3.2.
-        if (auto* armo = ResolveArmo(a_id)) {
-            const auto reason = CaptureBlockReason(armo);
-            if (reason != CaptureBlock::kNone) {
-                SKSE::log::warn("capture: '{}' blocked - {}", a_id, BlockReasonText(reason));
-                if (a_why) {
-                    *a_why = std::string("blocked: ") + BlockReasonText(reason) +
-                             " (capture blacklist)";
-                }
-                return false;
-            }
+        if (!IsContentAdmissible(a_id, a_why)) {
+            return false;
         }
         if (!CanResolveContent(a_id)) {
             if (a_why) {
@@ -2111,19 +2109,21 @@ namespace CostumeFW
 
     bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on)
     {
+        // Copy-and-publish (review P1-5): never mutate the published policy.
+        // Note: no "allowDynamic" - the dynamic-form skip is a hard invariant.
+        auto next = *CapturePolicySnapshot();
         bool* target = nullptr;
         if (a_flag == "allowNonPlayable") {
-            target = &g_captureBlacklist.allowNonPlayable;
-        } else if (a_flag == "allowDynamic") {
-            target = &g_captureBlacklist.allowDynamic;
+            target = &next.allowNonPlayable;
         } else if (a_flag == "disableDefaults") {
-            target = &g_captureBlacklist.disableDefaults;
+            target = &next.disableDefaults;
         }
         if (!target) {
             return false;
         }
         if (*target != a_on) {
             *target = a_on;
+            PublishPolicy(std::move(next));
             WriteJson();
             SKSE::log::info("capture: blacklist switch {} = {}", a_flag, a_on);
         }
@@ -2132,30 +2132,29 @@ namespace CostumeFW
 
     bool GetCaptureBlacklistFlag(const std::string& a_flag)
     {
+        const auto pol = CapturePolicySnapshot();
         if (a_flag == "allowNonPlayable") {
-            return g_captureBlacklist.allowNonPlayable;
-        }
-        if (a_flag == "allowDynamic") {
-            return g_captureBlacklist.allowDynamic;
+            return pol->allowNonPlayable;
         }
         if (a_flag == "disableDefaults") {
-            return g_captureBlacklist.disableDefaults;
+            return pol->disableDefaults;
         }
         return false;
     }
 
     namespace
     {
-        std::vector<std::string>* BlacklistBucket(const std::string& a_kind)
+        std::vector<std::string>* BlacklistBucket(policy::CapturePolicy& a_policy,
+            const std::string& a_kind)
         {
             if (a_kind == "name") {
-                return &g_captureBlacklist.names;
+                return &a_policy.names;
             }
             if (a_kind == "plugin") {
-                return &g_captureBlacklist.plugins;
+                return &a_policy.plugins;
             }
             if (a_kind == "id") {
-                return &g_captureBlacklist.ids;
+                return &a_policy.ids;
             }
             return nullptr;
         }
@@ -2171,25 +2170,23 @@ namespace CostumeFW
 
     CaptureBlacklistView GetCaptureBlacklist()
     {
+        const auto pol = CapturePolicySnapshot();
         CaptureBlacklistView view;
-        for (const auto name : kDefaultBlockNames) {
-            view.defaultNames.emplace_back(name);
-        }
-        for (const auto plugin : kDefaultBlockPlugins) {
-            view.defaultPlugins.emplace_back(plugin);
-        }
-        view.names = g_captureBlacklist.names;
-        view.plugins = g_captureBlacklist.plugins;
-        view.ids = g_captureBlacklist.ids;
-        view.allowNonPlayable = g_captureBlacklist.allowNonPlayable;
-        view.allowDynamic = g_captureBlacklist.allowDynamic;
-        view.disableDefaults = g_captureBlacklist.disableDefaults;
+        view.defaultNames = policy::DefaultBlockNames();
+        view.defaultPlugins = policy::DefaultBlockPlugins();
+        view.names = pol->names;
+        view.plugins = pol->plugins;
+        view.ids = pol->ids;
+        view.allowNonPlayable = pol->allowNonPlayable;
+        view.disableDefaults = pol->disableDefaults;
         return view;
     }
 
     bool AddCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value)
     {
-        auto* bucket = BlacklistBucket(a_kind);
+        // Copy-and-publish (review P1-5).
+        auto next = *CapturePolicySnapshot();
+        auto* bucket = BlacklistBucket(next, a_kind);
         std::string value = TrimCopy(a_value);
         if (!bucket || value.empty()) {
             return false;
@@ -2198,11 +2195,12 @@ namespace CostumeFW
             CanonicalizeColonId(value);
         }
         for (const auto& existing : *bucket) {
-            if (EqualsCI(existing, value)) {
+            if (policy::EqualsCI(existing, value)) {
                 return false;  // duplicate
             }
         }
         bucket->push_back(value);
+        PublishPolicy(std::move(next));
         WriteJson();
         SKSE::log::info("capture: blacklist {} entry added '{}'", a_kind, value);
         return true;
@@ -2210,16 +2208,19 @@ namespace CostumeFW
 
     bool RemoveCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value)
     {
-        auto* bucket = BlacklistBucket(a_kind);
+        // Copy-and-publish (review P1-5).
+        auto next = *CapturePolicySnapshot();
+        auto* bucket = BlacklistBucket(next, a_kind);
         if (!bucket) {
             return false;
         }
         const auto it = std::find_if(bucket->begin(), bucket->end(),
-            [&](const std::string& a_e) { return EqualsCI(a_e, a_value); });
+            [&](const std::string& a_e) { return policy::EqualsCI(a_e, a_value); });
         if (it == bucket->end()) {
             return false;
         }
         bucket->erase(it);
+        PublishPolicy(std::move(next));
         WriteJson();
         SKSE::log::info("capture: blacklist {} entry removed '{}'", a_kind, a_value);
         return true;
@@ -2232,24 +2233,27 @@ namespace CostumeFW
         if (!player) {
             return out;
         }
-        auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
-            return a_obj.Is(RE::FormType::Armor);
+        // Blocked forms are rejected INSIDE the GetInventory filter (review
+        // P1-1): GetInventory copies each passing entry's InventoryEntryData
+        // (including its extraLists) before returning, so a loop-side skip
+        // would come AFTER the copy - the filter is the last point before a
+        // hostile entry is touched (MARA #1059563; CEF report 2026-07-22).
+        // One policy snapshot covers the whole enumeration (review P1-5).
+        const auto pol = CapturePolicySnapshot();
+        auto inv = player->GetInventory([&pol](RE::TESBoundObject& a_obj) {
+            if (!a_obj.Is(RE::FormType::Armor)) {
+                return false;
+            }
+            auto* armo = a_obj.As<RE::TESObjectARMO>();
+            if (!armo || CaptureBlockReason(armo, *pol) != CaptureBlock::kNone) {
+                return false;
+            }
+            // Exclude our own box tokens (base pool esp + the carrier patch).
+            return !IsTokenPluginFile(armo->GetFile(0));
         });
         for (auto& [obj, data] : inv) {
             auto* armo = obj ? obj->As<RE::TESObjectARMO>() : nullptr;
             if (!armo) {
-                continue;
-            }
-            // Form-level skips FIRST: a blocked (runtime/utility) armor's
-            // inventory ENTRY must never be touched - IsWorn() below walks its
-            // ExtraDataLists, and on MARA-class runtime items that is the
-            // reported instant-CTD surface (MARA #1059563; CEF report
-            // 2026-07-22). MARA_COMPAT_PLAN.md §3.3 order constraint.
-            if (IsCaptureBlocked(armo)) {
-                continue;
-            }
-            // Exclude our own box tokens (base pool esp + the carrier patch).
-            if (IsTokenPluginFile(armo->GetFile(0))) {
                 continue;
             }
             const auto& [count, entry] = data;
@@ -2284,22 +2288,23 @@ namespace CostumeFW
                 });
             return it != a_name.end();
         };
-        auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
-            return a_obj.Is(RE::FormType::Armor);
+        // Same filter-boundary contract as WornArmors (review P1-1): blocked
+        // forms never have their InventoryEntryData copied.
+        const auto pol = CapturePolicySnapshot();
+        auto inv = player->GetInventory([&pol](RE::TESBoundObject& a_obj) {
+            if (!a_obj.Is(RE::FormType::Armor)) {
+                return false;
+            }
+            auto* armo = a_obj.As<RE::TESObjectARMO>();
+            if (!armo || CaptureBlockReason(armo, *pol) != CaptureBlock::kNone) {
+                return false;
+            }
+            // Exclude our own box tokens.
+            return !IsTokenPluginFile(armo->GetFile(0));
         });
         for (auto& [obj, data] : inv) {
             auto* armo = obj ? obj->As<RE::TESObjectARMO>() : nullptr;
             if (!armo) {
-                continue;
-            }
-            // Form-level skips FIRST (same order constraint as WornArmors -
-            // MARA_COMPAT_PLAN.md §3.3): never touch a blocked form's name or
-            // inventory entry.
-            if (IsCaptureBlocked(armo)) {
-                continue;
-            }
-            // Exclude our own box tokens.
-            if (IsTokenPluginFile(armo->GetFile(0))) {
                 continue;
             }
             const auto& [count, entry] = data;
@@ -2809,8 +2814,13 @@ namespace CostumeFW
         // snapshots player enchantments.
         RE::EnchantmentItem* ench = nullptr;
         RE::EnchantmentItem* carried = nullptr;
-        auto inv = player->GetInventory([](RE::TESBoundObject& a_obj) {
-            return a_obj.Is(RE::FormType::Armor);
+        // Target-only filter (review P1-2): the old Armor-wide filter made
+        // GetInventory copy EVERY armor's InventoryEntryData - capturing a
+        // perfectly safe item still copied a foreign runtime item's hostile
+        // entry (the MARA CTD face) as a side effect. Only the captured
+        // form's entry is ever touched now.
+        auto inv = player->GetInventory([baseId](RE::TESBoundObject& a_obj) {
+            return a_obj.GetFormID() == baseId;
         });
         for (auto& [obj, data] : inv) {
             if (!obj || obj->GetFormID() != baseId) {

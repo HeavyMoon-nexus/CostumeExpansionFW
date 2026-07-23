@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "CapturePolicy.h"
 
 namespace RE
 {
@@ -207,38 +210,56 @@ namespace CostumeFW
     void PersistCarrierStatus();  // `cef persist` - print pool registration + entry
     void PersistCarrierRemove();  // `cef persist remove` - deregister pool + rebuild head
 
-    // --- Capture blacklist (v1.3.2, MARA_COMPAT_PLAN.md §3) ------------------
-    // Armors the capture pickers must not OFFER and the capture gate must not
-    // ACCEPT. L1 structural: runtime (dynamic/FF) forms - the colon-id model
-    // (local id + defining plugin) can never restore them across loads, and
-    // MARA-class mods keep half-built runtime forms in the inventory that only
-    // raw enumerators like ours ever touch (MARA bug #1059563 hover-CTD; CEF
-    // Nexus report 2026-07-22) - and non-playable armors, which the vanilla UI
-    // hides and a capture picker must hide too. Both skips can be lifted per
-    // json switch (allowDynamic / allowNonPlayable) for repro/debugging.
+    // --- Capture blacklist (v1.3.2, MARA_COMPAT_PLAN.md §3; review r2) --------
+    // Armors the capture pickers must not OFFER, the capture gate must not
+    // ACCEPT, and the registration boundary must not REGISTER.
+    // HARD layer (not user-liftable): runtime (dynamic/FF) and no-defining-file
+    // forms - TESForm::GetLocalFormID() dereferences GetFile(0) unchecked (the
+    // mechanism behind the original "+ Add worn item" CTD), and the colon-id
+    // model could never restore such a form anyway (review P1-4).
+    // SOFT layers (switchable): non-playable armors (vanilla UI hides them; a
+    // raw picker must too - allowNonPlayable), the shipped/user deny-list
+    // (disableDefaults), and the CEF_NoCapture keyword.
     enum class CaptureBlock  // why an armor is barred from capture
     {
-        kNone = 0,      // not barred
-        kDynamicForm,   // L1: no defining file (runtime-created form)
-        kNonPlayable,   // L1: non-playable record flag
-        kPlugin,        // L2: source-plugin deny-list (defaults or user)
-        kName,          // L2: name deny-list (defaults or user)
-        kId,            // L2: colon-id deny-list (user)
-        kKeyword,       // L3: carries the CEF_NoCapture keyword (KID-distributable)
+        kNone = 0,        // not barred
+        kDynamicForm,     // HARD: runtime form (FormID >= 0xFF000000)
+        kNoDefiningFile,  // HARD: GetFile(0) == nullptr (unrestorable, unsafe reads)
+        kNonPlayable,     // L1 soft: non-playable record flag
+        kPlugin,          // L2: source-plugin deny-list (defaults or user)
+        kName,            // L2: name deny-list (defaults or user)
+        kId,              // L2: colon-id deny-list (user)
+        kKeyword,         // L3: carries the CEF_NoCapture keyword (KID-distributable)
     };
-    // Form-level reads ONLY (defining file, record flags, static name/keywords):
-    // safe to call on an armor whose inventory ENTRY must not be touched. The
-    // enumeration loops call this BEFORE reading the entry (IsWorn/extra lists).
-    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo);
+
+    // Immutable policy snapshot (review P1-5): readers take ONE snapshot per
+    // operation (a whole picker enumeration, one gate evaluation) and never
+    // see a mutating vector; mutators copy-and-publish on the main thread.
+    std::shared_ptr<const policy::CapturePolicy> CapturePolicySnapshot();
+
+    // Form-level reads ONLY (formID, defining file, record flags, static
+    // name/keywords): safe to call on an armor whose inventory ENTRY must not
+    // be touched. Called from the GetInventory FILTER (review P1-1) so a
+    // blocked form's InventoryEntryData is never even copied.
+    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo,
+        const policy::CapturePolicy& a_policy);
+    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo);  // snapshots internally
     bool IsCaptureBlocked(RE::TESObjectARMO* a_armo);
-    // The semantic capture gate: blacklist first, then mesh resolvability
-    // (CanResolveContent). Every capture entrance funnels here - the MCM (via
-    // the CanResolveContent native), SMF QueueCapture*, preset Validate, and
-    // the AddBox/AddPersistContent store fronts. a_why (optional) receives a
-    // short user-facing reason on refusal.
+
+    // Admission WITHOUT resolvability (review P1-3/P2-1): textual id deny ->
+    // generic-form hard checks (dynamic / no file / plugin deny; works for
+    // ARMA ids too) -> full ARMO reason. Used by the registration boundary
+    // (RegisterBoxById / RegisterArmaById / InjectArmaById), where a refusal
+    // KEEPS the configured id (quarantine-lite: not registered, one log line).
+    bool IsContentAdmissible(const std::string& a_id, std::string* a_why = nullptr);
+    // The semantic capture gate: IsContentAdmissible + mesh resolvability
+    // (CanResolveContent). Every capture entrance funnels here - MCM (via the
+    // CanResolveContent native), SMF QueueCapture*, preset Validate, and the
+    // AddBox/AddPersistContent store fronts.
     bool CanCaptureContent(const std::string& a_id, std::string* a_why = nullptr);
-    // Switches ("allowNonPlayable" / "allowDynamic" / "disableDefaults"):
-    // def + json. Returns false for an unknown flag name.
+    // Switches ("allowNonPlayable" / "disableDefaults"): def + json. Returns
+    // false for an unknown flag name. There is deliberately no "allowDynamic"
+    // (hard invariant - review P1-4).
     bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on);
     bool GetCaptureBlacklistFlag(const std::string& a_flag);
 
@@ -256,7 +277,6 @@ namespace CostumeFW
         std::vector<std::string> plugins;  // user entries
         std::vector<std::string> ids;      // user entries
         bool allowNonPlayable{ false };
-        bool allowDynamic{ false };
         bool disableDefaults{ false };
     };
     CaptureBlacklistView GetCaptureBlacklist();

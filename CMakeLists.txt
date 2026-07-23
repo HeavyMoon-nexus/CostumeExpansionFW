@@ -42,6 +42,17 @@ if(CEF_BUILD_NIFCARRIER_CLI)
     target_link_libraries(nifcarrier_cli PRIVATE nifcarrier_core)
 endif()
 
+# Host-side unit tests for the PURE capture-policy layers (string matchers,
+# colon-id parse/format) - no CommonLib/RE dependency, so they run on the
+# build host (v1.3.2 review r2, test matrix "policy" rows). A DEV tool,
+# never packaged. Run: build\release\policy_tests.exe (exit 0 = green).
+option(CEF_BUILD_POLICY_TESTS "Build the policy_tests.exe host-side unit tests" ON)
+if(CEF_BUILD_POLICY_TESTS)
+    add_executable(policy_tests tests/policy_tests.cpp src/CapturePolicy.cpp)
+    target_include_directories(policy_tests PRIVATE src)
+    target_compile_features(policy_tests PRIVATE cxx_std_23)
+endif()
+
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     plugin.cpp
     src/SkinRebind.cpp
@@ -49,6 +60,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/Cosave.cpp
     src/Papyrus.cpp
     src/BoxStore.cpp
+    src/CapturePolicy.cpp
     src/BodyMorph.cpp
     src/Preset.cpp
     src/LoreBox.cpp

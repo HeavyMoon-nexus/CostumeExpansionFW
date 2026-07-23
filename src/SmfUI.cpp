@@ -796,17 +796,10 @@ namespace CostumeFW::SmfUI
                 SKSE::GetTaskInterface()->AddTask(
                     [allowNp] { SetCaptureBlacklistFlag("allowNonPlayable", allowNp); });
             }
-            bool allowDyn = view.allowDynamic;
-            if (ImGui::Checkbox("Show runtime (dynamic) forms##blkDyn", &allowDyn)) {
-                SKSE::GetTaskInterface()->AddTask(
-                    [allowDyn] { SetCaptureBlacklistFlag("allowDynamic", allowDyn); });
-            }
-            if (allowDyn) {
-                ImGui::TextWrapped(
-                    "WARNING: touching another mod's runtime item can crash instantly "
-                    "(the MARA 'CORE Carrier' report). Leave OFF unless reproducing a "
-                    "crash for a log.");
-            }
+            // No "show runtime forms" switch (review r2, P1-4): the dynamic /
+            // no-file skip is a hard invariant - reading such a form's data
+            // (GetLocalFormID null-derefs) is the original CTD, and capture
+            // could never restore it across a load anyway.
             bool noDefaults = view.disableDefaults;
             if (ImGui::Checkbox("Disable shipped default entries##blkDef", &noDefaults)) {
                 SKSE::GetTaskInterface()->AddTask(
