@@ -491,4 +491,3 @@ P2はadvanced/raw入口だが、中央admissionを安全性境界として明文
 6. `CaptureEnchant()` 自身へadmissionを追加
 7. policy testsをCTest登録
 8. MARA実機とruntime ARMA fixtureでsmoke
-

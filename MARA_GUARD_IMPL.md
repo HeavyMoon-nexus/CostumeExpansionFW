@@ -22,7 +22,7 @@
 
 | Finding | 対応(cac79ca) |
 |---|---|
-| **P1-1 最終選択 ARMA 未検査** | `ResolveArmaModels` が **ARMA 確定直後・bipedModels 読取り前**に hard+plugin 層(`IsDynamicForm`/defining-file/`PluginDenied`)を選択 ARMA 自体へ適用。**判定と使用が同一関数・同一ポインタ**なので check/use ギャップ無し(レビュー提案の AdmissionResult 持ち回りより強い一点化)。ケース A(許可 ARMO→deny plugin の ARMA)/ケース B(runtime ARMA 差し替え)とも遮断。resolver の全呼び出し元(picker gate・登録境界・注入・shape 列挙)に自動継承。carrier manifest 側は独自 resolve だが AdmittedContents フィルタ(下記)が同じ結論を先に適用する |
+| **P1-1 最終選択 ARMA 未検査** | `ResolveArmaModels` が **ARMA 確定直後・bipedModels 読取り前**に hard+plugin 層(`IsDynamicForm`/defining-file/`PluginDenied`)を選択 ARMA 自体へ適用。~~判定と使用が同一関数・同一ポインタなので check/use ギャップ無し~~ ~~carrier manifest 側は独自 resolve だが AdmittedContents フィルタが同じ結論を先に適用する~~ **(R3 で 2 主張とも誤りと確定・撤回)**: ①`PickAddonForPlayer` が guard **前**に候補 ARMA の race/additionalRaces を読む ②manifest の独自 resolver は選択 ARMA 無検査+`AdmittedContents` は base-form しか見ない。→ **r4 修正対象**([MARA_GUARD_R4_HANDOFF.md](MARA_GUARD_R4_HANDOFF.md) §1-A) |
 | **P1-2 quarantine が登録抑止どまり** | ① `IsContentAdmissible` に quiet モード(`a_log=false`)を追加し、`AdmittedContents()` スナップショットフィルタを**全派生読者**へ: `SetTokenStats`・`ApplyKeywordsToToken`・`BuildEnchantSpell`(box/persist アビリティの単一チョーク)・`WriteCarrierManifest`(boxes+persist actives)・`BoxStatsSummary`(SMF 表示)。② policy 変更(entry 追加/削除・スイッチ)後に `ReevaluateContentAdmissions()` = `ReloadSettingsFromDisk`(実戦済みプリミティブ: 全 active detach → gated 再登録 → persist active 復元 → Reconcile → アビリティ/manifest 再構築)。**blocked-active は即 detach、解除時は自動再 admit、設定と co-save は常に保持**。ログは gate のみ loud・派生フィルタは無音(per-frame スパム無し) |
 | **P2-1 公開 `InjectArma` 迂回** | 匿名 ns の `InjectArmaUnchecked` プリミティブ + gated 公開ラッパへ分離。`cef inject`/self-test は **実際に注入する local/plugin から合成した colon-id** で admission(bare label "test" では素通りしない)。`InjectArmaById` は一度 admit して直接プリミティブ呼び(二重ログ回避) |
 | **P2-2 公開 `CaptureEnchant` native 未ゲート** | 関数境界に `IsContentAdmissible`(上位の pre-gate は UX、関数自身が強制 — 二重化) |
@@ -40,8 +40,12 @@
 
 再検証(r3): `/W4` ビルド緑・`ctest` 1/1(43 checks)・再パッケージ差分 =
 1.3.1 + `CostumeFW_NoCapture_KID.ini` のみ(552→553 files)。
-**未了のまま残るのは実機系のみ**(再レビュー §5 の MARA 実機 5 手順・runtime fixture・
-VR smoke — 静的には閉じたが、リリース最終判定はこの実機確認後)。
+~~未了のまま残るのは実機系のみ(静的には閉じた)~~ **(R3 レビューにより否認 —
+撤回)**: 最終 ARMA 境界・quarantine の原子性・ability cache 失効に P1 残存
+([MARA_GUARD_ADVERSARIAL_REREVIEW_R3.md](MARA_GUARD_ADVERSARIAL_REREVIEW_R3.md)、
+発行者側でも全主張を実コード追認済み)。修正は r4 ラウンドへ —
+指示書 = [MARA_GUARD_R4_HANDOFF.md](MARA_GUARD_R4_HANDOFF.md)
+(スコープ: R3 P1-1/P1-2/P3-1。P2 系はリリース基準 A/B の決定待ちで対象外)。
 
 ---
 
