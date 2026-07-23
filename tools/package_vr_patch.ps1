@@ -8,10 +8,14 @@
 # Run AFTER build.cmd release (DLL deployed with the new banner) - same
 # stale-deploy guard as package.ps1.
 param(
-    [Parameter(Mandatory = $true)][string]$Version
+    [Parameter(Mandatory = $true)][string]$Version,
+    # Same contract as package.ps1 -ModFolder (v1.3.2): stage the DLL from a
+    # clean assembled folder instead of the live MO2 mod when cutting from a
+    # release branch.
+    [string]$ModFolder = 'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW'
 )
 $ErrorActionPreference = 'Stop'
-$mod = 'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW'
+$mod = $ModFolder
 $repo = Split-Path $PSScriptRoot -Parent
 $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
 $stage = Join-Path $env:TEMP "cef_vr_stage_$Version"

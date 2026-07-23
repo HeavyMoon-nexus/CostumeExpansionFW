@@ -1,6 +1,10 @@
 # MARA 互換問題 — 捕獲ブラックリスト設計・実装計画
 
-> ステータス: **計画完成(2026-07-23)**。実装未着手。
+> ステータス: **v1.3.2 として実装完了(2026-07-23)** — 実装記録 =
+> [MARA_GUARD_IMPL.md](MARA_GUARD_IMPL.md)/検証 = [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)。
+> リリース判断: §4 の「beta-2 か 1.3.2 hotfix か」は**安定版 v1.3.2 で確定**(報告環境が
+> 安定版 v1.3.1 だったため)。beta 線への merge は §8-3 の後続作業。
+> 以下は計画時点(2026-07-23 午前)の本文を保存 — 実装との差分は実装記録側が正。
 > 起点: [CEF Nexus posts の報告](https://www.nexusmods.com/skyrimspecialedition/mods/183697?tab=posts)
 > (InubashiriMomizi・2026-07-22・**CEF v1.3.1 / SSE 1.6.1170**) —「MARA が追加する 'CORE Carrier' が
 > 装備中にあると、CFW メニューの Add worn item で即 CTD。ブラックリストが欲しい」。
@@ -42,7 +46,7 @@ Core Carrier(および同類)を既定で弾く機能**として実装する。M
 | UI | MCM(SkyUI) + SMF | MCM なし。INI + PrismaUI(F10)。别作者連携 mod "I4 for MARA" が存在(= 素の inventory UI が混乱する自覚の傍証) |
 | NPC | publish for NPC(トークン手渡し) | フォロワー対応(= **CORE Carrier 類は NPC インベントリにも湧き得る**) |
 | 除外機構 | 本計画で追加 | **なし**(ポジティブゲートのみ。キーワード剥がしは opt-out にならない — keyword 無し slot-35 品も「悪い形で」触られる報告あり) |
-| 周辺実績 | — | クラッシュ報告多数: Community Shaders は **MARA.dll 検出で自己無効化する kill-switch を出荷**、斬首 CTD・特定リング装備 CTD・PrismaUI デッドロック・FSMP 3.5.0 非互換等(33 bug 報告/2026-07 時点) |
+| 周辺実績 | — | クラッシュ報告多数: Community Shaders は **MARA.dll 検出で自己無効化する kill-switch を出荷**、斬首 CTD・特定リング装備 CTD・PrismaUI デッドロック・FSMP 3.5.0 非互換等(bugs タブ実数 61 件・うち未解決 31/2026-07 全数調査 = [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md) §1) |
 
 ### 1.1 CEF 側の関連機構(file:line 検証済み)
 
@@ -287,7 +291,8 @@ enchant snapshot・sync まで各個検証済み)。ただし null-safe ≠ dang
 1. CORE Carrier の playable フラグ・1 ホストか per-item か(§7.1 の回答か MARA source 公開で閉じる)。
 2. S2 恒久策: box トークンの keyword passthrough から ArmorJewelry(0006BBE9)を
    既定除外すべきか(ジュエリー判定 perk/効果への影響とトレードオフ — 要ユーザー判断)。
-3. v1.3.2 hotfix を切るか(Phase 1 リリース時のベータ進捗で判断)。
+3. ~~v1.3.2 hotfix を切るか~~ → **v1.3.2 で確定・実装済み**。残 = mara-guard-v1.3.2 ブランチの
+   beta 線(nifcarrier-inproc)への merge + NPC 側 IsDead ゲート(監査 §4.2)。
 
 ## 9. 出典(MARA 公開情報)
 

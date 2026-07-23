@@ -134,6 +134,29 @@ Save, then remove the mod.
 - Content must be weighted to bones present on your live skeleton (standard XPMSSE). Content
   built for a different/extended skeleton may show parts statically (logged as a remap).
 
+## Mod compatibility
+
+- **Strip / unequip mods** work automatically: a box hides when its token is unequipped.
+- **Capture blacklist (v1.3.2).** The capture pickers deliberately skip: **runtime-created
+  (FF) items** (another mod's invisible host/utility items — reading their inventory data
+  can crash instantly, and CEF could never restore them across a save anyway),
+  **non-playable armors**, items on the **deny-list** (defaults ship for MARA's
+  "CORE Carrier"; add your own on the SMF **Blocked** page), and any armor carrying the
+  **`CEF_NoCapture`** keyword — mod authors can tag their utility items via ESP or KID
+  (see the included `CostumeFW_NoCapture_KID.ini` template) to keep them out of CEF.
+- **MARA (Multiple Amulets and Rings... Automatically).** Its "CORE Carrier" host item
+  crashed the game when picked in `+ Add worn item` (report: 2026-07-22); v1.3.2 blocks
+  it (all four layers above match it). Two co-existence notes: (1) jewelry packed into a
+  slot-35/36 box passes ArmorJewelry through to the worn token, so MARA may try to manage
+  the invisible token like a real amulet/ring — if an amulet/ring box misbehaves with
+  MARA installed, move that box to another slot; (2) CEF natively stacks the looks and
+  enchant effects of several jewelry pieces in one box (one slot), which covers the
+  common "wear multiple amulets" wish without re-slotting.
+- **Community Shaders, decapitation mods, FSMP versions**: audited against the crash
+  classes reported around similar frameworks — CEF creates no renderer-facing geometry
+  from scratch, installs no blocking UI, and re-derives all form mutations on its own
+  ESP records each load. Details: `MARA_CRASH_CLASS_AUDIT.md`.
+
 ## Building
 
 CommonLibSSE-NG via vcpkg + CMake (Ninja, MSVC, C++23, triplet `x64-windows-static-md`).

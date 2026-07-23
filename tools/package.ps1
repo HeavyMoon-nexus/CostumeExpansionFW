@@ -6,10 +6,16 @@
 #   3. tools/espmerge fold of any patch esp into CostumeFW.esp  <-- v1.3.0 blocker:
 #      CostumeFW_VanillaSlots_001.esp must be folded (HANDOVER 9.2 F1 release note)
 param(
-    [Parameter(Mandatory = $true)][string]$Version
+    [Parameter(Mandatory = $true)][string]$Version,
+    # Mod folder to stage the deployed dll/esp/pex from. Default = the live MO2
+    # mod. A hotfix cut from a release branch stages from a CLEAN folder
+    # assembled out of the previous release archive + the freshly built DLL,
+    # so a beta-line deployment in the live folder cannot leak into a stable
+    # package (introduced for v1.3.2).
+    [string]$ModFolder = 'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW'
 )
 $ErrorActionPreference = 'Stop'
-$mod = 'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW'
+$mod = $ModFolder
 $repo = Split-Path $PSScriptRoot -Parent
 $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
 $stage = Join-Path $env:TEMP "cef_stage_$Version"

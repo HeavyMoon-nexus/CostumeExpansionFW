@@ -1,6 +1,42 @@
 # Changelog
 
-## Unreleased
+## v1.3.2 (2026-07-23)
+
+### Added
+- **Capture blacklist** (MARA compatibility - `MARA_COMPAT_PLAN.md`,
+  `MARA_CRASH_CLASS_AUDIT.md`). Origin report (CEF Nexus posts, 2026-07-22):
+  with MARA installed, picking its runtime "CORE Carrier" item in
+  `+ Add worn item` crashed instantly. The capture pickers now skip, and the
+  capture gate now refuses, three layers of items:
+  - **L1 structural** — runtime-created (FF) forms (their inventory data is
+    the crash surface, and the colon-id persistence model could never restore
+    them anyway) and non-playable armors (hidden by the vanilla UI; a raw
+    inventory picker must hide them too). The picker loops were reordered so
+    a skipped form's `InventoryEntryData` is **never touched**.
+  - **L2 deny-list** — shipped defaults (`CORE Carrier` by name, `MARA` by
+    plugin prefix) + user entries (name / plugin / colon-id) managed on the
+    new SMF **Blocked** page or in `CEF_settings.json` (`captureBlacklist`).
+  - **L3 opt-out keyword** — any armor carrying `CEF_NoCapture` is excluded;
+    mod authors and users can distribute it via the shipped
+    `CostumeFW_NoCapture_KID.ini` template (KID auto-creates the keyword).
+  Every capture entrance funnels through the same gate: MCM, SMF, presets,
+  and the previously-ungated `AddBox`/`AddPersist` Papyrus natives.
+- Startup logs `compat: MARA.dll detected` when MARA is present (triage aid;
+  no behavior branches on it).
+
+### Fixed
+- **Runtime (FF) form ids no longer truncate.** `MakeColonId` /
+  `CanonicalizeColonId` wrote 8-digit local ids into `char[8]` buffers
+  (`%06X` is a *minimum* width), producing corrupt `"FF00080:"`-style ids.
+  Buffers widened; normal 6-digit ids are byte-identical.
+
+## v1.3.1 (2026-07-17)
+
+### Fixed
+- **Persist head-carrier "teeth drop" watchdog now actually works** — 3-tier
+  mouth detection (top-level part / face extra part / race chargen default)
+  and, when a plain rebuild re-drops it, promotion of the mouth to an explicit
+  head part (save-persistent). See `NEXUS_CHANGELOG_v1.3.1.txt`.
 
 ### Added
 - **Skyrim VR runtime support (community beta).** The DLL has always been
@@ -19,6 +55,12 @@
   RaceMenu VR; ships as a separate small **VR Patch** archive
   (`tools/package_vr_patch.ps1`, dll + `README_VR.txt` only — esp/meshes/
   scripts stay runtime-shared in the main package).
+
+## v1.3.0 (2026-07-13)
+
+- SKSE Menu Framework UI (SMF becomes the primary UI), RMSS base-skin fix,
+  vanilla-slot token fold. Recorded retroactively - see
+  `NEXUS_CHANGELOG_v1.3.0.txt` for the shipped notes.
 
 ## v1.2.1 (2026-07-07)
 
