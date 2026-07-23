@@ -44,6 +44,8 @@ namespace CostumeFW::SmfUI
         char s_hideSlots[64] = "";        // hide-when-worn slot list edit buffer
         std::string s_hideSlotsFor;       // which content the buffer was loaded for
         char s_exportName[64] = "";       // "Export as preset" name buffer
+        char s_blkValue[128] = "";        // "Blocked" page: add-entry value buffer
+        int s_blkKind = 0;                // "Blocked" page: 0=name, 1=plugin, 2=id
         std::string s_status;             // last guard/op feedback line
         // Optimistic Wear state: the engine's equip QUEUE does not process while
         // SMF pauses the game, so an honest per-frame GetWornArmor re-read
@@ -775,6 +777,99 @@ namespace CostumeFW::SmfUI
         }
     }
 
+    namespace
+    {
+        // --- Blocked items (v1.3.2 capture blacklist, MARA_COMPAT_PLAN.md §3) ---
+        // Pure config UI: reads are per-frame snapshots (GetCaptureBlacklist
+        // copies), mutations go through AddTask like every other mutator.
+        void __stdcall RenderBlocked()
+        {
+            ImGui::TextWrapped(
+                "Items matched here are hidden from the capture pickers and refused by "
+                "the capture gate. The structural skips (runtime/dynamic forms, "
+                "non-playable armors) protect against MARA-class runtime items whose "
+                "inventory data crashes on touch; the deny-list names known offenders.");
+            const auto view = GetCaptureBlacklist();
+
+            bool allowNp = view.allowNonPlayable;
+            if (ImGui::Checkbox("Show non-playable armors in pickers##blkNp", &allowNp)) {
+                SKSE::GetTaskInterface()->AddTask(
+                    [allowNp] { SetCaptureBlacklistFlag("allowNonPlayable", allowNp); });
+            }
+            bool allowDyn = view.allowDynamic;
+            if (ImGui::Checkbox("Show runtime (dynamic) forms##blkDyn", &allowDyn)) {
+                SKSE::GetTaskInterface()->AddTask(
+                    [allowDyn] { SetCaptureBlacklistFlag("allowDynamic", allowDyn); });
+            }
+            if (allowDyn) {
+                ImGui::TextWrapped(
+                    "WARNING: touching another mod's runtime item can crash instantly "
+                    "(the MARA 'CORE Carrier' report). Leave OFF unless reproducing a "
+                    "crash for a log.");
+            }
+            bool noDefaults = view.disableDefaults;
+            if (ImGui::Checkbox("Disable shipped default entries##blkDef", &noDefaults)) {
+                SKSE::GetTaskInterface()->AddTask(
+                    [noDefaults] { SetCaptureBlacklistFlag("disableDefaults", noDefaults); });
+            }
+
+            ImGui::SeparatorText("Shipped defaults");
+            for (const auto& name : view.defaultNames) {
+                ImGui::Text(view.disableDefaults ? "name: %s (off)" : "name: %s", name.c_str());
+            }
+            for (const auto& plugin : view.defaultPlugins) {
+                ImGui::Text(view.disableDefaults ? "plugin: %s* (off)" : "plugin: %s*",
+                    plugin.c_str());
+            }
+
+            ImGui::SeparatorText(std::format("User entries ({})",
+                view.names.size() + view.plugins.size() + view.ids.size()).c_str());
+            const auto renderRows = [](const char* a_kind, const std::vector<std::string>& a_rows) {
+                for (const auto& value : a_rows) {
+                    ImGui::Text("%s: %s", a_kind, value.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::Button(std::format("Remove##blk{}{}", a_kind, value).c_str())) {
+                        const std::string kind = a_kind;
+                        const std::string entry = value;
+                        SKSE::GetTaskInterface()->AddTask(
+                            [kind, entry] { RemoveCaptureBlacklistEntry(kind, entry); });
+                    }
+                }
+            };
+            renderRows("name", view.names);
+            renderRows("plugin", view.plugins);
+            renderRows("id", view.ids);
+
+            ImGui::Spacing();
+            static const char* kKinds[] = { "name", "plugin", "id" };
+            if (ImGui::BeginCombo("##blkKind", kKinds[s_blkKind])) {
+                for (int i = 0; i < 3; ++i) {
+                    if (ImGui::Selectable(kKinds[i], i == s_blkKind)) {
+                        s_blkKind = i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::InputText("##blkVal", s_blkValue, sizeof(s_blkValue));
+            ImGui::SameLine();
+            if (ImGui::Button("Add##blkAdd") && s_blkValue[0] != '\0') {
+                const std::string kind = kKinds[s_blkKind];
+                const std::string value = s_blkValue;
+                SKSE::GetTaskInterface()->AddTask(
+                    [kind, value] { AddCaptureBlacklistEntry(kind, value); });
+                s_status = std::format("queued: block {} '{}'", kind, value);
+                s_blkValue[0] = '\0';
+            }
+            ImGui::TextWrapped(
+                "name = exact display name, or 'prefix*'. plugin = source-plugin "
+                "filename prefix (e.g. MARA). id = colon-id LOCALID:Plugin.esp.");
+            if (!s_status.empty()) {
+                ImGui::TextUnformatted(s_status.c_str());
+            }
+        }
+    }
+
     void Register()
     {
         if (!SKSEMenuFramework::IsInstalled()) {
@@ -787,7 +882,8 @@ namespace CostumeFW::SmfUI
         SKSEMenuFramework::AddSectionItem("Boxes", RenderBoxes);
         SKSEMenuFramework::AddSectionItem("Persist", RenderPersist);
         SKSEMenuFramework::AddSectionItem("Presets", RenderPresets);
+        SKSEMenuFramework::AddSectionItem("Blocked", RenderBlocked);  // v1.3.2 capture blacklist
         SKSEMenuFramework::AddSectionItem("Diagnostics", RenderDiagnostics);
-        SKSE::log::info("SMF: registered section 'Costume Expansion FW' (5 pages)");
+        SKSE::log::info("SMF: registered section 'Costume Expansion FW' (6 pages)");
     }
 }

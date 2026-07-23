@@ -116,10 +116,16 @@ namespace CostumeFW
         // every other store read; mutated on the main thread via AddTask.
         struct CaptureBlacklistCfg
         {
+            // L2 user extension (Phase 2). Shipped defaults live in code next
+            // to the matcher (kDefaultBlockNames/kDefaultBlockPlugins).
+            std::vector<std::string> names;    // exact, or trailing '*' = prefix
+            std::vector<std::string> plugins;  // filename prefix, case-insensitive
+            std::vector<std::string> ids;      // colon-ids
             bool allowNonPlayable{ false };  // true = show non-playable armors
             bool allowDynamic{ false };      // true = show runtime (FF) forms - the
                                              // reported MARA CTD is reproducible
                                              // with this on; repro use only
+            bool disableDefaults{ false };   // true = shipped deny-list off
         };
         CaptureBlacklistCfg g_captureBlacklist;
 
@@ -264,11 +270,15 @@ namespace CostumeFW
             }
             doc["showRealBody"] = std::move(realBodies);
 
-            // Capture blacklist: switches (and, since Phase 2, the user's own
-            // deny-list extension). Structural defaults live in code.
+            // Capture blacklist: switches + the user's own deny-list extension.
+            // Structural skips and the shipped defaults live in code.
             auto blacklist = nlohmann::json::object();
+            blacklist["names"] = g_captureBlacklist.names;
+            blacklist["plugins"] = g_captureBlacklist.plugins;
+            blacklist["ids"] = g_captureBlacklist.ids;
             blacklist["allowNonPlayable"] = g_captureBlacklist.allowNonPlayable;
             blacklist["allowDynamic"] = g_captureBlacklist.allowDynamic;
+            blacklist["disableDefaults"] = g_captureBlacklist.disableDefaults;
             doc["captureBlacklist"] = std::move(blacklist);
 
             auto enchants = nlohmann::json::object();
@@ -1228,11 +1238,30 @@ namespace CostumeFW
             }
         }
         {
-            // Capture blacklist (v1.3.2): switches only in Phase 1; absent field
-            // (any pre-1.3.2 json) = both skips active, which is the safe default.
+            // Capture blacklist (v1.3.2): absent field (any pre-1.3.2 json) =
+            // structural skips active, shipped defaults active, no user
+            // entries - the safe default.
             const auto blacklist = doc.value("captureBlacklist", nlohmann::json::object());
+            for (const auto& entry : blacklist.value("names", nlohmann::json::array())) {
+                if (entry.is_string() && !entry.get<std::string>().empty()) {
+                    g_captureBlacklist.names.push_back(entry.get<std::string>());
+                }
+            }
+            for (const auto& entry : blacklist.value("plugins", nlohmann::json::array())) {
+                if (entry.is_string() && !entry.get<std::string>().empty()) {
+                    g_captureBlacklist.plugins.push_back(entry.get<std::string>());
+                }
+            }
+            for (const auto& entry : blacklist.value("ids", nlohmann::json::array())) {
+                if (entry.is_string() && !entry.get<std::string>().empty()) {
+                    auto id = entry.get<std::string>();
+                    healed |= CanonicalizeColonId(id);  // ROOT D parity
+                    g_captureBlacklist.ids.push_back(std::move(id));
+                }
+            }
             g_captureBlacklist.allowNonPlayable = blacklist.value("allowNonPlayable", false);
             g_captureBlacklist.allowDynamic = blacklist.value("allowDynamic", false);
+            g_captureBlacklist.disableDefaults = blacklist.value("disableDefaults", false);
         }
         const auto hideShapes = doc.value("hideShapes", nlohmann::json::object());
         for (auto it = hideShapes.begin(); it != hideShapes.end(); ++it) {
@@ -1903,6 +1932,77 @@ namespace CostumeFW
 
     // --- Capture blacklist (v1.3.2, MARA_COMPAT_PLAN.md §3) ------------------
 
+    namespace
+    {
+        // Shipped L2 deny-list. MARA (Nexus 173949) has no plugin file - its
+        // "CORE Carrier" host armor is a runtime form, so the NAME entry is
+        // the effective one (L1 already skips it as a dynamic form; the name
+        // is the belt to L1's suspenders, and stays correct even if a future
+        // MARA persists the carrier differently). The plugin prefix covers a
+        // hypothetical future MARA.esp. Evidence: CEF Nexus report 2026-07-22,
+        // MARA bug #1059563 (both: third-party UI touches the carrier -> CTD).
+        constexpr std::string_view kDefaultBlockNames[] = { "CORE Carrier" };
+        constexpr std::string_view kDefaultBlockPlugins[] = { "MARA" };
+
+        bool EqualsCI(std::string_view a_lhs, std::string_view a_rhs)
+        {
+            return a_lhs.size() == a_rhs.size() &&
+                   ::_strnicmp(a_lhs.data(), a_rhs.data(), a_lhs.size()) == 0;
+        }
+
+        bool PrefixCI(std::string_view a_str, std::string_view a_prefix)
+        {
+            return a_str.size() >= a_prefix.size() && !a_prefix.empty() &&
+                   ::_strnicmp(a_str.data(), a_prefix.data(), a_prefix.size()) == 0;
+        }
+
+        // Name pattern: exact (CI), or trailing '*' = prefix match.
+        bool NameMatches(std::string_view a_name, std::string_view a_pattern)
+        {
+            if (!a_pattern.empty() && a_pattern.back() == '*') {
+                return PrefixCI(a_name, a_pattern.substr(0, a_pattern.size() - 1));
+            }
+            return EqualsCI(a_name, a_pattern);
+        }
+
+        bool PluginDenied(std::string_view a_filename)
+        {
+            if (!g_captureBlacklist.disableDefaults) {
+                for (const auto pat : kDefaultBlockPlugins) {
+                    if (PrefixCI(a_filename, pat)) {
+                        return true;
+                    }
+                }
+            }
+            for (const auto& pat : g_captureBlacklist.plugins) {
+                if (PrefixCI(a_filename, pat)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool NameDenied(std::string_view a_name)
+        {
+            if (a_name.empty()) {
+                return false;
+            }
+            if (!g_captureBlacklist.disableDefaults) {
+                for (const auto pat : kDefaultBlockNames) {
+                    if (NameMatches(a_name, pat)) {
+                        return true;
+                    }
+                }
+            }
+            for (const auto& pat : g_captureBlacklist.names) {
+                if (NameMatches(a_name, pat)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo)
     {
         if (!a_armo) {
@@ -1916,8 +2016,13 @@ namespace CostumeFW
         // source-file array. Capturing one could never work anyway: the
         // colon-id (local id + defining plugin) has no plugin to name, so the
         // content would be unrestorable on the next load.
-        if (!a_armo->GetFile(0) && !g_captureBlacklist.allowDynamic) {
+        const auto* file = a_armo->GetFile(0);
+        if (!file && !g_captureBlacklist.allowDynamic) {
             return CaptureBlock::kDynamicForm;
+        }
+        // L2a: source-plugin deny-list (defaults + user). Filename read only.
+        if (file && PluginDenied(file->GetFilename())) {
+            return CaptureBlock::kPlugin;
         }
         // L1b: non-playable armors are engine/framework internals (skins,
         // tokens, hosts); the vanilla inventory UI hides them, so a raw
@@ -1925,6 +2030,24 @@ namespace CostumeFW
         if ((a_armo->formFlags & RE::TESObjectARMO::RecordFlags::kNonPlayable) != 0 &&
             !g_captureBlacklist.allowNonPlayable) {
             return CaptureBlock::kNonPlayable;
+        }
+        // L2b: name deny-list (defaults + user). The name read sits BELOW the
+        // dynamic-form skip on purpose: with allowDynamic off (the default) a
+        // runtime form never reaches it, and with allowDynamic on the user
+        // has explicitly accepted touching runtime forms (repro mode) - the
+        // name is then read here exactly once, same as the picker row would.
+        if (NameDenied(a_armo->GetFullName() ? a_armo->GetFullName() : "")) {
+            return CaptureBlock::kName;
+        }
+        // L2c: explicit colon-id deny-list (user; rare - names/plugins cover
+        // the common cases). Built from the form only when the list is used.
+        if (!g_captureBlacklist.ids.empty()) {
+            const std::string id = MakeColonId(a_armo);
+            for (const auto& entry : g_captureBlacklist.ids) {
+                if (EqualsCI(id, entry)) {
+                    return CaptureBlock::kId;
+                }
+            }
         }
         return CaptureBlock::kNone;
     }
@@ -1941,6 +2064,9 @@ namespace CostumeFW
             switch (a_reason) {
             case CaptureBlock::kDynamicForm: return "runtime-created (dynamic) form";
             case CaptureBlock::kNonPlayable: return "non-playable armor";
+            case CaptureBlock::kPlugin: return "plugin on the deny-list";
+            case CaptureBlock::kName: return "name on the deny-list";
+            case CaptureBlock::kId: return "id on the deny-list";
             default: return "not blocked";
             }
         }
@@ -1979,6 +2105,8 @@ namespace CostumeFW
             target = &g_captureBlacklist.allowNonPlayable;
         } else if (a_flag == "allowDynamic") {
             target = &g_captureBlacklist.allowDynamic;
+        } else if (a_flag == "disableDefaults") {
+            target = &g_captureBlacklist.disableDefaults;
         }
         if (!target) {
             return false;
@@ -1999,7 +2127,91 @@ namespace CostumeFW
         if (a_flag == "allowDynamic") {
             return g_captureBlacklist.allowDynamic;
         }
+        if (a_flag == "disableDefaults") {
+            return g_captureBlacklist.disableDefaults;
+        }
         return false;
+    }
+
+    namespace
+    {
+        std::vector<std::string>* BlacklistBucket(const std::string& a_kind)
+        {
+            if (a_kind == "name") {
+                return &g_captureBlacklist.names;
+            }
+            if (a_kind == "plugin") {
+                return &g_captureBlacklist.plugins;
+            }
+            if (a_kind == "id") {
+                return &g_captureBlacklist.ids;
+            }
+            return nullptr;
+        }
+
+        std::string TrimCopy(const std::string& a_s)
+        {
+            const auto first = a_s.find_first_not_of(" \t");
+            const auto last = a_s.find_last_not_of(" \t");
+            return (first == std::string::npos) ? std::string{}
+                                                : a_s.substr(first, last - first + 1);
+        }
+    }
+
+    CaptureBlacklistView GetCaptureBlacklist()
+    {
+        CaptureBlacklistView view;
+        for (const auto name : kDefaultBlockNames) {
+            view.defaultNames.emplace_back(name);
+        }
+        for (const auto plugin : kDefaultBlockPlugins) {
+            view.defaultPlugins.emplace_back(plugin);
+        }
+        view.names = g_captureBlacklist.names;
+        view.plugins = g_captureBlacklist.plugins;
+        view.ids = g_captureBlacklist.ids;
+        view.allowNonPlayable = g_captureBlacklist.allowNonPlayable;
+        view.allowDynamic = g_captureBlacklist.allowDynamic;
+        view.disableDefaults = g_captureBlacklist.disableDefaults;
+        return view;
+    }
+
+    bool AddCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value)
+    {
+        auto* bucket = BlacklistBucket(a_kind);
+        std::string value = TrimCopy(a_value);
+        if (!bucket || value.empty()) {
+            return false;
+        }
+        if (a_kind == "id") {
+            CanonicalizeColonId(value);
+        }
+        for (const auto& existing : *bucket) {
+            if (EqualsCI(existing, value)) {
+                return false;  // duplicate
+            }
+        }
+        bucket->push_back(value);
+        WriteJson();
+        SKSE::log::info("capture: blacklist {} entry added '{}'", a_kind, value);
+        return true;
+    }
+
+    bool RemoveCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value)
+    {
+        auto* bucket = BlacklistBucket(a_kind);
+        if (!bucket) {
+            return false;
+        }
+        const auto it = std::find_if(bucket->begin(), bucket->end(),
+            [&](const std::string& a_e) { return EqualsCI(a_e, a_value); });
+        if (it == bucket->end()) {
+            return false;
+        }
+        bucket->erase(it);
+        WriteJson();
+        SKSE::log::info("capture: blacklist {} entry removed '{}'", a_kind, a_value);
+        return true;
     }
 
     std::vector<WornItem> WornArmors()

@@ -221,6 +221,9 @@ namespace CostumeFW
         kNone = 0,      // not barred
         kDynamicForm,   // L1: no defining file (runtime-created form)
         kNonPlayable,   // L1: non-playable record flag
+        kPlugin,        // L2: source-plugin deny-list (defaults or user)
+        kName,          // L2: name deny-list (defaults or user)
+        kId,            // L2: colon-id deny-list (user)
     };
     // Form-level reads ONLY (defining file, record flags, static name/keywords):
     // safe to call on an armor whose inventory ENTRY must not be touched. The
@@ -233,10 +236,33 @@ namespace CostumeFW
     // the AddBox/AddPersistContent store fronts. a_why (optional) receives a
     // short user-facing reason on refusal.
     bool CanCaptureContent(const std::string& a_id, std::string* a_why = nullptr);
-    // L1 switches ("allowNonPlayable" / "allowDynamic"): def + json. Returns
-    // false for an unknown flag name.
+    // Switches ("allowNonPlayable" / "allowDynamic" / "disableDefaults"):
+    // def + json. Returns false for an unknown flag name.
     bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on);
     bool GetCaptureBlacklistFlag(const std::string& a_flag);
+
+    // L2 deny-list (v1.3.2 Phase 2). Shipped defaults live in code (MARA's
+    // "CORE Carrier" by NAME - a runtime form has no plugin to name, so the
+    // name entry is the effective one; the "MARA" plugin prefix is future-
+    // proofing). The json persists only the USER extension. Matching is
+    // case-insensitive; a name entry may end in '*' for a prefix match;
+    // plugin entries are filename prefixes; id entries are colon-ids.
+    struct CaptureBlacklistView  // UI snapshot (defaults + user + switches)
+    {
+        std::vector<std::string> defaultNames;
+        std::vector<std::string> defaultPlugins;
+        std::vector<std::string> names;    // user entries
+        std::vector<std::string> plugins;  // user entries
+        std::vector<std::string> ids;      // user entries
+        bool allowNonPlayable{ false };
+        bool allowDynamic{ false };
+        bool disableDefaults{ false };
+    };
+    CaptureBlacklistView GetCaptureBlacklist();
+    // a_kind: "name" | "plugin" | "id". def + json. Add refuses empty /
+    // duplicate values; both return false when nothing changed.
+    bool AddCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value);
+    bool RemoveCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value);
 
     // One currently-worn armor: its display name + colon-form id (for the MCM
     // "add worn item" capture flow).
