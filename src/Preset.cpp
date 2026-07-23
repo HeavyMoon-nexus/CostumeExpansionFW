@@ -229,10 +229,10 @@ namespace CostumeFW::Preset
                 continue;
             }
             // Displayability, not mere form existence (review round 4): the
-            // same gate captures use (ARMO/ARMA with a usable model), so a
-            // broken entry lands in a_missing instead of assigning fine and
-            // then never showing.
-            if (CanResolveContent(c)) {
+            // same gate captures use (v1.3.2: capture blacklist + ARMO/ARMA
+            // with a usable model), so a blocked or broken entry lands in
+            // a_missing instead of assigning fine and then never showing.
+            if (CanCaptureContent(c)) {
                 a_resolvable.push_back(c);
             } else {
                 a_missing.push_back(c);

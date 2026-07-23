@@ -6,6 +6,7 @@
 
 namespace RE
 {
+    class TESObjectARMO;
     class TESObjectREFR;
 }
 
@@ -205,6 +206,37 @@ namespace CostumeFW
     // These are the manual console levers on top of that:
     void PersistCarrierStatus();  // `cef persist` - print pool registration + entry
     void PersistCarrierRemove();  // `cef persist remove` - deregister pool + rebuild head
+
+    // --- Capture blacklist (v1.3.2, MARA_COMPAT_PLAN.md §3) ------------------
+    // Armors the capture pickers must not OFFER and the capture gate must not
+    // ACCEPT. L1 structural: runtime (dynamic/FF) forms - the colon-id model
+    // (local id + defining plugin) can never restore them across loads, and
+    // MARA-class mods keep half-built runtime forms in the inventory that only
+    // raw enumerators like ours ever touch (MARA bug #1059563 hover-CTD; CEF
+    // Nexus report 2026-07-22) - and non-playable armors, which the vanilla UI
+    // hides and a capture picker must hide too. Both skips can be lifted per
+    // json switch (allowDynamic / allowNonPlayable) for repro/debugging.
+    enum class CaptureBlock  // why an armor is barred from capture
+    {
+        kNone = 0,      // not barred
+        kDynamicForm,   // L1: no defining file (runtime-created form)
+        kNonPlayable,   // L1: non-playable record flag
+    };
+    // Form-level reads ONLY (defining file, record flags, static name/keywords):
+    // safe to call on an armor whose inventory ENTRY must not be touched. The
+    // enumeration loops call this BEFORE reading the entry (IsWorn/extra lists).
+    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo);
+    bool IsCaptureBlocked(RE::TESObjectARMO* a_armo);
+    // The semantic capture gate: blacklist first, then mesh resolvability
+    // (CanResolveContent). Every capture entrance funnels here - the MCM (via
+    // the CanResolveContent native), SMF QueueCapture*, preset Validate, and
+    // the AddBox/AddPersistContent store fronts. a_why (optional) receives a
+    // short user-facing reason on refusal.
+    bool CanCaptureContent(const std::string& a_id, std::string* a_why = nullptr);
+    // L1 switches ("allowNonPlayable" / "allowDynamic"): def + json. Returns
+    // false for an unknown flag name.
+    bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on);
+    bool GetCaptureBlacklistFlag(const std::string& a_flag);
 
     // One currently-worn armor: its display name + colon-form id (for the MCM
     // "add worn item" capture flow).

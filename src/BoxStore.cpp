@@ -108,6 +108,21 @@ namespace CostumeFW
         // slots (real body already shows) it would double. GLOBAL config, content-keyed.
         std::unordered_set<std::string> g_showRealBody;
 
+        // --- Capture blacklist switches (v1.3.2, MARA_COMPAT_PLAN.md §3 L1) ---
+        // Which structural skips the capture surface applies. Defaults ON
+        // (= skip). The switches exist for power users / crash-repro sessions;
+        // both are persisted in CEF_settings.json under "captureBlacklist".
+        // Read on UI threads under the same read-only-snapshot contract as
+        // every other store read; mutated on the main thread via AddTask.
+        struct CaptureBlacklistCfg
+        {
+            bool allowNonPlayable{ false };  // true = show non-playable armors
+            bool allowDynamic{ false };      // true = show runtime (FF) forms - the
+                                             // reported MARA CTD is reproducible
+                                             // with this on; repro use only
+        };
+        CaptureBlacklistCfg g_captureBlacklist;
+
         // Captured worn enchantment per content: content colon-id -> effect list
         // (MGEF colon-id + magnitude). Snapshots the EFFECTIVE enchantment at
         // capture (base OR player/instance), since the base ARMO alone misses
@@ -249,6 +264,13 @@ namespace CostumeFW
             }
             doc["showRealBody"] = std::move(realBodies);
 
+            // Capture blacklist: switches (and, since Phase 2, the user's own
+            // deny-list extension). Structural defaults live in code.
+            auto blacklist = nlohmann::json::object();
+            blacklist["allowNonPlayable"] = g_captureBlacklist.allowNonPlayable;
+            blacklist["allowDynamic"] = g_captureBlacklist.allowDynamic;
+            doc["captureBlacklist"] = std::move(blacklist);
+
             auto enchants = nlohmann::json::object();
             for (const auto& [id, effs] : g_contentEnchants) {
                 auto arr2 = nlohmann::json::array();
@@ -291,7 +313,11 @@ namespace CostumeFW
         // plugin-local FormID (ESL-masked) + defining plugin filename.
         std::string MakeColonId(RE::TESForm* a_form)
         {
-            char buf[8]{};
+            // %06X is a MINIMUM width: a runtime (0xFF) form's local id prints 8
+            // digits, and the old char[8] buffer silently truncated it to a
+            // corrupt "FF00080:"-style id. Runtime forms are refused by the
+            // capture gate (v1.3.2 L1), but the id itself must stay faithful.
+            char buf[16]{};
             std::snprintf(buf, sizeof(buf), "%06X", a_form->GetLocalFormID());
             auto* file = a_form->GetFile(0);
             const std::string plugin = file ? std::string(file->GetFilename()) : std::string{};
@@ -1015,6 +1041,7 @@ namespace CostumeFW
         g_showRealBody.clear();
         g_contentEnchants.clear();
         g_persistPreset.clear();
+        g_captureBlacklist = {};
         g_cefEnabled = true;
 
         // Read CEF_settings.json; fall back to the legacy costume_boxes.json once
@@ -1200,6 +1227,13 @@ namespace CostumeFW
                 g_showRealBody.insert(std::move(s));
             }
         }
+        {
+            // Capture blacklist (v1.3.2): switches only in Phase 1; absent field
+            // (any pre-1.3.2 json) = both skips active, which is the safe default.
+            const auto blacklist = doc.value("captureBlacklist", nlohmann::json::object());
+            g_captureBlacklist.allowNonPlayable = blacklist.value("allowNonPlayable", false);
+            g_captureBlacklist.allowDynamic = blacklist.value("allowDynamic", false);
+        }
         const auto hideShapes = doc.value("hideShapes", nlohmann::json::object());
         for (auto it = hideShapes.begin(); it != hideShapes.end(); ++it) {
             std::vector<std::string> names;
@@ -1244,6 +1278,7 @@ namespace CostumeFW
             g_bodyMorphOn.clear();
             g_contentEnchants.clear();
             g_persistPreset.clear();
+            g_captureBlacklist = {};
             g_cefEnabled = true;
             return;
         }
@@ -1500,6 +1535,15 @@ namespace CostumeFW
         if (IsTokenColonId(content)) {
             SKSE::log::warn("persist: rejects CEF-own id '{}' as content", content);
             return false;
+        }
+        // v1.3.2 capture gate (parity with AddBox): native / preset routes
+        // reach here unchecked.
+        {
+            std::string why;
+            if (!CanCaptureContent(content, &why)) {
+                SKSE::log::warn("persist: rejects '{}' - {}", content, why);
+                return false;
+            }
         }
         const std::string holder = ContentHolder(content);
         if (!holder.empty() && holder != "persist") {
@@ -1857,6 +1901,107 @@ namespace CostumeFW
         g_contentShapes[a_id] = a_shapes;
     }
 
+    // --- Capture blacklist (v1.3.2, MARA_COMPAT_PLAN.md §3) ------------------
+
+    CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo)
+    {
+        if (!a_armo) {
+            return CaptureBlock::kDynamicForm;  // treat as never-capturable
+        }
+        // L1a, and FIRST for a reason: a runtime form is the one class whose
+        // deeper data (name, keywords, inventory entry) must never be read -
+        // MARA-class mods keep half-built runtime armors in the inventory that
+        // crash third-party UIs on touch (MARA bug #1059563 hover-CTD; CEF
+        // Nexus report 2026-07-22). GetFile(0) reads only the form's
+        // source-file array. Capturing one could never work anyway: the
+        // colon-id (local id + defining plugin) has no plugin to name, so the
+        // content would be unrestorable on the next load.
+        if (!a_armo->GetFile(0) && !g_captureBlacklist.allowDynamic) {
+            return CaptureBlock::kDynamicForm;
+        }
+        // L1b: non-playable armors are engine/framework internals (skins,
+        // tokens, hosts); the vanilla inventory UI hides them, so a raw
+        // GetInventory picker must hide them too. Record-flag read only.
+        if ((a_armo->formFlags & RE::TESObjectARMO::RecordFlags::kNonPlayable) != 0 &&
+            !g_captureBlacklist.allowNonPlayable) {
+            return CaptureBlock::kNonPlayable;
+        }
+        return CaptureBlock::kNone;
+    }
+
+    bool IsCaptureBlocked(RE::TESObjectARMO* a_armo)
+    {
+        return CaptureBlockReason(a_armo) != CaptureBlock::kNone;
+    }
+
+    namespace
+    {
+        const char* BlockReasonText(CaptureBlock a_reason)
+        {
+            switch (a_reason) {
+            case CaptureBlock::kDynamicForm: return "runtime-created (dynamic) form";
+            case CaptureBlock::kNonPlayable: return "non-playable armor";
+            default: return "not blocked";
+            }
+        }
+    }
+
+    bool CanCaptureContent(const std::string& a_id, std::string* a_why)
+    {
+        // Blacklist first (the SEMANTIC layer), resolvability second. An id
+        // that does not resolve to a live ARMO skips the blacklist layer and
+        // falls through to CanResolveContent, which refuses it with the
+        // classic message - same end state as pre-1.3.2.
+        if (auto* armo = ResolveArmo(a_id)) {
+            const auto reason = CaptureBlockReason(armo);
+            if (reason != CaptureBlock::kNone) {
+                SKSE::log::warn("capture: '{}' blocked - {}", a_id, BlockReasonText(reason));
+                if (a_why) {
+                    *a_why = std::string("blocked: ") + BlockReasonText(reason) +
+                             " (capture blacklist)";
+                }
+                return false;
+            }
+        }
+        if (!CanResolveContent(a_id)) {
+            if (a_why) {
+                *a_why = "this item's mesh could not be resolved - not captured (see log)";
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on)
+    {
+        bool* target = nullptr;
+        if (a_flag == "allowNonPlayable") {
+            target = &g_captureBlacklist.allowNonPlayable;
+        } else if (a_flag == "allowDynamic") {
+            target = &g_captureBlacklist.allowDynamic;
+        }
+        if (!target) {
+            return false;
+        }
+        if (*target != a_on) {
+            *target = a_on;
+            WriteJson();
+            SKSE::log::info("capture: blacklist switch {} = {}", a_flag, a_on);
+        }
+        return true;
+    }
+
+    bool GetCaptureBlacklistFlag(const std::string& a_flag)
+    {
+        if (a_flag == "allowNonPlayable") {
+            return g_captureBlacklist.allowNonPlayable;
+        }
+        if (a_flag == "allowDynamic") {
+            return g_captureBlacklist.allowDynamic;
+        }
+        return false;
+    }
+
     std::vector<WornItem> WornArmors()
     {
         std::vector<WornItem> out;
@@ -1868,17 +2013,24 @@ namespace CostumeFW
             return a_obj.Is(RE::FormType::Armor);
         });
         for (auto& [obj, data] : inv) {
-            const auto& [count, entry] = data;
-            if (count <= 0 || !entry || !entry->IsWorn()) {
-                continue;
-            }
-            auto* armo = obj->As<RE::TESObjectARMO>();
+            auto* armo = obj ? obj->As<RE::TESObjectARMO>() : nullptr;
             if (!armo) {
                 continue;
             }
+            // Form-level skips FIRST: a blocked (runtime/utility) armor's
+            // inventory ENTRY must never be touched - IsWorn() below walks its
+            // ExtraDataLists, and on MARA-class runtime items that is the
+            // reported instant-CTD surface (MARA #1059563; CEF report
+            // 2026-07-22). MARA_COMPAT_PLAN.md §3.3 order constraint.
+            if (IsCaptureBlocked(armo)) {
+                continue;
+            }
             // Exclude our own box tokens (base pool esp + the carrier patch).
-            auto* file = armo->GetFile(0);
-            if (IsTokenPluginFile(file)) {
+            if (IsTokenPluginFile(armo->GetFile(0))) {
+                continue;
+            }
+            const auto& [count, entry] = data;
+            if (count <= 0 || !entry || !entry->IsWorn()) {
                 continue;
             }
             const char* nm = armo->GetFullName();
@@ -1913,17 +2065,22 @@ namespace CostumeFW
             return a_obj.Is(RE::FormType::Armor);
         });
         for (auto& [obj, data] : inv) {
-            const auto& [count, entry] = data;
-            if (count <= 0) {
-                continue;
-            }
-            auto* armo = obj->As<RE::TESObjectARMO>();
+            auto* armo = obj ? obj->As<RE::TESObjectARMO>() : nullptr;
             if (!armo) {
                 continue;
             }
+            // Form-level skips FIRST (same order constraint as WornArmors -
+            // MARA_COMPAT_PLAN.md §3.3): never touch a blocked form's name or
+            // inventory entry.
+            if (IsCaptureBlocked(armo)) {
+                continue;
+            }
             // Exclude our own box tokens.
-            auto* file = armo->GetFile(0);
-            if (IsTokenPluginFile(file)) {
+            if (IsTokenPluginFile(armo->GetFile(0))) {
+                continue;
+            }
+            const auto& [count, entry] = data;
+            if (count <= 0) {
                 continue;
             }
             const char* nm = armo->GetFullName();
@@ -2895,6 +3052,13 @@ namespace CostumeFW
             CanonicalizeColonId(content);
             if (IsTokenColonId(content)) {
                 SKSE::log::warn("boxes: AddBox rejects CEF-own id '{}' as content", content);
+                return false;
+            }
+            // v1.3.2 capture gate: the native / preset / hand-edited-JSON routes
+            // reach here unchecked (the pickers pre-filter, the UIs pre-gate).
+            std::string why;
+            if (!CanCaptureContent(content, &why)) {
+                SKSE::log::warn("boxes: AddBox rejects '{}' - {}", content, why);
                 return false;
             }
             const std::string holder = ContentHolder(content);

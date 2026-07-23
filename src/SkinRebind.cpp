@@ -1512,7 +1512,10 @@ namespace CostumeFW
         if (!ParseColonId(a_id, localID, plugin)) {
             return false;  // unparseable - leave it for the resolver to reject
         }
-        char buf[8]{};
+        // buf sized for 8-digit runtime (0xFF) local ids - %06X is a minimum
+        // width, and the old char[8] truncated those (v1.3.2, parity with
+        // MakeColonId). Normal 6-digit ids are byte-identical before/after.
+        char buf[16]{};
         std::snprintf(buf, sizeof(buf), "%06X", localID);
         std::string canon = std::string(buf) + ":" + plugin;
         if (canon == a_id) {

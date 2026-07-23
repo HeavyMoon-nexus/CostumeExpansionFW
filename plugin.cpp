@@ -19,6 +19,8 @@
 #include "RE/T/TESContainerChangedEvent.h"
 #include "RE/T/TESEquipEvent.h"
 
+#include <Windows.h>  // GetModuleHandleW (MARA co-presence triage line)
+
 namespace
 {
     // Re-attach our injected meshes whenever the engine rebuilds the player 3D
@@ -132,6 +134,17 @@ namespace
             CostumeFW::BodyMorph::RequestInterface();
             break;
         case SKSE::MessagingInterface::kDataLoaded:
+            // Compat triage line: MARA (Nexus 173949) keeps runtime-created
+            // utility armors ("CORE Carrier") in the inventory that crash
+            // third-party UIs on touch; CEF's capture surface skips that class
+            // (v1.3.2 blacklist, MARA_COMPAT_PLAN.md). One info line so support
+            // reports show the co-presence at a glance. Filename check only -
+            // no behavior branches on it.
+            if (::GetModuleHandleW(L"MARA.dll") != nullptr) {
+                SKSE::log::info(
+                    "compat: MARA.dll detected - runtime/utility armors are hidden "
+                    "from the capture pickers (capture blacklist)");
+            }
             Load3DHook::Install();
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration
             CostumeFW::InstallConsoleHook();

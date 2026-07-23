@@ -276,7 +276,10 @@ namespace CostumeFW
         // capture BEFORE it moves the physical item.
         bool CanResolveContentNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
         {
-            return CanResolveContent(a_content.c_str());
+            // v1.3.2: the Papyrus-visible name stays "CanResolveContent" (no .psc
+            // recompile needed), but the semantic is the full capture gate -
+            // blacklist first (MARA_COMPAT_PLAN.md §3), then mesh resolvability.
+            return CanCaptureContent(a_content.c_str());
         }
 
         // Create an empty box auto-assigning the next free pool token (def-only,

@@ -108,8 +108,9 @@ namespace CostumeFW::SmfUI
                 s_status = std::format("already captured in {} - item not moved", HolderLabel(holder));
                 return;
             }
-            if (!CanResolveContent(a_id)) {
-                s_status = "this item's mesh could not be resolved - not captured (see log)";
+            std::string why;
+            if (!CanCaptureContent(a_id, &why)) {  // v1.3.2: blacklist + resolvability
+                s_status = why;
                 return;
             }
             s_status = UiOps::ContentHasScript(a_id)
@@ -143,8 +144,9 @@ namespace CostumeFW::SmfUI
                 s_status = std::format("already captured in {} - item not moved", HolderLabel(holder));
                 return;
             }
-            if (!CanResolveContent(a_id)) {
-                s_status = "this item's mesh could not be resolved - not captured (see log)";
+            std::string why;
+            if (!CanCaptureContent(a_id, &why)) {  // v1.3.2: blacklist + resolvability
+                s_status = why;
                 return;
             }
             s_status = UiOps::ContentHasScript(a_id)
