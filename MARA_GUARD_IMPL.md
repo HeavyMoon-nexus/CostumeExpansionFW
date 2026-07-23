@@ -1,14 +1,47 @@
 # v1.3.2 実装記録 — MARA 捕獲ブラックリスト(敵対的レビュー用)
 
-> ステータス: **r2 = レビュー全指摘対応済み・再パッケージ済み(2026-07-23)**。
+> ステータス: **r3 = 再レビュー全指摘対応済み・再パッケージ済み(2026-07-23)**。
 > ブランチ: `mara-guard-v1.3.2`(base = `main` @ 6877530 = v1.3.1)。
 > コミット列: `bf8883b` docs → `f09bf40` L1 → `fae79b2` L2 → `0e00f85` L3 →
-> `a8ca5c5` release cut → **`d1bf735` レビュー r2 修正**(§R)。
+> `a8ca5c5` release cut → `d1bf735` レビュー r2 修正(§R)→ `49f91a4` r2 docs →
+> **`cac79ca` 再レビュー r3 修正**(§R2)。
 > 敵対的レビュー = [MARA_GUARD_ADVERSARIAL_REVIEW.md](MARA_GUARD_ADVERSARIAL_REVIEW.md)
-> (リリース停止勧告・P1×5 + P2×1)→ **全件 CONFIRMED として受理し修正**。
-> §1〜§4 は r1 時点の記録として保存し、r2 で無効になった記述には(r2 修正)を付す。
+> (P1×5+P2×1 → r2 で全件修正)/ 再レビュー =
+> [MARA_GUARD_ADVERSARIAL_REREVIEW.md](MARA_GUARD_ADVERSARIAL_REREVIEW.md)
+> (初回修正は全て確認済み・残 P1×2+P2×2+P3×1 → **r3 で全件修正**)。
+> §1〜§4 は r1 時点の記録として保存し、以後の修正で無効になった記述には
+> (r2 修正)/(r3 修正)を付す。
 > 設計根拠: [MARA_COMPAT_PLAN.md](MARA_COMPAT_PLAN.md) §3 / 検証根拠:
 > [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)。
+
+---
+
+## §R2. 敵対的再レビュー対応(r3・コミット cac79ca)
+
+再レビューの判定「初回 8 findings は修正確認・残 5 件」を受理し、**残 5 件を全て修正**。
+
+| Finding | 対応(cac79ca) |
+|---|---|
+| **P1-1 最終選択 ARMA 未検査** | `ResolveArmaModels` が **ARMA 確定直後・bipedModels 読取り前**に hard+plugin 層(`IsDynamicForm`/defining-file/`PluginDenied`)を選択 ARMA 自体へ適用。**判定と使用が同一関数・同一ポインタ**なので check/use ギャップ無し(レビュー提案の AdmissionResult 持ち回りより強い一点化)。ケース A(許可 ARMO→deny plugin の ARMA)/ケース B(runtime ARMA 差し替え)とも遮断。resolver の全呼び出し元(picker gate・登録境界・注入・shape 列挙)に自動継承。carrier manifest 側は独自 resolve だが AdmittedContents フィルタ(下記)が同じ結論を先に適用する |
+| **P1-2 quarantine が登録抑止どまり** | ① `IsContentAdmissible` に quiet モード(`a_log=false`)を追加し、`AdmittedContents()` スナップショットフィルタを**全派生読者**へ: `SetTokenStats`・`ApplyKeywordsToToken`・`BuildEnchantSpell`(box/persist アビリティの単一チョーク)・`WriteCarrierManifest`(boxes+persist actives)・`BoxStatsSummary`(SMF 表示)。② policy 変更(entry 追加/削除・スイッチ)後に `ReevaluateContentAdmissions()` = `ReloadSettingsFromDisk`(実戦済みプリミティブ: 全 active detach → gated 再登録 → persist active 復元 → Reconcile → アビリティ/manifest 再構築)。**blocked-active は即 detach、解除時は自動再 admit、設定と co-save は常に保持**。ログは gate のみ loud・派生フィルタは無音(per-frame スパム無し) |
+| **P2-1 公開 `InjectArma` 迂回** | 匿名 ns の `InjectArmaUnchecked` プリミティブ + gated 公開ラッパへ分離。`cef inject`/self-test は **実際に注入する local/plugin から合成した colon-id** で admission(bare label "test" では素通りしない)。`InjectArmaById` は一度 admit して直接プリミティブ呼び(二重ログ回避) |
+| **P2-2 公開 `CaptureEnchant` native 未ゲート** | 関数境界に `IsContentAdmissible`(上位の pre-gate は UX、関数自身が強制 — 二重化) |
+| **P3-1 CTest 未登録** | `include(CTest)` + `add_test(capture_policy)`。検証: `ctest --test-dir build/release` → **1/1 Passed(43 checks)** |
+
+**挙動ノート(r3)**:
+- blocked-**ARMA** 経由の content は picker/gate では「mesh could not be resolved」側の
+  文言で拒否される(ResolveArmaModels が false を返すため)。ブロック理由そのものは
+  `ResolveArma: ... refused` の warn ログに出る — UI 文言の層別化は次版課題。
+- `ReevaluateContentAdmissions` = フル reload なので、blacklist 編集時に表示中衣装が
+  一瞬 re-attach される(既存の「Reload settings from disk」と同一挙動・ユーザー操作
+  時のみ)。
+- 再レビュー §4 の `git diff --check` 警告(初回レビュー md の hard-break 末尾空白)は
+  **レビュー文書を原文保存する方針**のため未修正(実装コードに trailing whitespace は無い)。
+
+再検証(r3): `/W4` ビルド緑・`ctest` 1/1(43 checks)・再パッケージ差分 =
+1.3.1 + `CostumeFW_NoCapture_KID.ini` のみ(552→553 files)。
+**未了のまま残るのは実機系のみ**(再レビュー §5 の MARA 実機 5 手順・runtime fixture・
+VR smoke — 静的には閉じたが、リリース最終判定はこの実機確認後)。
 
 ---
 

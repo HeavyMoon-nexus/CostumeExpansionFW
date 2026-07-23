@@ -33,9 +33,17 @@
   new host-side unit-test target (`policy_tests`, dev-only).
 - Startup logs `compat: MARA.dll detected` when MARA is present (triage aid;
   no behavior branches on it).
-- All of the above hardened per an adversarial review
-  (`MARA_GUARD_ADVERSARIAL_REVIEW.md` — all findings accepted; response in
-  `MARA_GUARD_IMPL.md` §R).
+- All of the above hardened per an adversarial review and re-review
+  (`MARA_GUARD_ADVERSARIAL_REVIEW.md` / `..._REREVIEW.md` — all findings
+  accepted; responses in `MARA_GUARD_IMPL.md` §R/§R2). Re-review round adds:
+  the **selected ARMA** itself passes the hard/plugin layers inside
+  `ResolveArmaModels` (a permitted ARMO cannot smuggle a denied or runtime
+  ARMA); **full quarantine** — stats/keywords/abilities/carrier manifest/UI
+  summaries all skip blocked-but-configured contents, and a blacklist edit
+  immediately detaches newly-blocked actives (and re-admits freed ones)
+  without touching the stored config; the raw `cef inject` console path and
+  the public `CaptureEnchant` native now pass the same admission; the policy
+  unit tests are CTest-registered.
 
 ### Fixed
 - **The picker CTD mechanism itself.** `TESForm::GetLocalFormID()`

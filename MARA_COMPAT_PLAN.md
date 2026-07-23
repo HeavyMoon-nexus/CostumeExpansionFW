@@ -1,6 +1,6 @@
 # MARA 互換問題 — 捕獲ブラックリスト設計・実装計画
 
-> ステータス: **v1.3.2 実装完了 + 敵対的レビュー r2 対応済み(2026-07-23)** — 実装記録 =
+> ステータス: **v1.3.2 実装完了 + 敵対的レビュー r2/再レビュー r3 対応済み(2026-07-23)** — 実装記録 =
 > [MARA_GUARD_IMPL.md](MARA_GUARD_IMPL.md)(§R = レビュー対応)/検証 =
 > [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)/レビュー =
 > [MARA_GUARD_ADVERSARIAL_REVIEW.md](MARA_GUARD_ADVERSARIAL_REVIEW.md)(全指摘受理)。

@@ -29,6 +29,9 @@
 正規 plugin レコードが参照する破損 NIF の安全性は保証しない**」。C1 の legacy-NIF 面は
 残余(§4.1 — BSA 内 NIF は事前検証不能のため、恒久策はレビュー §4 の VFS+隔離 validator 案を
 次版検討)。
+**r3 追記(2026-07-23)**: 再レビュー残 5 件(最終 ARMA 未検査/quarantine 不完全/
+raw inject・enchant native/CTest)も cac79ca で全て修正 — 静的な残余は C1 legacy-NIF
+面のみ、最終判定は実機確認(§5 + 再レビュー §6.2)後。
 **r2 追記(2026-07-23)**: 敵対的レビューにより **H1 の機械的正体が確定** —
 `TESForm::GetLocalFormID()` は `GetFile(0)` を無条件デリファレンスする(TESForm.h:292-300)。
 v1.3.1 の `WornArmors()` は全外部装備に `MakeColonId` を呼ぶため、動的フォーム(CORE
