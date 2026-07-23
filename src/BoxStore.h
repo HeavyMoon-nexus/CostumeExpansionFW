@@ -254,6 +254,9 @@ namespace CostumeFW
     // and - with a_log=false (re-review P1-2) - by the derived processors
     // (stats/keywords/abilities/carrier manifest/UI summaries), which must
     // skip blocked contents without spamming per-item refusal logs.
+    bool IsContentAdmissible(const std::string& a_id,
+        const policy::CapturePolicy& a_policy, std::string* a_why = nullptr,
+        bool a_log = true);
     bool IsContentAdmissible(const std::string& a_id, std::string* a_why = nullptr,
         bool a_log = true);
     // The semantic capture gate: IsContentAdmissible + mesh resolvability

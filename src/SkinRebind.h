@@ -12,6 +12,11 @@ namespace RE
 
 namespace CostumeFW
 {
+    namespace policy
+    {
+        struct CapturePolicy;
+    }
+
     // One persisted active item: its content id and (for box items) the box
     // token's colon-form id (empty for persist items).
     struct ActiveItemInfo
@@ -83,12 +88,13 @@ namespace CostumeFW
     // the SAME NIF the injection shows (review 2026-07-07 P2).
     RE::SEX EffectiveSexFor(const std::string& a_id);
 
-    // The ARMA of an ARMO best matching the PLAYER's race: exact race match
-    // first, then additionalRaces membership, then the first addon (data
-    // order). Null when the ARMO has no addons. Replaces bare
-    // armorAddons.front(), which picked race-/sex-specific addon lists wrong
-    // (review item 6). Used by injection AND the carrier manifest.
-    RE::TESObjectARMA* PickAddonForPlayer(RE::TESObjectARMO* a_armo);
+    // Resolve a content id through the same base-form + selected-ARMA admission
+    // used by registration/injection and return the admitted 3P NIF path.
+    // The caller supplies one immutable policy generation for the whole
+    // operation; false means blocked or unresolved. Main thread only.
+    bool ResolveAdmittedModelPath(const std::string& a_contentId, RE::SEX a_sex,
+        const policy::CapturePolicy& a_policy, std::string& a_nifOut,
+        bool a_log = true);
 
     // Run a_fn on the main thread after (at least) a_ms milliseconds, via the
     // SKSE task queue (re-posts until the deadline; hop rate is NOT frame-locked).

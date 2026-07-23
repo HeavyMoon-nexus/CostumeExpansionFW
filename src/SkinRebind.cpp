@@ -944,7 +944,8 @@ namespace CostumeFW
 
         // --- Substitute body (dual injection, HANDOVER §8.4 strategy 2) ----------
         bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
-            ModelRef& a_out3p, ModelRef& a_out1p);  // fwd (defined below)
+            const policy::CapturePolicy& a_policy, ModelRef& a_out3p, ModelRef& a_out1p,
+            bool a_log = true);  // fwd (defined below)
 
         constexpr const char* kRealBodyNode = "CEF_RealBody";
 
@@ -1207,73 +1208,157 @@ namespace CostumeFW
             return policy::ParseColonId(a_id, a_localID, a_plugin);
         }
 
-        // Resolve an ARMA (or ARMO -> its race-matched ARMA) to the 3P + 1P models
-        // (NIF path + alternate-texture swap) for the requested body sex. If that
-        // sex has no model, falls back to the other sex so a single-sex-authored
-        // accessory still shows (e.g. a female-only nail mesh on a male PC). False
-        // if neither sex has a 3P model / the form isn't ARMA/ARMO.
+        // Candidate-level hard admission. Nothing beyond formID/sourceFiles is
+        // read until this returns a defining file. This is the r4 safety border
+        // for foreign runtime/half-built ARMA pointers.
+        const RE::TESFile* AdmitArmaSource(RE::TESObjectARMA* a_arma,
+            const policy::CapturePolicy& a_policy, std::uint32_t a_localID,
+            const std::string& a_plugin, bool a_log)
+        {
+            if (!a_arma) {
+                return nullptr;
+            }
+            if (a_arma->IsDynamicForm()) {
+                if (a_log) {
+                    SKSE::log::warn("ResolveArma: {:X}:{} skips runtime ARMA {:08X}",
+                        a_localID, a_plugin, a_arma->GetFormID());
+                }
+                return nullptr;
+            }
+            const auto* file = a_arma->GetFile(0);
+            if (!file) {
+                if (a_log) {
+                    SKSE::log::warn("ResolveArma: {:X}:{} skips no-file ARMA {:08X}",
+                        a_localID, a_plugin, a_arma->GetFormID());
+                }
+                return nullptr;
+            }
+            if (policy::PluginDenied(a_policy, file->GetFilename())) {
+                if (a_log) {
+                    SKSE::log::warn(
+                        "ResolveArma: {:X}:{} skips ARMA {:08X} from deny-listed plugin '{}'",
+                        a_localID, a_plugin, a_arma->GetFormID(), file->GetFilename());
+                }
+                return nullptr;
+            }
+            return file;
+        }
+
+        // Exact race, additional race, then data-order fallback - identical to
+        // the old picker, but only among candidates that passed hard admission.
+        RE::TESObjectARMA* PickAdmittedAddonForPlayer(RE::TESObjectARMO* a_armo,
+            const policy::CapturePolicy& a_policy, std::uint32_t a_localID,
+            const std::string& a_plugin, bool a_log)
+        {
+            if (!a_armo || a_armo->armorAddons.empty()) {
+                return nullptr;
+            }
+            std::vector<RE::TESObjectARMA*> admitted;
+            admitted.reserve(a_armo->armorAddons.size());
+            for (auto* addon : a_armo->armorAddons) {
+                if (AdmitArmaSource(addon, a_policy, a_localID, a_plugin, a_log)) {
+                    admitted.push_back(addon);
+                }
+            }
+            if (admitted.empty()) {
+                return nullptr;
+            }
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* race = player ? player->GetRace() : nullptr;
+            if (race) {
+                for (auto* addon : admitted) {
+                    if (addon->race == race) {
+                        return addon;
+                    }
+                }
+                for (auto* addon : admitted) {
+                    for (auto* extra : addon->additionalRaces) {
+                        if (extra == race) {
+                            return addon;
+                        }
+                    }
+                }
+            }
+            return admitted.front();
+        }
+
+        // Resolve an ARMA (or ARMO -> its race-matched admitted ARMA) to the
+        // 3P + 1P models. Every caller supplies one immutable policy generation.
         bool ResolveArmaModels(std::uint32_t a_localID, const std::string& a_plugin, RE::SEX a_sex,
-            ModelRef& a_out3p, ModelRef& a_out1p)
+            const policy::CapturePolicy& a_policy, ModelRef& a_out3p, ModelRef& a_out1p,
+            bool a_log)
         {
             auto* dh = RE::TESDataHandler::GetSingleton();
             if (!dh) {
                 return false;
             }
             RE::TESObjectARMA* arma = dh->LookupForm<RE::TESObjectARMA>(a_localID, a_plugin);
-            if (!arma) {
-                if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
-                    arma = PickAddonForPlayer(armo);
+            const RE::TESFile* armaFile = nullptr;
+            if (arma) {
+                armaFile = AdmitArmaSource(arma, a_policy, a_localID, a_plugin, a_log);
+                if (!armaFile) {
+                    return false;
+                }
+            } else if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
+                arma = PickAdmittedAddonForPlayer(
+                    armo, a_policy, a_localID, a_plugin, a_log);
+                if (arma) {
+                    // The candidate picker returned it only after this succeeded.
+                    armaFile = arma->GetFile(0);
                 }
             }
-            if (!arma) {
-                SKSE::log::error("ResolveArma: {:X}:{} is not ARMA/ARMO", a_localID, a_plugin);
+            if (!arma || !armaFile) {
+                if (a_log) {
+                    SKSE::log::error(
+                        "ResolveArma: {:X}:{} has no admitted ARMA", a_localID, a_plugin);
+                }
                 return false;
             }
-            // v1.3.2 r3 (re-review P1-1): the form whose bipedModels this
-            // function reads NEXT is the SELECTED ARMA - not necessarily the
-            // form the admission gate inspected. A permitted ARMO can
-            // reference a denied plugin's ARMA (case A), and a foreign DLL
-            // can swap a static ARMO's armorAddons to a runtime/half-built
-            // ARMA (case B). Enforce the hard + plugin layers HERE, on the
-            // same pointer that is read below - judge and use share one
-            // function, so there is no check/use gap to exploit.
-            if (arma->IsDynamicForm()) {
-                SKSE::log::warn("ResolveArma: {:X}:{} selects a runtime ARMA {:08X} - refused",
-                    a_localID, a_plugin, arma->GetFormID());
-                return false;
-            }
-            const auto* armaFile = arma->GetFile(0);
-            if (!armaFile) {
-                SKSE::log::warn("ResolveArma: {:X}:{} selects a no-file ARMA {:08X} - refused",
-                    a_localID, a_plugin, arma->GetFormID());
-                return false;
-            }
-            if (policy::PluginDenied(*CapturePolicySnapshot(), armaFile->GetFilename())) {
-                SKSE::log::warn("ResolveArma: {:X}:{} selects ARMA from deny-listed plugin '{}' - refused",
-                    a_localID, a_plugin, armaFile->GetFilename());
-                return false;
-            }
-            const auto sexName = [](RE::SEX s) { return s == RE::SEXES::kMale ? "male" : "female"; };
 
+            // r4 final identity layer: a wrapper ARMO may be allowed while its
+            // selected addon is explicitly denied. GetLocalFormID is safe only
+            // after the defining-file guard above.
+            if (!a_policy.ids.empty()) {
+                const std::string armaId = policy::FormatColonId(
+                    arma->GetLocalFormID(), armaFile->GetFilename());
+                if (policy::IdDenied(a_policy, armaId)) {
+                    if (a_log) {
+                        SKSE::log::warn(
+                            "ResolveArma: {:X}:{} selects deny-listed ARMA '{}' - refused",
+                            a_localID, a_plugin, armaId);
+                    }
+                    return false;
+                }
+            }
+
+            const auto sexName = [](RE::SEX s) {
+                return s == RE::SEXES::kMale ? "male" : "female";
+            };
             RE::SEX sex = a_sex;
             RE::TESModelTextureSwap* m3 = &arma->bipedModels[sex];
             RE::TESModelTextureSwap* m1 = &arma->bipedModel1stPersons[sex];
             const char* nif3p = m3->model.c_str();
             if (!nif3p || !*nif3p) {
-                // Requested sex has no 3P model - fall back to the other sex.
-                const RE::SEX other = (sex == RE::SEXES::kMale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
+                const RE::SEX other =
+                    (sex == RE::SEXES::kMale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
                 RE::TESModelTextureSwap* o3 = &arma->bipedModels[other];
                 const char* on = o3->model.c_str();
                 if (on && *on) {
-                    SKSE::log::warn("ResolveArma: {:X}:{} has no {} 3P model, using {} model",
-                        a_localID, a_plugin, sexName(sex), sexName(other));
+                    if (a_log) {
+                        SKSE::log::warn(
+                            "ResolveArma: {:X}:{} has no {} 3P model, using {} model",
+                            a_localID, a_plugin, sexName(sex), sexName(other));
+                    }
                     sex = other;
                     m3 = o3;
                     m1 = &arma->bipedModel1stPersons[other];
                     nif3p = m3->model.c_str();
                 } else {
-                    SKSE::log::error("ResolveArma: {:X}:{} has no 3P model for either sex",
-                        a_localID, a_plugin);
+                    if (a_log) {
+                        SKSE::log::error(
+                            "ResolveArma: {:X}:{} has no 3P model for either sex",
+                            a_localID, a_plugin);
+                    }
                     return false;
                 }
             }
@@ -1396,6 +1481,7 @@ namespace CostumeFW
             g_rebindRetryBudget = kRebindRetryBudget;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
+        const auto pol = CapturePolicySnapshot();  // one generation for the whole pass
         const bool cefOn = CefEnabled();  // master off (Main page) -> hide everything
         SKSE::log::info("Reconcile: {} active item(s) (cef enabled={})", g_active.size(), cefOn);
         bool anyRealBody = false;   // set if a shown content wants the real body under it
@@ -1438,7 +1524,7 @@ namespace CostumeFW
                     std::string plg;
                     ModelRef m3p, m1p;
                     if (ParseColonId(it.id, lid, plg) &&
-                        ResolveArmaModels(lid, plg, sex, m3p, m1p)) {
+                        ResolveArmaModels(lid, plg, sex, *pol, m3p, m1p)) {
                         it.m3p = m3p;
                         it.m1p = m1p;
                     }
@@ -1494,33 +1580,6 @@ namespace CostumeFW
         return false;
     }
 
-    RE::TESObjectARMA* PickAddonForPlayer(RE::TESObjectARMO* a_armo)
-    {
-        if (!a_armo || a_armo->armorAddons.empty()) {
-            return nullptr;
-        }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        auto* race = player ? player->GetRace() : nullptr;
-        if (race) {
-            for (auto* aa : a_armo->armorAddons) {
-                if (aa && aa->race == race) {
-                    return aa;
-                }
-            }
-            for (auto* aa : a_armo->armorAddons) {
-                if (!aa) {
-                    continue;
-                }
-                for (auto* extra : aa->additionalRaces) {
-                    if (extra == race) {
-                        return aa;
-                    }
-                }
-            }
-        }
-        return a_armo->armorAddons.front();
-    }
-
     bool CanonicalizeColonId(std::string& a_id)
     {
         // Delegates to the pure policy module (r2: single source of truth for
@@ -1528,15 +1587,34 @@ namespace CostumeFW
         return policy::CanonicalizeColonIdStr(a_id);
     }
 
-    bool CanResolveContent(const std::string& a_contentId)
+    bool ResolveAdmittedModelPath(const std::string& a_contentId, RE::SEX a_sex,
+        const policy::CapturePolicy& a_policy, std::string& a_nifOut, bool a_log)
     {
+        // One policy generation covers both the content's base form and the
+        // selected addon. This is the only seam carrier-manifest code may use.
+        if (!IsContentAdmissible(a_contentId, a_policy, nullptr, a_log)) {
+            return false;
+        }
         std::uint32_t localID = 0;
         std::string plugin;
         if (!ParseColonId(a_contentId, localID, plugin)) {
             return false;
         }
         ModelRef m3p, m1p;
-        return ResolveArmaModels(localID, plugin, EffectiveSex(a_contentId), m3p, m1p);
+        if (!ResolveArmaModels(
+                localID, plugin, a_sex, a_policy, m3p, m1p, a_log)) {
+            return false;
+        }
+        a_nifOut = m3p.nifPath;
+        return true;
+    }
+
+    bool CanResolveContent(const std::string& a_contentId)
+    {
+        const auto pol = CapturePolicySnapshot();
+        std::string nif;
+        return ResolveAdmittedModelPath(
+            a_contentId, EffectiveSex(a_contentId), *pol, nif);
     }
 
     std::vector<std::pair<std::string, int>> EnumerateContentShapes(const std::string& a_id)
@@ -1546,16 +1624,12 @@ namespace CostumeFW
         // the MCM's GetContentShapes can read it without a VM-thread NIF load. Empty
         // on failure. LoadNif returns the shared cached model - read-only traversal.
         std::vector<std::pair<std::string, int>> out;
-        std::uint32_t localID = 0;
-        std::string plugin;
-        if (!ParseColonId(a_id, localID, plugin)) {
+        const auto pol = CapturePolicySnapshot();
+        std::string nif;
+        if (!ResolveAdmittedModelPath(a_id, EffectiveSex(a_id), *pol, nif)) {
             return out;
         }
-        ModelRef m3p, m1p;
-        if (!ResolveArmaModels(localID, plugin, EffectiveSex(a_id), m3p, m1p)) {
-            return out;
-        }
-        auto loaded = LoadNif(StripMeshesPrefix(m3p.nifPath));
+        auto loaded = LoadNif(StripMeshesPrefix(nif));
         if (!loaded) {
             return out;
         }
@@ -1593,8 +1667,9 @@ namespace CostumeFW
         // upstream capture gates are UX; this is the enforcement line. On
         // refusal the configured id is KEPT (quarantine-lite): it stays in
         // settings/co-save, is simply never registered, one log line.
+        const auto pol = CapturePolicySnapshot();
         std::string why;
-        if (!IsContentAdmissible(cid, &why)) {
+        if (!IsContentAdmissible(cid, *pol, &why)) {
             SKSE::log::warn(
                 "register: box content '{}' not admitted - {} (config kept, not registered)",
                 cid, why);
@@ -1607,7 +1682,7 @@ namespace CostumeFW
         }
         const RE::SEX sex = EffectiveSex(cid);
         ModelRef m3p, m1p;
-        if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
+        if (!ResolveArmaModels(localID, plugin, sex, *pol, m3p, m1p)) {
             return false;
         }
         const RE::FormID tokenForm = ResolveFormID(tid);
@@ -2207,15 +2282,16 @@ namespace CostumeFW
 
     namespace
     {
-        // Unchecked primitive (re-review P2-1): resolve + register + inject
-        // with NO admission of its own. Reachable ONLY through the gated
-        // wrappers below - never expose it in a header.
+        // Unchecked primitive (re-review P2-1): base admission is owned by the
+        // wrapper, while selected-ARMA admission remains mandatory inside the
+        // resolver. The SAME immutable policy generation is passed through.
         bool InjectArmaUnchecked(std::uint32_t a_localID, const std::string& a_plugin,
-            const std::string& a_id)
+            const std::string& a_id, const policy::CapturePolicy& a_policy)
         {
             const RE::SEX sex = EffectiveSex(a_id);
             ModelRef m3p, m1p;
-            if (!ResolveArmaModels(a_localID, a_plugin, sex, m3p, m1p)) {
+            if (!ResolveArmaModels(
+                    a_localID, a_plugin, sex, a_policy, m3p, m1p)) {
                 return false;
             }
             SKSE::log::info("InjectArma {:X}:{} 3p='{}' 1p='{}'",
@@ -2227,33 +2303,28 @@ namespace CostumeFW
 
     bool InjectArma(std::uint32_t a_localID, const std::string& a_plugin, const std::string& a_id)
     {
-        // v1.3.2 r3 (re-review P2-1): the public injection entrance passes
-        // admission - console `cef inject` and the self-test route through
-        // here. a_id may be a bare label ("test"), so the admission id is
-        // synthesized from the actual local/plugin pair being injected.
+        // Public console/self-test entrance: admit the actual form identity,
+        // not the caller's optional registry label.
+        const auto pol = CapturePolicySnapshot();
         const std::string cid = policy::FormatColonId(a_localID, a_plugin);
         std::string why;
-        if (!IsContentAdmissible(cid, &why)) {
-            SKSE::log::warn("register: inject '{}' not admitted - {} (not registered)", cid, why);
+        if (!IsContentAdmissible(cid, *pol, &why)) {
+            SKSE::log::warn(
+                "register: inject '{}' not admitted - {} (not registered)", cid, why);
             return false;
         }
-        return InjectArmaUnchecked(a_localID, a_plugin, a_id);
+        return InjectArmaUnchecked(a_localID, a_plugin, a_id, *pol);
     }
 
     bool RegisterArmaById(const std::string& a_id)
     {
-        // Parse the colon-form id "XXXXXX:Plugin.esp", resolve + register WITHOUT
-        // injecting (used by the co-save load callback; ReattachAll injects later).
-        // ROOT D: canonicalize first so a pre-fix co-save's non-canonical id lands
-        // under the same registry key the (canonical) catalog uses.
+        // Co-save restore keeps unresolved/blocked ids via ROOT H. Canonicalize
+        // the registry key, but never delete the configured/co-save entry.
         std::string cid = a_id;
         CanonicalizeColonId(cid);
-        // v1.3.2 r2 hard admission (review P1-3) - see RegisterBoxById. A
-        // refusal here lands in the caller's fail-soft path (co-save restore
-        // preserves the id as unresolved - ROOT H), which is exactly the
-        // quarantine contract: kept, not registered.
+        const auto pol = CapturePolicySnapshot();
         std::string why;
-        if (!IsContentAdmissible(cid, &why)) {
+        if (!IsContentAdmissible(cid, *pol, &why)) {
             SKSE::log::warn(
                 "register: persist content '{}' not admitted - {} (config kept, not registered)",
                 cid, why);
@@ -2264,12 +2335,10 @@ namespace CostumeFW
         if (!ParseColonId(cid, localID, plugin)) {
             return false;
         }
-        // Effective sex, not raw player sex (review round 4): the co-save
-        // restore runs after the settings load, so the per-content forced
-        // gender is known - PlayerSex() here made a forced NIF revert on load.
         const RE::SEX sex = EffectiveSex(cid);
         ModelRef m3p, m1p;
-        if (!ResolveArmaModels(localID, plugin, sex, m3p, m1p)) {
+        if (!ResolveArmaModels(
+                localID, plugin, sex, *pol, m3p, m1p)) {
             return false;
         }
         Register(cid, m3p, m1p, {}, 0, sex);
@@ -2278,35 +2347,24 @@ namespace CostumeFW
 
     bool InjectArmaById(const std::string& a_id)
     {
-        // Parse the colon-form id "XXXXXX:Plugin.esp", resolve + register + inject
-        // as a persist item (no box token). The Papyrus RegisterPersist() path.
-        // v1.3.2 r2 hard admission (review P1-3) - see RegisterBoxById.
-        {
-            std::string cid = a_id;
-            CanonicalizeColonId(cid);
-            std::string why;
-            if (!IsContentAdmissible(cid, &why)) {
-                SKSE::log::warn(
-                    "register: inject '{}' not admitted - {} (not registered)", cid, why);
-                return false;
-            }
-        }
-        const auto colon = a_id.find(':');
-        if (colon == std::string::npos) {
+        // Papyrus RegisterPersist entrance: one policy generation covers base
+        // admission and the selected addon all the way into the primitive.
+        std::string cid = a_id;
+        CanonicalizeColonId(cid);
+        const auto pol = CapturePolicySnapshot();
+        std::string why;
+        if (!IsContentAdmissible(cid, *pol, &why)) {
+            SKSE::log::warn(
+                "register: inject '{}' not admitted - {} (not registered)", cid, why);
             return false;
         }
         std::uint32_t localID = 0;
-        try {
-            localID = static_cast<std::uint32_t>(std::stoul(a_id.substr(0, colon), nullptr, 16));
-        } catch (...) {
+        std::string plugin;
+        if (!ParseColonId(cid, localID, plugin)) {
             return false;
         }
-        // Already admitted above on the full id - go straight to the
-        // unchecked primitive (the public InjectArma would re-admit on a
-        // synthesized id; harmless but redundant).
-        return InjectArmaUnchecked(localID, a_id.substr(colon + 1), a_id);
+        return InjectArmaUnchecked(localID, plugin, cid, *pol);
     }
-
     std::vector<ActiveItemInfo> ActiveSnapshot()
     {
         std::vector<ActiveItemInfo> v;

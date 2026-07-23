@@ -1,18 +1,107 @@
 # v1.3.2 実装記録 — MARA 捕獲ブラックリスト(敵対的レビュー用)
 
-> ステータス: **r3 = 再レビュー全指摘対応済み・再パッケージ済み(2026-07-23)**。
+> ステータス: **r4 = R3残存P1修正・host検証済み、実機検証待ち(2026-07-23)**。
 > ブランチ: `mara-guard-v1.3.2`(base = `main` @ 6877530 = v1.3.1)。
 > コミット列: `bf8883b` docs → `f09bf40` L1 → `fae79b2` L2 → `0e00f85` L3 →
 > `a8ca5c5` release cut → `d1bf735` レビュー r2 修正(§R)→ `49f91a4` r2 docs →
-> **`cac79ca` 再レビュー r3 修正**(§R2)。
+> `cac79ca` 再レビュー r3 修正(§R2) → **r4 P1修正(§R3・本コミット)**。
 > 敵対的レビュー = [MARA_GUARD_ADVERSARIAL_REVIEW.md](MARA_GUARD_ADVERSARIAL_REVIEW.md)
 > (P1×5+P2×1 → r2 で全件修正)/ 再レビュー =
 > [MARA_GUARD_ADVERSARIAL_REREVIEW.md](MARA_GUARD_ADVERSARIAL_REREVIEW.md)
-> (初回修正は全て確認済み・残 P1×2+P2×2+P3×1 → **r3 で全件修正**)。
+> (r3の全件修正主張はR3レビューで否認 → r4でP1×2を修正。P2×2は基準A/B決定待ち)。
 > §1〜§4 は r1 時点の記録として保存し、以後の修正で無効になった記述には
-> (r2 修正)/(r3 修正)を付す。
+> (r2 修正)/(r3 修正)/(r4 修正)を付す。
 > 設計根拠: [MARA_COMPAT_PLAN.md](MARA_COMPAT_PLAN.md) §3 / 検証根拠:
 > [MARA_CRASH_CLASS_AUDIT.md](MARA_CRASH_CLASS_AUDIT.md)。
+
+---
+
+## §R3. 第三次敵対的レビュー対応(r4・本コミット)
+
+[MARA_GUARD_ADVERSARIAL_REREVIEW_R3.md](MARA_GUARD_ADVERSARIAL_REREVIEW_R3.md) の
+P1-1/P1-2を受理し、[MARA_GUARD_R4_HANDOFF.md](MARA_GUARD_R4_HANDOFF.md) の
+限定スコープに従って修正した。P2-1(fake form graph全面ハーネス)と
+P2-2(NIF構造validator)は本ラウンドでは実装していない。
+
+### R4-1: selected ARMAのsafe resolver一元化
+
+- `src/SkinRebind.cpp` の候補選択を `PickAdmittedAddonForPlayer` へ置換。
+  各候補は `IsDynamicForm()` → `GetFile(0)` → `PluginDenied()` の順でhard判定し、
+  通過するまで `race` / `additionalRaces` / `bipedModels` を読まない。
+- race優先順位はadmitted候補内で従来どおり、exact race → additional race →
+  data-order先頭。該当sexの3P modelが空なら他sexへfallbackする既存挙動も維持。
+- 候補確定後、defining file確認済みの同じARMAからcanonical colon-idを作り、
+  final-ARMA自身へのexplicit `IdDenied()` を適用。
+- `ResolveAdmittedModelPath(content, sex, policy, out)` を唯一の公開model seamとして追加。
+  base-form admissionとselected-ARMA/model admissionへ同じimmutable policy世代を渡す。
+- carrier manifestの独自ARMO→ARMA resolverを削除し、このseamだけを使用。
+  registration、injection、shape scan、capture gate、manifestが同じ内部resolverへ合流する。
+- `AdmittedContents()` もbase-form booleanではなくsafe model seamを通すため、
+  allowed ARMO→denied-plugin/runtime/no-file/explicit-ID-denied ARMAは派生処理からも除外される。
+- raw `PickAddonForPlayer()` はheaderと実装から削除し、未検査ARMAを返す公開口をなくした。
+
+### R4-2: policy変更のquarantine transaction化
+
+`WriteJson(bool writeManifest = true)` とし、既存の捕獲・削除等はdefaultの従来挙動
+(settings保存→manifest→auto-sync)を維持した。blacklist mutator 3面だけを次の順序へ変更した。
+
+```text
+PublishPolicy(next)
+  → WriteJson(false)                 settings JSONのみ
+  → 全box RebuildBoxAbility(token)   playerから旧spell remove→cache erase
+  → ReloadSettingsFromDisk()         active detach、gated再登録、M2 persist復元
+  → stats/keywords/box+persist ability再構築
+  → WriteCarrierManifest()           admitted状態から最後に1回
+```
+
+これにより、quarantine前にmanifestが危険ARMAへ触る順序と、`g_boxSpells` が
+blocked content由来の旧abilityを保持する問題を解消した。
+`ReloadSettingsFromDisk()` のM2セマンティクス(カタログ外persist activeも復元)、
+設定/co-save保持、debounced head rebuild、manifest等値short-circuit、2秒auto-sync debounceは
+変更していない。
+
+### R4-3: testとhost検証
+
+pure policy testへselected-ARMA identityの3 checksを追加した。
+wrapper ARMOが許可でも、最終ARMAのpluginまたはcanonical IDが拒否される文字列層を確認する。
+RE依存fake graphはhandoff §0どおり対象外である。
+
+```text
+build.cmd release (SKYRIM_MODS_FOLDER=C:\tmp\cef_r4_deploy)
+  → /W4 build・link成功、新規warningなし
+ctest --test-dir build/release --output-on-failure
+  → 1/1 Passed
+policy_tests.exe
+  → 46 checks, 0 failures
+```
+
+`git diff --check` はclean。R3 P3-1のレビュー文書EOF空行はhandoffコミットで修正済みであり、
+本ラウンドでも再発させていない。package staging list、version、esp/pex/SEQ/meshesは変更なし。
+
+### 実機手動確認手順(r4完了判定用)
+
+1. 許可ARMO→deny plugin ARMA fixtureをbox/persistへ設定し、登録・注入・manifest・
+   stats/keywords/abilityの全てから拒否されることとwarn理由を確認する。
+2. 許可ARMOのaddonをruntime/no-file ARMAへ差し替えるfixtureで、picker/登録/manifest時に
+   CTDせず、candidate hard guardで拒否されることを確認する。
+3. 許可ARMO→static ARMAを用意し、最終ARMAのcolon-idだけをblacklistへ追加して拒否、
+   削除して自動復元されることを確認する。
+4. armor/weight、passthrough keyword、enchant abilityを持つcontentをworn boxでactiveにし、
+   blacklist追加直後にnode・registry・token stats/keywords・player ability・manifestから
+   同時に消えることを確認する。entry削除後は全て復元されることを確認する。
+5. 手順4の各policy操作でmanifest更新がquarantine後に最大1回であること、persist head rebuildが
+   debounceされ多重実行されないことをログで確認する。
+6. MARA導入環境の既存5手順、AE smoke、VR smoke、旧CEF crash frame消失を確認する。
+
+### リリース基準別の現在地
+
+- **基準A(MARA型runtime/no-file+deny対象事故の遮断)**: P1のコード修正とhost検証は完了。
+  出荷判定には上記実機確認が必要。
+- **基準B(他mod起因の類型CTDを広範防御)**: P2-1 fake form graphとP2-2 NIF validatorが
+  未実装。採用可否はプロジェクトオーナー判断であり、r4では決定しない。
+
+「静的に全クラッシュ面を閉じた」とは主張しない。r4が閉じるのは基準Aに属する
+R3 P1反例のコード経路であり、実機fixtureの証跡は未取得である。
 
 ---
 

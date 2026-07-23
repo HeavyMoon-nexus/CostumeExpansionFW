@@ -80,6 +80,18 @@ int main()
     CHECK(IdDenied(pol, "000d62:mara.esp"));        // CI
     CHECK(!IdDenied(pol, "000D63:MARA.esp"));
 
+    // --- r4 selected-ARMA identity matrix (pure policy portion) ---------------
+    // The wrapper ARMO may be allowed while its final addon is denied by source
+    // plugin or by the addon's own canonical colon-id.
+    CapturePolicy r4;
+    r4.disableDefaults = true;
+    r4.plugins.push_back("DeniedAddon");
+    r4.ids.push_back("000A42:AllowedAddon.esp");
+    CHECK(!PluginDenied(r4, "AllowedWrapper.esp") &&
+          PluginDenied(r4, "DeniedAddon.esp"));
+    CHECK(!IdDenied(r4, "000B00:AllowedWrapper.esp") &&
+          IdDenied(r4, "000A42:AllowedAddon.esp"));
+    CHECK(IdDenied(r4, FormatColonId(0xA42, "AllowedAddon.esp")));
     // --- ParseColonId ---------------------------------------------------------
     std::uint32_t local = 0;
     std::string plugin;

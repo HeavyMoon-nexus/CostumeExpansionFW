@@ -211,7 +211,7 @@ namespace CostumeFW
             return true;
         }
 
-        void WriteJson()
+        void WriteJson(bool a_writeManifest = true)
         {
             nlohmann::json doc;
             doc["schema"] = kSchema;
@@ -299,7 +299,9 @@ namespace CostumeFW
                 return;
             }
             SKSE::log::info("settings: wrote {} box def(s) (enabled={})", g_boxes.size(), g_cefEnabled);
-            WriteCarrierManifest();
+            if (a_writeManifest) {
+                WriteCarrierManifest();
+            }
         }
 
         // The single plugin that ships every CEF record (v1.2.1: the old
@@ -447,14 +449,22 @@ namespace CostumeFW
         // r3 (re-review P1-2): the quiet admitted-contents snapshot every
         // derived processor iterates INSTEAD of raw box.contents / persist
         // actives - a configured-but-blocked (quarantined) content must not
-        // be read by stats/keyword/ability/manifest/UI code either. Loud
+        // be read by stats/keyword/ability/UI code either. Manifest uses the
+        // same safe resolver directly. Loud
         // refusal logs stay at the explicit gates; this filter is silent.
         std::vector<std::string> AdmittedContents(const std::vector<std::string>& a_ids)
         {
+            // r4: base-form admission alone is insufficient for ARMO content:
+            // its race-selected ARMA may be runtime/no-file/deny-listed. Resolve
+            // every id through the shared safe model seam with ONE policy
+            // generation for the whole derived-processing operation.
+            const auto pol = CapturePolicySnapshot();
             std::vector<std::string> out;
             out.reserve(a_ids.size());
             for (const auto& id : a_ids) {
-                if (IsContentAdmissible(id, nullptr, false)) {
+                std::string nif;
+                if (ResolveAdmittedModelPath(
+                        id, EffectiveSexFor(id), *pol, nif, false)) {
                     out.push_back(id);
                 }
             }
@@ -463,47 +473,16 @@ namespace CostumeFW
 
         void WriteCarrierManifest()
         {
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
-                return;
-            }
+            // r4: one immutable generation and one resolver for base admission,
+            // selected-ARMA hard/id admission, and the exact model path used by
+            // injection. No private ARMO->ARMA walk is allowed here.
+            const auto pol = CapturePolicySnapshot();
             nlohmann::json doc;
             doc["version"] = 1;
-            // Resolve a colon-id content to its worn NIF path (female 3P first,
-            // male fallback - mirrors ResolveArmaModels' sex fallback). Returns
-            // a null json when the id/ARMA/model can't be resolved.
             const auto resolveContent = [&](const std::string& id) -> nlohmann::json {
-                const auto colon = id.find(':');
-                if (colon == std::string::npos) {
-                    return nullptr;
-                }
-                const auto lid = static_cast<std::uint32_t>(
-                    std::strtoul(id.substr(0, colon).c_str(), nullptr, 16));
-                const std::string plugin = id.substr(colon + 1);
-                auto* arma = dh->LookupForm<RE::TESObjectARMA>(lid, plugin);
-                if (!arma) {
-                    if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(lid, plugin)) {
-                        // Race-matched addon, same rule as the injection side -
-                        // the carrier must be built from the mesh that shows.
-                        arma = PickAddonForPlayer(armo);
-                    }
-                }
-                if (!arma) {
-                    return nullptr;
-                }
-                // Same sex the INJECTION resolves (player sex + per-content
-                // forced-gender override), so the carrier is built from the
-                // NIF that actually shows - female-first here desynced the
-                // carrier from a forced-Male / male-PC mesh whose bone set
-                // differs (review 2026-07-07 P2).
-                const RE::SEX sex = EffectiveSexFor(id);
-                const RE::SEX other =
-                    (sex == RE::SEXES::kMale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
-                const char* nif = arma->bipedModels[sex].model.c_str();
-                if (!nif || !*nif) {
-                    nif = arma->bipedModels[other].model.c_str();
-                }
-                if (!nif || !*nif) {
+                std::string nif;
+                if (!ResolveAdmittedModelPath(
+                        id, EffectiveSexFor(id), *pol, nif, false)) {
                     return nullptr;
                 }
                 return { { "id", id }, { "nif", nif } };
@@ -514,7 +493,7 @@ namespace CostumeFW
                 jb["slot"] = SlotNumberOf(ResolveArmo(b.token));
                 jb["token"] = b.token;
                 auto contents = nlohmann::json::array();
-                for (const auto& id : AdmittedContents(b.contents)) {  // r3: quarantined ids stay out
+                for (const auto& id : b.contents) {
                     if (auto c = resolveContent(id); !c.is_null()) {
                         contents.push_back(std::move(c));
                     }
@@ -532,7 +511,7 @@ namespace CostumeFW
             // doesn't show (CEF_STATE_SCOPE.md §5).
             {
                 auto pcontents = nlohmann::json::array();
-                for (const auto& id : AdmittedContents(ActivePersistIds())) {  // r3
+                for (const auto& id : ActivePersistIds()) {
                     if (auto c = resolveContent(id); !c.is_null()) {
                         pcontents.push_back(std::move(c));
                     }
@@ -2058,7 +2037,8 @@ namespace CostumeFW
         }
     }
 
-    bool IsContentAdmissible(const std::string& a_id, std::string* a_why, bool a_log)
+    bool IsContentAdmissible(const std::string& a_id,
+        const policy::CapturePolicy& a_policy, std::string* a_why, bool a_log)
     {
         // Layered admission (review P1-3/P2-1), one policy snapshot for the
         // whole evaluation. Deliberately WITHOUT the resolvability check so
@@ -2066,7 +2046,6 @@ namespace CostumeFW
         // is already fail-soft (ROOT H unresolved-actives). a_log=false is
         // the quiet mode for derived processing (re-review P1-2) - refusals
         // there are expected steady state, not events worth a log line each.
-        const auto pol = CapturePolicySnapshot();
         const auto refuse = [&](CaptureBlock a_reason) {
             if (a_log) {
                 SKSE::log::warn("capture: '{}' blocked - {}", a_id, BlockReasonText(a_reason));
@@ -2080,7 +2059,7 @@ namespace CostumeFW
         // Layer 1: textual id deny - works even when nothing resolves.
         std::string canon = a_id;
         CanonicalizeColonId(canon);
-        if (policy::IdDenied(*pol, canon)) {
+        if (policy::IdDenied(a_policy, canon)) {
             return refuse(CaptureBlock::kId);
         }
         // Layer 2: the GENERIC form, if it resolves. This covers direct ARMA
@@ -2096,11 +2075,11 @@ namespace CostumeFW
                 if (!file) {
                     return refuse(CaptureBlock::kNoDefiningFile);
                 }
-                if (policy::PluginDenied(*pol, file->GetFilename())) {
+                if (policy::PluginDenied(a_policy, file->GetFilename())) {
                     return refuse(CaptureBlock::kPlugin);
                 }
                 if (auto* armo = form->As<RE::TESObjectARMO>()) {
-                    if (const auto reason = CaptureBlockReason(armo, *pol);
+                    if (const auto reason = CaptureBlockReason(armo, a_policy);
                         reason != CaptureBlock::kNone) {
                         return refuse(reason);
                     }
@@ -2110,16 +2089,23 @@ namespace CostumeFW
         return true;
     }
 
+    bool IsContentAdmissible(const std::string& a_id, std::string* a_why, bool a_log)
+    {
+        const auto pol = CapturePolicySnapshot();
+        return IsContentAdmissible(a_id, *pol, a_why, a_log);
+    }
+
     bool CanCaptureContent(const std::string& a_id, std::string* a_why)
     {
-        // Admission first (the SEMANTIC layer), resolvability second. An id
-        // that does not resolve at all passes admission (nothing to inspect)
-        // and falls through to CanResolveContent, which refuses it with the
-        // classic message - same end state as pre-1.3.2.
-        if (!IsContentAdmissible(a_id, a_why)) {
+        // One policy generation covers the semantic base gate and the selected
+        // ARMA/model gate. Unresolved content keeps the pre-1.3.2 UX message.
+        const auto pol = CapturePolicySnapshot();
+        if (!IsContentAdmissible(a_id, *pol, a_why)) {
             return false;
         }
-        if (!CanResolveContent(a_id)) {
+        std::string nif;
+        if (!ResolveAdmittedModelPath(
+                a_id, EffectiveSexFor(a_id), *pol, nif)) {
             if (a_why) {
                 *a_why = "this item's mesh could not be resolved - not captured (see log)";
             }
@@ -2130,21 +2116,20 @@ namespace CostumeFW
 
     namespace
     {
-        // r3 (re-review P1-2): a policy edit must not leave an already-active
-        // blocked content injected - and lifting an entry must re-admit
-        // configured contents. ReloadSettingsFromDisk is the existing,
-        // battle-tested primitive with exactly that shape: detach every
-        // active, clear the registry, re-read the just-written json,
-        // re-register everything through the (gated) registration boundary,
-        // restore this save's persist actives, reconcile, rebuild abilities;
-        // the trailing WriteJson/manifest pass then regenerates carriers from
-        // AdmittedContents only. Configured ids are never dropped: a blocked
-        // one fails registration with one log line (= quarantined) and every
-        // derived reader filters through AdmittedContents. Runs on the main
-        // thread (the UI mutators are AddTask'd there).
+        // r4 (re-review P1-2): policy mutation is a main-thread transaction.
+        // Settings were already persisted WITHOUT a manifest. Remove every
+        // live box spell before erasing its cache (ClearBoxSpellCache alone is
+        // load-only and would strand the old ability on the player), then use
+        // the established reload primitive to detach/re-register configured
+        // contents and preserve uncataloged M2 persist actives. Only after all
+        // derived state is rebuilt do we emit one admitted-only manifest.
         void ReevaluateContentAdmissions()
         {
+            for (const auto& box : g_boxes) {
+                RebuildBoxAbility(box.token);  // remove old SpellItem, then cache erase
+            }
             ReloadSettingsFromDisk();
+            WriteCarrierManifest();
         }
     }
 
@@ -2165,9 +2150,9 @@ namespace CostumeFW
         if (*target != a_on) {
             *target = a_on;
             PublishPolicy(std::move(next));
-            WriteJson();
+            WriteJson(false);  // r4: settings-only; manifest follows quarantine
             SKSE::log::info("capture: blacklist switch {} = {}", a_flag, a_on);
-            ReevaluateContentAdmissions();  // r3: detach newly-blocked / re-admit freed
+            ReevaluateContentAdmissions();  // r4: quarantine transaction
         }
         return true;
     }
@@ -2243,9 +2228,9 @@ namespace CostumeFW
         }
         bucket->push_back(value);
         PublishPolicy(std::move(next));
-        WriteJson();
+        WriteJson(false);  // r4: settings-only; manifest follows quarantine
         SKSE::log::info("capture: blacklist {} entry added '{}'", a_kind, value);
-        ReevaluateContentAdmissions();  // r3: detach a now-blocked active immediately
+        ReevaluateContentAdmissions();  // r4: quarantine transaction
         return true;
     }
 
@@ -2264,9 +2249,9 @@ namespace CostumeFW
         }
         bucket->erase(it);
         PublishPolicy(std::move(next));
-        WriteJson();
+        WriteJson(false);  // r4: settings-only; manifest follows quarantine
         SKSE::log::info("capture: blacklist {} entry removed '{}'", a_kind, a_value);
-        ReevaluateContentAdmissions();  // r3: re-admit configured contents this entry blocked
+        ReevaluateContentAdmissions();  // r4: quarantine transaction
         return true;
     }
 
