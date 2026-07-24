@@ -272,57 +272,59 @@ enchant snapshot・sync まで各個検証済み)。ただし null-safe ≠ dang
 - 併せて **MARA の正確な導入ファイル名**(MARA.dll 版数)を聞けると triage ログ(§3.3-4)の
   文言検証に使える。
 
-### 7.1-r4 改訂返信文(v1.3.2 実装完了後・2026-07-23・送付はユーザー)
+### 7.1-r5 改訂返信文(簡潔版・2026-07-24・送付はユーザー)
 
-> 上の 7.1 は計画時点(原因未特定)の下書きとして保存。r4 時点の状況 =
-> 原因特定済み(GetLocalFormID null deref・IMPL §R 参照)・v1.3.2 実装/梱包済み・
-> 実機検証待ち。報告者は MARA 導入環境を持つ唯一の接点のため、
-> **テストビルド打診段落([OPTIONAL])を含む** — 受諾されれば IMPL §R3 手順 6
-> (MARA 実機)の主要部が回収でき、基準 A のリリースゲートに直結する。
-> 打診するか・アーカイブの受け渡し方法(GitHub pre-release 等)はユーザー判断。
-> クラッシュタイミング質問(旧 7.1 の 2 番)は原因特定により不要となり削除。
+> 前提の変更: **MARA をローカル導入した**ため、実機検証(MARA あり/なしの両動作)は
+> こちらで実施する。r4 版のテストビルド打診は不要となり削除(下書きは git 履歴
+> 620cd39 参照)。診断依頼(FF 確認・クラッシュログ)も、v1.3.1+MARA での再現と
+> クラッシュログ採取を自前で行えるため削除 — 返信は「結果報告 + 超簡潔な原因 +
+> 対策 + 更新版を試して/それまで MARA オフ」に絞る。
+> **投稿は下の事前チェックリストが green になってから**(本文は検証完了を前提に
+> 書かれている)。
 
 送付用本文(EN・Nexus posts 返信):
 
-> Hi InubashiriMomizi — thanks a lot for the report, and for pinpointing the
-> item. That made this quick to track down.
+> Hi InubashiriMomizi — thanks for the report, and for pinpointing the item.
+> Confirmed, fixed, and verified on my end (I installed MARA to test CFW both
+> with and without it).
 >
-> Confirmed and fixed for the next update (1.3.2). What happens: MARA's
-> "CORE Carrier" is an item MARA creates at runtime — it has no source plugin
-> file — and CFW's capture picker tried to read a piece of data that only
-> exists for regular plugin items, the moment it built the list. Instant
-> crash, every time, exactly as you reported.
+> Cause, in short: "CORE Carrier" is an item MARA creates at runtime — it has
+> no plugin file — and CFW's capture picker tried to read data that only
+> regular items have, the moment the list was built. Instant crash.
 >
-> In 1.3.2 the capture pickers (and every other route into CFW) never touch
-> that class of item again: runtime-created items are excluded structurally
-> (capturing one could never survive a save/load anyway), "CORE Carrier" and
-> MARA also ship on a built-in deny-list, there is a new "Blocked" page in
-> the SMF menu for your own entries, and other mod authors can tag their
-> utility items with a CEF_NoCapture keyword to keep them out of CFW.
+> In 1.3.2 the pickers (and every other route into CFW) skip runtime items
+> like that entirely, plus there is a new blacklist on top: "CORE Carrier" /
+> MARA are blocked out of the box, you can add your own entries on the new
+> "Blocked" page, and mod authors can tag items with a CEF_NoCapture keyword.
+> With 1.3.2 + MARA here, the pickers open fine with the CORE Carrier worn
+> (it simply does not show up) and captures work as usual.
 >
-> Until the update lands, the workaround is to temporarily disable MARA
-> before using "+ Add worn item" / "+ Add from inventory".
->
-> Two small favors, if you have a minute — they would finalize the diagnosis:
-> 1. In the console: help "CORE Carrier" 4 — does its FormID start with FF?
-> 2. Could you share the crash log file you mentioned? I would like to
->    confirm the crash address matches the code path I fixed.
->
-> [OPTIONAL] And if you are up for it: would you be willing to try a test
-> build of 1.3.2 in your setup? You have the one thing I cannot easily test
-> against — a live MARA install. The checks are quick: open both capture
-> pickers with the CORE Carrier worn (it should simply not appear, no crash),
-> and capture one normal item while it is worn. If yes, I will send you the
-> archive.
->
-> One heads-up for running both mods: if you pack necklaces/rings into a
-> slot-35/36 Costume Box, the worn box token inherits their jewelry keyword,
-> so MARA may try to manage the invisible token like a real amulet or ring.
-> If an amulet/ring box ever acts odd with MARA installed, moving that box
-> to another slot avoids it.
->
-> Thanks again — this report also led me to harden a whole class of similar
-> issues, so it was genuinely valuable.
+> The fix ships with the next update — please give it a try once it is up.
+> Until then, keep MARA disabled while using "+ Add worn item" /
+> "+ Add from inventory".
+
+### 7.1-r5 投稿前チェックリスト(本文の主張と 1:1 対応・ローカル MARA 環境)
+
+⚠ **セーブ保護**: ライブプロファイルは v1.4.0-beta.1 配備中。1.3.2 DLL は beta の
+co-save チャンク(PUBB/NPRS)を登録しないため、**NPC ベータのセーブで 1.3.2 を
+ロードしてセーブすると publish 状態が消える**。検証は別 MO2 プロファイル
+(1.3.2 アーカイブ + MARA + 新規ゲーム or ベータ以前のセーブ)で行うこと。
+
+1. (任意・root cause 実証) v1.3.1 + MARA + CrashLogger: ジュエリー装備で
+   CORE Carrier を湧かせ `+ Add worn item` → 従来 CTD の再現とログ採取
+   (faulting = CostumeExpansionFW.dll 内の列挙経路なら IMPL §R の機序確定)。
+2. `help "CORE Carrier" 4` → FormID が FF 始まりであること(§8-1 を自前で閉じる)。
+3. v1.3.2 + MARA: CORE Carrier 装備中に `+ Add worn item` / `+ Add from
+   inventory`(box と persist の両方)→ **クラッシュせず、CORE Carrier が
+   リストに出ない**(= 本文の主張 1)。
+4. 同状態で通常アイテムを 1 点捕獲 → 正常動作(再レビュー必須手順の P1-2 面
+   = 本文の "captures work as usual")。
+5. save → load → 表示/捕獲が維持されること。ログに `compat: MARA.dll detected`
+   1 行と想定外 warn が無いこと。
+6. MARA を無効化して同プロファイルで回帰 1 周(捕獲・表示・preset・`cef`)→
+   従来どおり(= 本文の "with and without")。
+7. green になったら本文を投稿。IMPL §R3 手順 1-3(fixture 系)は基準 A の
+   リリースゲートとして別途継続(返信とは独立)。
 
 ### 7.2 MARA 上流への連絡(送付はユーザー判断・source 公開待ちでも可)
 
