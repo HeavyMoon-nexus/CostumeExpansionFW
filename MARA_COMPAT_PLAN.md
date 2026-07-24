@@ -272,6 +272,58 @@ enchant snapshot・sync まで各個検証済み)。ただし null-safe ≠ dang
 - 併せて **MARA の正確な導入ファイル名**(MARA.dll 版数)を聞けると triage ログ(§3.3-4)の
   文言検証に使える。
 
+### 7.1-r4 改訂返信文(v1.3.2 実装完了後・2026-07-23・送付はユーザー)
+
+> 上の 7.1 は計画時点(原因未特定)の下書きとして保存。r4 時点の状況 =
+> 原因特定済み(GetLocalFormID null deref・IMPL §R 参照)・v1.3.2 実装/梱包済み・
+> 実機検証待ち。報告者は MARA 導入環境を持つ唯一の接点のため、
+> **テストビルド打診段落([OPTIONAL])を含む** — 受諾されれば IMPL §R3 手順 6
+> (MARA 実機)の主要部が回収でき、基準 A のリリースゲートに直結する。
+> 打診するか・アーカイブの受け渡し方法(GitHub pre-release 等)はユーザー判断。
+> クラッシュタイミング質問(旧 7.1 の 2 番)は原因特定により不要となり削除。
+
+送付用本文(EN・Nexus posts 返信):
+
+> Hi InubashiriMomizi — thanks a lot for the report, and for pinpointing the
+> item. That made this quick to track down.
+>
+> Confirmed and fixed for the next update (1.3.2). What happens: MARA's
+> "CORE Carrier" is an item MARA creates at runtime — it has no source plugin
+> file — and CFW's capture picker tried to read a piece of data that only
+> exists for regular plugin items, the moment it built the list. Instant
+> crash, every time, exactly as you reported.
+>
+> In 1.3.2 the capture pickers (and every other route into CFW) never touch
+> that class of item again: runtime-created items are excluded structurally
+> (capturing one could never survive a save/load anyway), "CORE Carrier" and
+> MARA also ship on a built-in deny-list, there is a new "Blocked" page in
+> the SMF menu for your own entries, and other mod authors can tag their
+> utility items with a CEF_NoCapture keyword to keep them out of CFW.
+>
+> Until the update lands, the workaround is to temporarily disable MARA
+> before using "+ Add worn item" / "+ Add from inventory".
+>
+> Two small favors, if you have a minute — they would finalize the diagnosis:
+> 1. In the console: help "CORE Carrier" 4 — does its FormID start with FF?
+> 2. Could you share the crash log file you mentioned? I would like to
+>    confirm the crash address matches the code path I fixed.
+>
+> [OPTIONAL] And if you are up for it: would you be willing to try a test
+> build of 1.3.2 in your setup? You have the one thing I cannot easily test
+> against — a live MARA install. The checks are quick: open both capture
+> pickers with the CORE Carrier worn (it should simply not appear, no crash),
+> and capture one normal item while it is worn. If yes, I will send you the
+> archive.
+>
+> One heads-up for running both mods: if you pack necklaces/rings into a
+> slot-35/36 Costume Box, the worn box token inherits their jewelry keyword,
+> so MARA may try to manage the invisible token like a real amulet or ring.
+> If an amulet/ring box ever acts odd with MARA installed, moving that box
+> to another slot avoids it.
+>
+> Thanks again — this report also led me to harden a whole class of similar
+> issues, so it was genuinely valuable.
+
 ### 7.2 MARA 上流への連絡(送付はユーザー判断・source 公開待ちでも可)
 
 > Hi — CEF (Costume Expansion Framework, Nexus 183697) author here. Our capture UI
