@@ -103,6 +103,47 @@ policy_tests.exe
 「静的に全クラッシュ面を閉じた」とは主張しない。r4が閉じるのは基準Aに属する
 R3 P1反例のコード経路であり、実機fixtureの証跡は未取得である。
 
+### §R3-V. コンテキストレビュー結果(実装=Codex、レビュー=コンテキスト保持側)
+
+**判定: r4 を承認する。** handoff §1(修正内容)・§2(10 不変条件)・§3(完了条件の
+コード部分)を diff 全読+独立再検証で確認した。
+
+検証した事実(2026-07-23):
+- diff 全読(src/SkinRebind.{h,cpp}・src/BoxStore.{h,cpp}・tests・本書)。
+  `AdmitArmaSource` は formID/sourceFiles 以外を読む前に判定を完結し、
+  `PickAdmittedAddonForPlayer` の優先順位(exact race → additionalRaces →
+  データ順先頭)は admitted 候補内で従来と同一、全滅時は null(unsafe front()
+  fallback 廃止)。final-ARMA の `IdDenied` は defining-file 確認後にのみ
+  `GetLocalFormID` を呼ぶ。旧 `PickAddonForPlayer`・旧シグネチャの残存参照ゼロ。
+- 1 世代貫通は handoff 要求を超えて `Reconcile()` 本体にも適用されている
+  (パス冒頭で snapshot、再解決に伝搬)— 良い拡張。
+- ability ライフサイクル完結: mutator → `RebuildBoxAbility`(remove-then-erase)
+  → `ReloadSettingsFromDisk` 末尾の `ApplyBoxAbilities()`(BoxStore.cpp:1551)で
+  再付与。剥がしっぱなしにならない。
+- 独立再検証: `/W4` ビルド緑・`ctest` 1/1・`policy_tests` **46 checks 0 fail**・
+  再パッケージ差分 = 1.3.1 + `CostumeFW_NoCapture_KID.ini` のみ(不変)。
+
+非ブロッキングの所見(記録のみ・r4 承認に影響しない):
+1. `AdmittedContents` の seam 化により、policy-blocked だけでなく**解決不能**
+   content も派生処理から外れるようになった(旧: snapshot-enchant はプラグイン
+   一時無効中もアビリティに寄与)。「表示される ⇔ 効果がある」の一致であり
+   v1.2.1 の displayability 哲学と整合 — **意図的な引き締めとして是認**。
+   プラグイン復帰で自動復元、カタログ/co-save は不変。
+2. 派生フィルタが content 毎にフル ARMA 解決を行うため、SMF Boxes ページ表示中の
+   `BoxStatsSummary` は毎フレーム分のコストが増える(box 内容数で有界)。
+   問題化した場合の最適化候補 = policy 世代キーの memo。
+3. `CanResolveContent` は admission 込みの意味論になり、内部呼び出し元は消滅
+   (公開 API 互換のため存置)。将来の整理候補。
+4. LoadJson の heal 経路(非正規 id 検出時の `WriteJson()` 既定呼び)が
+   トランザクション途中に manifest を早出しし得るが、到達条件はレガシー id 残存
+   のみで、manifest 等値 short-circuit + auto-sync debounce + head-rebuild 合流に
+   吸収される — 実害なしと判断。
+5. 未コミットに見えた本書の変更は改行コードのみの見かけ差分(内容差ゼロ)で、
+   本レビュー追記のコミットで解消。
+
+残余(§R3 と同一): 実機マトリクス(手順 1-6)と基準 A/B のオーナー判断。
+beta 線 merge・NPC IsDead ゲート・公開・返信/上流連絡は従来どおり未了。
+
 ---
 
 ## §R2. 敵対的再レビュー対応(r3・コミット cac79ca)
