@@ -347,7 +347,9 @@ co-save チャンク(PUBB/NPRS)を登録しないため、**NPC ベータのセ�
 
 ## 8. オープン質問
 
-1. CORE Carrier の playable フラグ・1 ホストか per-item か(§7.1 の回答か MARA source 公開で閉じる)。
+1. ~~CORE Carrier の playable フラグ~~ → **playable と確定**(2026-07-25 実機ログ:
+   Flags 0xC = kPlayable|kInitialized、FormID 0xFF001260)。1 ホストか per-item かは
+   引き続きオープン(MARA source 公開待ち)。
 2. S2 恒久策: box トークンの keyword passthrough から ArmorJewelry(0006BBE9)を
    既定除外すべきか(ジュエリー判定 perk/効果への影響とトレードオフ — 要ユーザー判断)。
 3. ~~v1.3.2 hotfix を切るか~~ → **v1.3.2 で確定・実装済み**。残 = mara-guard-v1.3.2 ブランチの

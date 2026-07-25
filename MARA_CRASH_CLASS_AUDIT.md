@@ -29,6 +29,13 @@
 正規 plugin レコードが参照する破損 NIF の安全性は保証しない**」。C1 の legacy-NIF 面は
 残余(§4.1 — BSA 内 NIF は事前検証不能のため、恒久策はレビュー §4 の VFS+隔離 validator 案を
 次版検討)。
+**実機確定(2026-07-25)**: v1.3.1+MARA で CTD 再現し、**H1 の機序がフィールドで確定**
+(`crash-2026-07-25-12-17-26.log`)。faulting = `CostumeExpansionFW.dll+0x8241C`
+`movzx r9d, byte ptr [rax+0x478]`・RAX=0・AV read 0x478 = **`TESFile::compileIndex`
+(TESFile.h // 478)** — `GetLocalFormID()` の unchecked `GetFile(0)` deref。
+被写体 = ARMO "CORE Carrier" **0xFF001260**(**kPlayable** — non-playable 層では
+捕捉不能な個体で、動的フォーム hard 層の必然性を実証)。スタック = Papyrus VM
+(MCM ピッカー native)→ CEF 列挙フレーム×5。静的特定(§0 r2 追記)と 100% 一致。
 **r3 追記(2026-07-23)**: 再レビュー残 5 件(最終 ARMA 未検査/quarantine 不完全/
 raw inject・enchant native/CTest)も cac79ca で全て修正 — 静的な残余は C1 legacy-NIF
 面のみ、最終判定は実機確認(§5 + 再レビュー §6.2)後。

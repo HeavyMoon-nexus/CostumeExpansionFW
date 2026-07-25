@@ -32,14 +32,24 @@
 
 ## §A P-A + **v1.3.1** に一時差替: root cause 実証(任意だが推奨・2 項)
 
-- [ ] **A1** ジュエリー数点を装備し MARA に CORE Carrier を湧かせる →
+- [x] **A1** ジュエリー数点を装備し MARA に CORE Carrier を湧かせる →
       `help "CORE Carrier" 4` → **FormID が FF 始まり**であることを記録
       (計画書 §8-1 を自前で閉じる)。
-- [ ] **A2** `+ Add worn item` を開く → **従来 CTD の再現**。Crash Logger の
+      → ✅ 2026-07-25: クラッシュログの RDX/RBX で確定 — **FormID 0xFF001260**、
+      Flags **kPlayable**|kInitialized(= L1b non-playable 層では捕まらない個体。
+      動的フォームhard層の必然性を裏付け)。§8-1 の playable 問いも同時に回答。
+- [x] **A2** `+ Add worn item` を開く → **従来 CTD の再現**。Crash Logger の
       ログを保存し、faulting が CostumeExpansionFW.dll の列挙経路
       (WornArmors/MakeColonId/GetLocalFormID 相当番地)かを後で照合
       (= IMPL §R の機序の実地確定)。
       ※ A2 完了後、CEF を **1.3.2 に戻して** MO2 再起動+刻印確認。
+      → ✅ 2026-07-25 再現・**機序 100% 一致**(`crash-2026-07-25-12-17-26.log`):
+      faulting = `CostumeExpansionFW.dll+0x8241C` **`movzx r9d, byte ptr
+      [rax+0x478]`, RAX=0** → AV read 0x478 = **`TESFile::compileIndex`
+      (TESFile.h // 478)を null file から読む = `GetLocalFormID()` の
+      unchecked `GetFile(0)` deref そのもの**。RDX/RBX = "CORE Carrier"
+      (0xFF001260)、R8 に名前バイト列 "CORE Car"、スタックは Papyrus VM
+      (MCM native)→ CEF 列挙 5 フレーム。r2 レビューの静的特定と完全一致。
 
 ## §M P-A(1.3.2): MARA 本丸 — 返信 §7.1-r5 の裏付け
 
