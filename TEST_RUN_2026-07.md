@@ -195,6 +195,34 @@
 - [ ] **V4** ピッカー2種が開く・捕獲 1 点・save/load。
 - [ ] **V5** (MARA VR 0.0.2 を入れる場合のみ・任意) M1-M4 相当の VR 再現。
 
+## §X 未解決の新規発見(次セッション引き継ぎ)
+
+- [ ] **X-SMP**(2026-07-25 深夜報告・**未診断**): テストラン中に「**SMP 装備が
+      すべて remap され、修正されない**」— SMP content の物理骨が骨格に見つからず
+      全て ancestor-remap(静的表示)へフォールバックし、自己修復(watchdog/再装備)
+      が効かない状態の報告。**r4 変更の退行の可能性があるため最優先で triage**。
+      初動(次セッション):
+      1. まず**トークン再装備**(carrier apply はユーザー駆動が設計原則)で直るか
+         → 直るなら「テスト中の連続 sync で carrier リビジョンが回った」だけの
+         仕様挙動の可能性。直らないなら実バグ。
+      2. 証拠採取: CEF ログ(remap warn 行・auto-sync 結果・manifest updated 回数)、
+         `CEF_carrier_manifest.json` と `carriers.json` の現物(**box contents が
+         manifest から消えていないか**)、発生直前の操作(Blocked ページの
+         スイッチ/エントリ操作? F テスト? reload?)、build 刻印、MARA 有無。
+      3. 仮説ランキング:
+         **H-A(r4 退行疑い・最有力查点)**: manifest の resolveContent が
+         `ResolveAdmittedModelPath(..., a_log=false)` で**静かに失敗**し content が
+         manifest から**無音で脱落** → carrier が骨なしで再生成 → 全 SMP 静的化・
+         自己修復不能(レビューの「no silent caps」違反類型)。manifest 現物で即判定可。
+         **H-B**: blacklist 編集の ReevaluateContentAdmissions(フル reload)と
+         FSMP 世代/carrier 再装備原則の相互作用(detach→再注入が新 carrier の
+         育骨前に走る等)。
+         **H-C**: P-A プロファイルの FSMP セットアップ/defaultBBPs 差異(CEF 外)。
+         **H-D**: 仕様どおり(revision 回転後の再装備待ち)を「バグ」と誤認。
+      4. H-A が黒なら: seam 失敗理由の特定(EffectiveSexFor/policy/ResolveFormId の
+         どれが false か)→ manifest 側にだけ **脱落ログ(1 行/content)** を追加する
+         修正が最小(quiet 原則は列挙側のみに限定する)。
+
 ## §W ラン後の処理
 
 - [ ] **W1** 本ファイルへ結果記入 → commit。NG は ID ごとに切り出し。
