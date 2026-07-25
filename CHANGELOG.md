@@ -31,8 +31,13 @@
 - The blacklist policy is published as an **immutable atomic snapshot**
   (readers never see a mutating list), and its pure layers are covered by a
   new host-side unit-test target (`policy_tests`, dev-only).
-- Startup logs `compat: MARA.dll detected` when MARA is present (triage aid;
-  no behavior branches on it).
+- Startup logs `compat: MARA.dll detected` when MARA is present, and — the
+  one behavior that does branch on it — **capturing WORN jewelry is refused
+  while MARA runs** (unequip first, or capture from inventory): stripping a
+  worn ring/amulet out from under MARA crashes inside MARA's own bookkeeping
+  (field-proven during release testing; MARA cannot reliably survive even a
+  regular unequip). Unworn jewelry, non-jewelry, already-captured contents
+  and MARA-less setups are unaffected.
 - All of the above hardened per an adversarial review and re-review
   (`MARA_GUARD_ADVERSARIAL_REVIEW.md` / `..._REREVIEW.md` — all findings
   accepted; responses in `MARA_GUARD_IMPL.md` §R/§R2). Re-review round adds:

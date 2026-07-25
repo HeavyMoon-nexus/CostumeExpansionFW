@@ -141,9 +141,11 @@ namespace
             // reports show the co-presence at a glance. Filename check only -
             // no behavior branches on it.
             if (::GetModuleHandleW(L"MARA.dll") != nullptr) {
+                CostumeFW::SetMaraPresent(true);  // gates the M4-J worn-jewelry capture refusal
                 SKSE::log::info(
                     "compat: MARA.dll detected - runtime/utility armors are hidden "
-                    "from the capture pickers (capture blacklist)");
+                    "from the capture pickers (capture blacklist), and capturing "
+                    "WORN jewelry is refused (stripping it crashes MARA - M4-J)");
             }
             Load3DHook::Install();
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration

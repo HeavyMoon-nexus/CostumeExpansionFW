@@ -72,6 +72,9 @@
          (この環境の実出力先。標準の My Games\Skyrim Special Edition ではない)の
          1 行目が **`compile Jul 24 2026`** 系であること + `compat: MARA.dll
          detected` 行があることを確認してから §M1 へ。
+         **(M4-J ガード版に更新後)**: test 1.3.2 mod を再梱包版 7z で**入れ直し**、
+         刻印 = **file 2026-07-25 22:47 / compile Jul 25 2026** 系、compat 行が
+         「... and capturing WORN jewelry is refused ...」の新文言であること。
 - [ ] **M1** 起動ログに `compat: MARA.dll detected` 1 行。想定外 warn 無し。
 - [ ] **M2** CORE Carrier 装備中: box の `+ Add worn item` / `+ Add from inventory`
       → **クラッシュせず、CORE Carrier がリストに出ない**。
@@ -90,6 +93,13 @@
       で、ピッカー安全化・非ジュエリー捕獲(M4 本体)は green のまま。
       対応方針は MARA_COMPAT_PLAN §7.3 追記参照(A: 文書化のみ / B: MARA 検出時の
       worn ジュエリー捕獲ガード)。
+- [ ] **M4-B** (M4-J ガードの検証・再梱包版で) MARA 稼働中:
+      ① **装着中**のアミュレット/指輪を `+ Add worn item` で選択 → **拒否**
+      (SMF: "MARA manages worn jewelry - unequip it first, or capture it from
+      inventory" / MCM: 汎用文言+ログに refused 行)。クラッシュしないこと。
+      ② 同じジュエリーを**外してから**インベントリ捕獲 → 成功。
+      ③ 非ジュエリーの worn 捕獲 → 従来どおり成功。
+      ④ MARA 無効化 → worn ジュエリー捕獲が従来どおり成功(ガードは MARA 検出時のみ)。
 - [ ] **M5** save → load → 表示/捕獲状態維持・二重表示無し。
       ※ M4-J の後始末: クラッシュ前のセーブへ戻ると **json(グローバル)には
       アミュレット 2 件が box 登録済み・アイテム custody は未セーブ**の不整合。

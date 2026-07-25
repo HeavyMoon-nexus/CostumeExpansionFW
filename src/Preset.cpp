@@ -232,7 +232,10 @@ namespace CostumeFW::Preset
             // same gate captures use (v1.3.2: capture blacklist + ARMO/ARMA
             // with a usable model), so a blocked or broken entry lands in
             // a_missing instead of assigning fine and then never showing.
-            if (CanCaptureContent(c)) {
+            // a_physicalCapture=false: presets only REFERENCE contents (store-
+            // only custody, nothing is stripped), so the M4-J worn-jewelry-
+            // while-MARA refusal must not exclude them here.
+            if (CanCaptureContent(c, nullptr, false)) {
                 a_resolvable.push_back(c);
             } else {
                 a_missing.push_back(c);

@@ -168,6 +168,33 @@ beta 線 merge・NPC IsDead ゲート・公開・返信/上流連絡は従来ど
 - 再レビュー §4 の `git diff --check` 警告(初回レビュー md の hard-break 末尾空白)は
   **レビュー文書を原文保存する方針**のため未修正(実装コードに trailing whitespace は無い)。
 
+### §M4J. 実機テスト由来の追加ガード(2026-07-25・B 案採用)
+
+TEST_RUN M4-J(真正 1.3.2 実機): worn エンチャント付きアミュレット 2 点目の捕獲
+直後、**MARA.dll 内部**(全 8 フレーム・std::format 中・SKSE タスク起点)で CTD
+(`crash-2026-07-25-13-03-03.log`)。CEF ログ warn ゼロ = 計画 §2 旧 H2
+(RemoveItem 剥ぎ取り再入)のフィールド実証で、CEF 側の堅牢化では防御不能
+(MARA は正規 unequip でも落ちる #1058804)。
+
+対応(オーナー決定 = B): **捕獲ゲート限定のソフトガード** —
+`CanCaptureContent(id, why, a_physicalCapture = true)` に、
+`MARA 検出時(kDataLoaded で SetMaraPresent) && 対象 ARMO が worn
+(GetWornArmor(FormID) = target-filtered 安全 API) && ジュエリー
+(HasKeywordString("ArmorJewelry") ‖ HasPartOf(kAmulet) ‖ HasPartOf(kRing) —
+単一ビットずつ・.all() 罠回避)` → 拒否 + 案内文言
+("MARA manages worn jewelry - unequip it first, or capture it from inventory")。
+- **不変**: 登録境界・ロード済み content・unworn ジュエリーのインベントリ捕獲・
+  非ジュエリー・MARA 不在環境(挙動変化ゼロ)。preset Validate は
+  `a_physicalCapture=false`(参照のみで剥ぎ取り無しのため)。
+- UX 注記: MCM は .psc 固定文言のため汎用メッセージ+ログ(既存 r4 の
+  blocked-ARMA 注記と同型)。SMF は正確な文言。
+- 検証: `/W4` 緑・ctest 1/1(46 checks)・再パッケージ差分不変
+  (+NoCapture KID ini のみ)。新 DLL = 2,605,056 bytes / file 2026-07-25 22:47。
+  実機 = TEST_RUN **M4-B**(worn ジュエリー拒否/unequip 後 OK/インベントリ捕獲 OK/
+  非ジュエリー不変/MARA off 不変)。
+
+---
+
 再検証(r3): `/W4` ビルド緑・`ctest` 1/1(43 checks)・再パッケージ差分 =
 1.3.1 + `CostumeFW_NoCapture_KID.ini` のみ(552→553 files)。
 ~~未了のまま残るのは実機系のみ(静的には閉じた)~~ **(R3 レビューにより否認 —

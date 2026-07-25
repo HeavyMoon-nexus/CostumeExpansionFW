@@ -2095,13 +2095,65 @@ namespace CostumeFW
         return IsContentAdmissible(a_id, *pol, a_why, a_log);
     }
 
-    bool CanCaptureContent(const std::string& a_id, std::string* a_why)
+    namespace
+    {
+        // M4-J: whether MARA.dll was present at kDataLoaded (plugin.cpp sets
+        // it once, before any UI exists - effectively immutable afterwards).
+        bool g_maraPresent = false;
+    }
+
+    void SetMaraPresent(bool a_present)
+    {
+        g_maraPresent = a_present;
+    }
+
+    bool CanCaptureContent(const std::string& a_id, std::string* a_why, bool a_physicalCapture)
     {
         // One policy generation covers the semantic base gate and the selected
         // ARMA/model gate. Unresolved content keeps the pre-1.3.2 UX message.
         const auto pol = CapturePolicySnapshot();
         if (!IsContentAdmissible(a_id, *pol, a_why)) {
             return false;
+        }
+        // M4-J guard (capture gate ONLY - registration, load of already-
+        // captured contents and preset validation are unaffected): while MARA
+        // is running, refuse to capture jewelry the player is WEARING. The
+        // physical capture strips the worn item (CaptureItemToStore), and
+        // MARA - which actively manages worn slot-35/36 jewelry - crashes in
+        // its own bookkeeping when a managed item vanishes outside its
+        // control (field-proven: crash-2026-07-25-13-03-03.log, all frames
+        // MARA.dll; MARA cannot reliably survive even a regular unequip, its
+        // bug #1058804, so refusing is the only safe move). Unworn jewelry
+        // (inventory capture) is untouched by MARA and stays capturable.
+        if (a_physicalCapture && g_maraPresent) {
+            std::string canon = a_id;
+            CanonicalizeColonId(canon);
+            if (const std::uint32_t fid = ResolveFormId(canon); fid != 0) {
+                auto* form = RE::TESForm::LookupByID(fid);
+                auto* armo = form ? form->As<RE::TESObjectARMO>() : nullptr;
+                auto* player = RE::PlayerCharacter::GetSingleton();
+                if (armo && player) {
+                    using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
+                    // Single-bit HasPartOf calls (the .all() semantics make a
+                    // combined mask mean BOTH slots - see the slot-gating
+                    // lesson); ArmorJewelry covers keyword-tagged customs.
+                    const bool jewelry = armo->HasKeywordString("ArmorJewelry") ||
+                                         armo->HasPartOf(Slot::kAmulet) ||
+                                         armo->HasPartOf(Slot::kRing);
+                    if (jewelry && player->GetWornArmor(armo->GetFormID())) {
+                        SKSE::log::warn(
+                            "capture: '{}' refused - MARA is running and this jewelry is "
+                            "worn (stripping it crashes MARA; unequip it first or capture "
+                            "it from inventory)",
+                            a_id);
+                        if (a_why) {
+                            *a_why = "MARA manages worn jewelry - unequip it first, or "
+                                     "capture it from inventory";
+                        }
+                        return false;
+                    }
+                }
+            }
         }
         std::string nif;
         if (!ResolveAdmittedModelPath(

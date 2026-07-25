@@ -299,6 +299,12 @@ enchant snapshot・sync まで各個検証済み)。ただし null-safe ≠ dang
 > With 1.3.2 + MARA here, the pickers open fine with the CORE Carrier worn
 > (it simply does not show up) and captures work as usual.
 >
+> One deliberate exception to know about: while MARA is running, CFW will
+> refuse to capture jewelry you are currently wearing (unequip it first, or
+> capture it from inventory) — pulling a worn ring or amulet out from under
+> MARA turned out to crash inside MARA itself, so CFW turns that into a
+> message instead.
+>
 > The fix ships with the next update — please give it a try once it is up.
 > Until then, keep MARA disabled while using "+ Add worn item" /
 > "+ Add from inventory".
@@ -366,6 +372,12 @@ co-save チャンク(PUBB/NPRS)を登録しないため、**NPC ベータのセ�
     「MARA.dll 検出時 && worn && (ArmorJewelry || slot35/36) → 拒否+案内文言」を
     追加。クラッシュをメッセージに変換できるが、リリース候補へのスコープ追加
     (+再レビュー 1 周の価値判断)。B 採用時も A の README 文は併記。
+  - → **B 採用(2026-07-25 ユーザー決定・実装済み)**: `CanCaptureContent` に
+    `a_physicalCapture` パラメータを追加し(既定 true)、MARA 検出時の worn
+    ジュエリー(ArmorJewelry ‖ slot35 ‖ slot36、HasPartOf は単一ビットずつ)を
+    拒否。preset Validate は物理剥ぎ取りをしないため false で除外。MARA 不在時は
+    挙動変化ゼロ。MCM は固定文言の都合で汎用メッセージ+ログ、SMF は正確な案内
+    文言を表示。A の README 文も併記済み。検証 = TEST_RUN M4-B。
 
 ## 8. オープン質問
 

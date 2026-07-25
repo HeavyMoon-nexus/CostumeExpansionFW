@@ -263,7 +263,17 @@ namespace CostumeFW
     // (CanResolveContent). Every capture entrance funnels here - MCM (via the
     // CanResolveContent native), SMF QueueCapture*, preset Validate, and the
     // AddBox/AddPersistContent store fronts.
-    bool CanCaptureContent(const std::string& a_id, std::string* a_why = nullptr);
+    // a_physicalCapture (default true) = the caller will STRIP the item into
+    // the hidden store; enables the M4-J worn-jewelry-while-MARA refusal
+    // (plan par.7.3-r6). Validation-only callers that never strip (preset
+    // Validate) pass false.
+    bool CanCaptureContent(const std::string& a_id, std::string* a_why = nullptr,
+        bool a_physicalCapture = true);
+
+    // M4-J: set once at kDataLoaded when MARA.dll is present - gates the
+    // worn-jewelry capture refusal in CanCaptureContent. Detection only; no
+    // other behavior branches on it.
+    void SetMaraPresent(bool a_present);
     // Switches ("allowNonPlayable" / "disableDefaults"): def + json. Returns
     // false for an unknown flag name. There is deliberately no "allowDynamic"
     // (hard invariant - review P1-4).

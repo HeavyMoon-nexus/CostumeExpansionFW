@@ -146,9 +146,12 @@ Save, then remove the mod.
   (see the included `CostumeFW_NoCapture_KID.ini` template) to keep them out of CEF.
 - **MARA (Multiple Amulets and Rings... Automatically).** Its "CORE Carrier" host item
   crashed the game when picked in `+ Add worn item` (report: 2026-07-22); v1.3.2 blocks
-  it (all four layers above match it). Two co-existence notes: (1) jewelry packed into a
-  slot-35/36 box passes ArmorJewelry through to the worn token, so MARA may try to manage
-  the invisible token like a real amulet/ring — if an amulet/ring box misbehaves with
+  it (all four layers above match it). While MARA is running, CFW also **refuses to
+  capture jewelry you are currently wearing** — stripping a worn ring/amulet out from
+  under MARA crashes inside MARA itself — unequip it first, or capture it from your
+  inventory. Two more co-existence notes: (1) jewelry packed into a slot-35/36 box
+  passes ArmorJewelry through to the worn token, so MARA may try to manage the
+  invisible token like a real amulet/ring — if an amulet/ring box misbehaves with
   MARA installed, move that box to another slot; (2) CEF natively stacks the looks and
   enchant effects of several jewelry pieces in one box (one slot), which covers the
   common "wear multiple amulets" wish without re-slotting.
