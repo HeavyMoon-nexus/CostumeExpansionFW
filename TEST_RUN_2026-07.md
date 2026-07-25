@@ -50,9 +50,28 @@
       unchecked `GetFile(0)` deref そのもの**。RDX/RBX = "CORE Carrier"
       (0xFF001260)、R8 に名前バイト列 "CORE Car"、スタックは Papyrus VM
       (MCM native)→ CEF 列挙 5 フレーム。r2 レビューの静的特定と完全一致。
+      → ✅ 追加データ(同日 21:35, `crash-2026-07-25-12-35-35.log`): **beta.1**
+      (ガード未 merge)+ MARA でも同一機序・同一被写体で再現(オフセットのみ
+      beta バイナリ相当にシフト)。ガード無しビルドは確実に落ちる対照群として記録。
+      1.3.2 での §M 実施は M0 の差替実体確認が前提。
 
 ## §M P-A(1.3.2): MARA 本丸 — 返信 §7.1-r5 の裏付け
 
+> ⚠ **§M0 を必ず先に**(2026-07-25 の事故記録): 「1.3.2 へ戻した」つもりの 2 回目
+> クラッシュ(`crash-2026-07-25-12-35-35.log`)は、実際には **beta.1 が動いていた**
+> (本体 mod = beta 配備 2,762,240 bytes・compile Jul 18・Character フック行あり・
+> compat 行なし)。**v1.3.2 は MO2 に mod として存在していなかった**。beta.1 は
+> ガード未 merge なので同機序で落ちるのが正常(=対照群のデータとして §A に追加)。
+
+- [ ] **M0** 差替の実体確認:
+      1. `dist\CostumeExpansionFW-1.3.2.7z` を **新規 MO2 mod**("CostumeExpansionFW
+         test 1.3.2")としてインストール。
+      2. テスト中は **本体 CostumeExpansionFW(beta 配備)と CostumeFW_NPC を無効化**、
+         test 1.3.2 + MARA + Crash Logger を有効化。MO2 完全再起動。
+      3. 起動後、**`Documents\my games\Skyrim.INI\SKSE\CostumeExpansionFW.log`**
+         (この環境の実出力先。標準の My Games\Skyrim Special Edition ではない)の
+         1 行目が **`compile Jul 24 2026`** 系であること + `compat: MARA.dll
+         detected` 行があることを確認してから §M1 へ。
 - [ ] **M1** 起動ログに `compat: MARA.dll detected` 1 行。想定外 warn 無し。
 - [ ] **M2** CORE Carrier 装備中: box の `+ Add worn item` / `+ Add from inventory`
       → **クラッシュせず、CORE Carrier がリストに出ない**。
