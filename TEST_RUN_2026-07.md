@@ -221,11 +221,11 @@
       - **副産物(登録境界のもう 1 面)** 12:40:56 の reload で
         `register: box content '000801:AllowedWrapper.esp' not admitted - ...
         **(config kept, not registered)**` = quarantine-lite(設定は保持)の実証。
-      - ⚠ **未実施**: 手順 4 の陽性対照(全エントリ削除後に inject が成功し
-        `InjectArma ... 3p=` が出る)。ログに当該行なし。
-      - ⚠ **後始末漏れ**: セッション終了時点で `disableDefaults=true` /
-        `plugins=["DeniedAddon"]` が**残ったまま**(既定の MARA 遮断が無効)。
-        次回起動前に false / 空へ戻すこと。
+      - **手順 4 陽性対照 green(2026-07-27 00:33:54)**: deny を全削除した直後の
+        `cef inject 000801:AllowedWrapper.esp` で
+        `InjectArma 801:AllowedWrapper.esp 3p='Armor\Iron\F\CuirassLight_1.nif'
+        1p='...'` = **deny が無ければ通る**side も実証。
+      - 後始末は 2026-07-26 22:42 に完了(`disableDefaults = false`)。
       具体手順(fixture 利用・2 層を撃ち分ける):
       1. `cef list` / `cef shapes 000801:AllowedWrapper.esp` / `cef persist` が
          例外なく応答すること。
@@ -332,7 +332,13 @@
 
 ### v1.5.0 で直す(2026-07-26 §F ランで確定)
 
-- [x] **X-DIAG 修正・実機で初発火(v1.5.0)** carrier 診断 warn: manifest が content を宣言しているのに carrier
+- [x] **X-DIAG 修正・実機で発火→追跡→収束まで実証(v1.5.0)** 2026-07-26 22:41:39 に
+      box46 へ `0 of 18 custom bone(s) ... carrier = 'CostumeFW/Box46_carrier_r6.nif'`
+      を出力 → **トークン再装備**で 00:35:45 に
+      `bound 13 bone(s) ... VDFSA_bobr00->hdtSSEPhysics_AutoRename_Armor_...` へ
+      回復し、以後この診断行は出ていない = 「リビジョンが回って再装備待ちだった」
+      という**正しい診断**で、回復後は黙る(再武装ロジックも意図どおり)。
+      carrier 診断 warn: manifest が content を宣言しているのに carrier
       側で期待ボーンが **1 本も見つからない**場合、`carrier NIF の実パス + 期待/実際の
       ボーン数`を warn 出力する。現状は「アタッチ済みで骨 0」と「まだアタッチ中」を
       区別できず、retry 予算 4([SkinRebind.cpp:309](src/SkinRebind.cpp:309))を
@@ -345,13 +351,16 @@
       remove/switch のみ出ている。修正 = `SetNextItemWidth` で幅を確定 +
       `ImGuiInputTextFlags_EnterReturnsTrue` で Enter 追加 + 空入力時のフィードバック。
       **F3/F5 の残りはこの修正後に再走**。
-- [~] **X-UI2 修正済み・目視確認待ち(v1.5.0)** SMF ピッカーの**捕獲拒否が無言**。`QueueCapture` は理由を
+- [x] **X-UI2 修正・実機確認済み(v1.5.0, 2026-07-27)** 拒否時に画面上部へ通知が出ることを確認。SMF ピッカーの**捕獲拒否が無言**。`QueueCapture` は理由を
       `s_status` に入れる([SmfUI.cpp:115](src/SmfUI.cpp:115))が、Boxes ページの
       表示位置はページ最上部([SmfUI.cpp:386](src/SmfUI.cpp:386))で、ピッカーは
       box の TreeNode 内部の深い位置 — 選択直後に目に入らない。MCM は拒否
       ウィンドウを出すので体感差が大きい。修正 = 拒否時に `DebugNotification`、
       またはピッカー直下へステータス行を出す。
-- [~] **X-LOG1 修正済み・再確認待ち(v1.5.0)**(小) 明示 deny による `ResolveArma: ... has no admitted ARMA` が
+- [x] **X-LOG1 修正・実機確認済み(v1.5.0)** — 2026-07-26/27 のセッションで
+      `ResolveArma: 801:AllowedWrapper.esp has no admitted ARMA (every candidate
+      refused by the capture policy)` が **[warning]**、かつセッション全体の
+      **`[error]` は 0 件**(修正前は同一行が 7 件の error)。(小) 明示 deny による `ResolveArma: ... has no admitted ARMA` が
       **[error]** レベル。2026-07-26 のランでは**ログ中の error 7 件が全てこれ**で、
       設計どおりの拒否が「障害」に見える。修正 = 拒否理由が policy 由来のときは
       warn へ落とす(真の解決失敗のみ error に残す)。
