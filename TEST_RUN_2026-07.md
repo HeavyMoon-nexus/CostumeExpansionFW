@@ -57,13 +57,16 @@
 
 ## §M P-A(1.3.2): MARA 本丸 — 返信 §7.1-r5 の裏付け
 
+> **§M 全 green(2026-07-26)**。M4/M8 は本文にログ実測を併記、それ以外は
+> ユーザーの実機確認による(ピッカーに出ないこと等、ログに痕跡が残らない性質の項目を含む)。
+
 > ⚠ **§M0 を必ず先に**(2026-07-25 の事故記録): 「1.3.2 へ戻した」つもりの 2 回目
 > クラッシュ(`crash-2026-07-25-12-35-35.log`)は、実際には **beta.1 が動いていた**
 > (本体 mod = beta 配備 2,762,240 bytes・compile Jul 18・Character フック行あり・
 > compat 行なし)。**v1.3.2 は MO2 に mod として存在していなかった**。beta.1 は
 > ガード未 merge なので同機序で落ちるのが正常(=対照群のデータとして §A に追加)。
 
-- [ ] **M0** 差替の実体確認:
+- [x] **M0 green** 差替の実体確認:
       1. `dist\CostumeExpansionFW-1.3.2.7z` を **新規 MO2 mod**("CostumeExpansionFW
          test 1.3.2")としてインストール。
       2. テスト中は **本体 CostumeExpansionFW(beta 配備)と CostumeFW_NPC を無効化**、
@@ -75,10 +78,11 @@
          **(M4-J ガード版に更新後)**: test 1.3.2 mod を再梱包版 7z で**入れ直し**、
          刻印 = **file 2026-07-25 22:47 / compile Jul 25 2026** 系、compat 行が
          「... and capturing WORN jewelry is refused ...」の新文言であること。
-- [ ] **M1** 起動ログに `compat: MARA.dll detected` 1 行。想定外 warn 無し。
-- [ ] **M2** CORE Carrier 装備中: box の `+ Add worn item` / `+ Add from inventory`
+- [x] **M1 green** 起動ログに `compat: MARA.dll detected` 1 行。想定外 warn 無し。
+      (以後の全ランで確認継続)
+- [x] **M2 green(ユーザー確認)** CORE Carrier 装備中: box の `+ Add worn item` / `+ Add from inventory`
       → **クラッシュせず、CORE Carrier がリストに出ない**。
-- [ ] **M3** 同を persist 側でも(2 ピッカー)。
+- [x] **M3 green(ユーザー確認)** 同を persist 側でも(2 ピッカー)。
 - [x] **M4** 同状態で**通常アイテムを 1 点捕獲** → 正常(登録・表示・返却まで)。
       (再レビュー必須の CaptureEnchant/P1-2 面)
       → ✅ 2026-07-25 22:03: DLL 実体 = 真正 1.3.2(M0 クリア・file 2026-07-24
@@ -93,21 +97,21 @@
       で、ピッカー安全化・非ジュエリー捕獲(M4 本体)は green のまま。
       対応方針は MARA_COMPAT_PLAN §7.3 追記参照(A: 文書化のみ / B: MARA 検出時の
       worn ジュエリー捕獲ガード)。
-- [ ] **M4-B** (M4-J ガードの検証・再梱包版で) MARA 稼働中:
+- [x] **M4-B green(ユーザー確認 2026-07-26)** (M4-J ガードの検証・再梱包版で) MARA 稼働中:
       ① **装着中**のアミュレット/指輪を `+ Add worn item` で選択 → **拒否**
       (SMF: "MARA manages worn jewelry - unequip it first, or capture it from
       inventory" / MCM: 汎用文言+ログに refused 行)。クラッシュしないこと。
       ② 同じジュエリーを**外してから**インベントリ捕獲 → 成功。
       ③ 非ジュエリーの worn 捕獲 → 従来どおり成功。
       ④ MARA 無効化 → worn ジュエリー捕獲が従来どおり成功(ガードは MARA 検出時のみ)。
-- [ ] **M5** save → load → 表示/捕獲状態維持・二重表示無し。
+- [x] **M5 green(ユーザー確認)** save → load → 表示/捕獲状態維持・二重表示無し。
       ※ M4-J の後始末: クラッシュ前のセーブへ戻ると **json(グローバル)には
       アミュレット 2 件が box 登録済み・アイテム custody は未セーブ**の不整合。
       再開時は box からアミュレット 2 content を削除(store 空なので二重付与なし)
       してから、**非ジュエリーのアイテムで** M5 を続行。
-- [ ] **M6** MARA を無効化して回帰 1 周: 捕獲(worn/inv × box/persist)・表示切替・
+- [x] **M6 green(ユーザー確認)** MARA を無効化して回帰 1 周: 捕獲(worn/inv × box/persist)・表示切替・
       preset 取込・`cef list` — 従来どおり(= 返信の "with and without")。
-- [ ] **M7** (S2 観察・任意) ジュエリー入り slot-35/36 box を装備 → MARA が
+- [x] **M7 green(ユーザー確認・観察項目)** (S2 観察・任意) ジュエリー入り slot-35/36 box を装備 → MARA が
       不可視トークンに干渉するか(リネーム/複製/unequip)を記録 → README 注意文の
       文言検証。
 - [x] **M8 green(証跡取得済み 2026-07-26 11:05-11:07)** `disableDefaults` を
@@ -120,7 +124,7 @@
       #2 で `ChangeHeadPart` 昇格まで進み**そこで収束**(以降の再発ログ無し)
       = 29fda68 の 3 段エスカレーションが高頻度 facegen 再構築下でも機能。
       content 不変のため `carrier manifest updated` は 0 回(変化検知ログの正常動作)。
-- [ ] **M8 原文** (任意) `disableDefaults` ON にしても CORE Carrier が**出ないまま**
+- [x] **M8**(原文・上の実測記録で充足) (任意) `disableDefaults` ON にしても CORE Carrier が**出ないまま**
       であること(動的フォームはハード層で遮断 = 名前既定に依存しない)。OFF に戻す。
 
 ## §F P-A(1.3.2): fixture 系 — IMPL §R3 手順 1-5(基準 A ゲート)

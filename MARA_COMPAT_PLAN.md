@@ -292,12 +292,14 @@ enchant snapshot・sync まで各個検証済み)。ただし null-safe ≠ dang
 > no plugin file — and CFW's capture picker tried to read data that only
 > regular items have, the moment the list was built. Instant crash.
 >
-> In 1.3.2 the pickers (and every other route into CFW) skip runtime items
+> In 1.5.0 the pickers (and every other route into CFW) skip runtime items
 > like that entirely, plus there is a new blacklist on top: "CORE Carrier" /
 > MARA are blocked out of the box, you can add your own entries on the new
 > "Blocked" page, and mod authors can tag items with a CEF_NoCapture keyword.
-> With 1.3.2 + MARA here, the pickers open fine with the CORE Carrier worn
+> With 1.5.0 + MARA here, the pickers open fine with the CORE Carrier worn
 > (it simply does not show up) and captures work as usual.
+> (The version number jumps from 1.3.1 to 1.5.0 because 1.4.x is taken by the
+> NPC-support beta over on GitHub — nothing was skipped.)
 >
 > One deliberate exception to know about: while MARA is running, CFW will
 > refuse to capture jewelry you are currently wearing (unequip it first, or
