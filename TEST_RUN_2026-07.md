@@ -110,7 +110,17 @@
 - [ ] **M7** (S2 観察・任意) ジュエリー入り slot-35/36 box を装備 → MARA が
       不可視トークンに干渉するか(リネーム/複製/unequip)を記録 → README 注意文の
       文言検証。
-- [ ] **M8** (任意) `disableDefaults` ON にしても CORE Carrier が**出ないまま**
+- [x] **M8 green(証跡取得済み 2026-07-26 11:05-11:07)** `disableDefaults` を
+      **4 往復**トグル(11:05:51/11:06:13/11:06:15/11:06:18/11:06:20/11:06:23/
+      11:07:05/11:07:21、最終 OFF に復帰)。ON 中もピッカーに CORE Carrier は
+      出ないことをユーザー確認 = **動的フォームのハード層のみで遮断できている**
+      (名前既定リストに依存しない)。同ログに `[error]` ゼロ。
+      **副産物(ストレス試験)**: 90 秒で 8 回のポリシー変更 = `DoReset3D` ちょうど
+      8 回(1 操作 1 回・多重なし)。teeth-drop watchdog が clean rebuild #1 →
+      #2 で `ChangeHeadPart` 昇格まで進み**そこで収束**(以降の再発ログ無し)
+      = 29fda68 の 3 段エスカレーションが高頻度 facegen 再構築下でも機能。
+      content 不変のため `carrier manifest updated` は 0 回(変化検知ログの正常動作)。
+- [ ] **M8 原文** (任意) `disableDefaults` ON にしても CORE Carrier が**出ないまま**
       であること(動的フォームはハード層で遮断 = 名前既定に依存しない)。OFF に戻す。
 
 ## §F P-A(1.3.2): fixture 系 — IMPL §R3 手順 1-5(基準 A ゲート)
@@ -121,25 +131,50 @@
 > runtime/no-file **ARMA** 差替 fixture(R3 手順 2)は実行手段(実行時 armorAddons
 > 書換ハーネス)が無いため**本ランではスコープ外** — 当該層は AdmitArmaSource の
 > コード検査+MARA 実物(動的 ARMO)で部分カバー済みと記録する。
+>
+> **生成済み(2026-07-26, houseCARL)** — mod フォルダ `houseCARL - DeniedAddon` /
+> `houseCARL - AllowedWrapper`。全 fixture は **slot FX01(=61)** / race DefaultRace /
+> ArmorType Clothing / モデルはバニラ `Armor\Iron\{Male,F}\CuirassLight_1.nif`
+> (weight slider 有効。値はバニラ `IronCuirassAA` から実読して転写)。
+>
+> | FormID | 型 | EditorID | 用途 |
+> |---|---|---|---|
+> | `000800:DeniedAddon.esp` | ARMA | `CEF_FixtureAddonDenied` | F1/F2 の deny 対象 |
+> | `000800:AllowedWrapper.esp` | ARMA | `CEF_FixtureAddonAllowed` | F6 用(deny 操作の影響を受けない) |
+> | `000801:AllowedWrapper.esp` | ARMO | `CEF_FixtureWrapper` "Fixture Wrapper" | playable。armature は **DeniedAddon 側 1 件のみ**(複数持たせると許可 addon にフォールバックしてテストが空振りする) |
+> | `000802:AllowedWrapper.esp` | ARMO | `CEF_FixtureNonPlayable` "Fixture NonPlayable" | F6 用(MajorFlags=NonPlayable) |
+>
+> ロードオーダーは **DeniedAddon.esp → AllowedWrapper.esp** の順(マスター順)。
+> 入手は `help "Fixture" 0 ARMO` → `player.additem <RuntimeFormID> 1`。
+> 両 ARMO とも world model 無しなので**地面に落とさない**こと(表示されない)。
+> deny 入力の意味論: **plugin は前方一致(大小無視)** =`DeniedAddon` でよい /
+> **id は完全一致の正準形** =`000800:DeniedAddon.esp` / name は完全一致(末尾 `*` で前方一致)。
 
-- [ ] **F1** wrapper を捕獲しようとする → ピッカーには出る(ARMO 自体は許可)が、
-      選択で拒否: UI 文言は "mesh could not be resolved" 系、**ログに
-      `ResolveArma: ... skips ARMA ... deny-listed plugin 'DeniedAddon.esp'`**。
-      (deny 対象 plugin の既定化のため、事前に Blocked ページで plugin
-      `DeniedAddon` を追加してから)
-- [ ] **F2** F1 の plugin エントリを外し、代わりに **ARMA の colon-id**
-      (例 `000800:DeniedAddon.esp`)を ids へ追加 → 同様に拒否(final-ARMA ID deny)。
-      エントリ削除 → 捕獲可能に戻る。
-- [ ] **F3** (エントリ無しで)wrapper を box へ捕獲・表示させ、armor/weight/enchant
-      付き content と同居 → Blocked ページで plugin `DeniedAddon` を追加 →
-      **即時**: 表示消滅・token stats/keywords 縮小・player の合成 ability から
-      効果消滅・`CEF_carrier_manifest.json` から該当 content 消滅。
-      **設定(box 内容)からは消えない**こと。
-- [ ] **F4** F3 のエントリを削除 → 表示・stats・ability・manifest が**自動復元**。
-- [ ] **F5** F3/F4 の各操作で: manifest 更新が**操作あたり最大 1 回**・
-      persist head rebuild が多重実行されない(ログで確認)。
-- [ ] **F6** non-playable ARMO(`player.additem` で投入)がピッカー非表示 →
-      Blocked ページ `allowNonPlayable` ON で出現 → OFF に戻す。
+- [x] **F1 green(機能)/ 所見 X-UI2** wrapper を捕獲しようとする → ピッカーには出る
+      (ARMO 自体は許可)が、選択で拒否。ログ実測(10:38:10 / 10:40:50 / 10:45:18):
+      `ResolveArma: 801:AllowedWrapper.esp skips ARMA B8000800 from deny-listed
+      plugin 'DeniedAddon.esp'` + `... has no admitted ARMA`。
+      ⚠ **SMF ピッカーでは拒否理由が画面に出ない(無言)** → X-UI2。
+- [x] **F2 green(r4 本命層の実証)** id `000800:DeniedAddon.esp` を ids へ →
+      ログ実測(10:29:01 / 10:29:53): `ResolveArma: 801:AllowedWrapper.esp selects
+      deny-listed ARMA '000800:DeniedAddon.esp' - refused`。鉄鎧メッシュ非表示化を
+      確認。エントリ削除(10:32:51)で捕獲可能へ復帰。
+- [x] **F3 部分 green** 表示の即時消滅・**box 内容は保持**を確認。
+      ⚠ **manifest からの content 消滅は未実証** — deny の *追加* を
+      SMF Add で行えず(X-UI1)json 手編集+"reload settings from disk" で代用した結果、
+      `ReloadSettingsFromDisk` は manifest を書き直さない(→ X-MAN)ため
+      当該経路を一度も踏んでいない。**X-UI1 修正後に追加方向のみ再走**。
+- [x] **F4 green** エントリ削除で鉄鎧が即時復活。
+      ※ deny 有効中に MCM から再捕獲を試みて出た拒否ウィンドウは**正しい挙動**
+      (捕獲ゲートの拒否。MCM は理由を出す = SMF との差が X-UI2 の裏付け)。
+- [x] **F5 部分 green** ログ実測: `carrier manifest updated` は全 5 回、いずれも
+      別々の box 操作に 1 対 1(重複ゼロ)。persist head rebuild も
+      `- / + / DoReset3D` が 1 操作 1 組(多重なし)。
+      ⚠ ただし deny **追加**方向の quarantine トランザクション自体が未実行のため、
+      その経路の 1 回性は未検証(F3 と同じ理由)。
+      ※ 10:38:14 / 10:38:52 の mouth clean rebuild #1/#2 は既知の
+      persist head-carrier teeth-drop watchdog の正常動作(自己修復済み)。
+- [x] **F6 green** ログ実測 10:48:50 `allowNonPlayable = true` / 10:49:06 `= false`。
 
 ## §R P-A(1.3.2): 汎用回帰(監査 §5-4 + Blocked UI)
 
@@ -197,10 +232,20 @@
 
 ## §X 未解決の新規発見(次セッション引き継ぎ)
 
-- [ ] **X-SMP**(2026-07-25 深夜報告・**未診断**): テストラン中に「**SMP 装備が
-      すべて remap され、修正されない**」— SMP content の物理骨が骨格に見つからず
-      全て ancestor-remap(静的表示)へフォールバックし、自己修復(watchdog/再装備)
-      が効かない状態の報告。**r4 変更の退行の可能性があるため最優先で triage**。
+- [x] **X-SMP 解決(2026-07-26)= CEF の退行ではなく MO2 優先度事故**。M0 ゲートで
+      新規導入した mod「CostumeExpansionFW test 1.3.2」が modlist 2 行目(最高位、
+      live "CostumeExpansionFW" は 18 行目)にあり、配布 7z 同梱の**まっさら
+      carrier NIF(234 バイト)と physics XML(42 バイト)が実 carrier を上書き
+      マスク**していた(live: Box44_r1=1,028,906 / Box46_r4=3,556,017 /
+      Box48_r2=516,428 / Persist_r1=1,897,317、XML Box44_r1=28,491)。
+      整合の決め手: remap 警告が出るボーンは box44/46/48 の**骨入り carrier が
+      実在する content のみ**。`CEF_carrier_manifest.json` は完全・正常 =
+      **H-A(r4 seam)は無実**。自己修復しないのは sync が hash 一致で
+      `built=0 skipped(unchanged)=9` を返すため。**対処 = test mod の `meshes` を
+      削除/hide**(ユーザー実施済み)→ 再装備で復旧。
+      **恒久策候補は X-DIAG(下)**。
+      <details><summary>当時の triage 計画(記録)</summary>
+
       初動(次セッション):
       1. まず**トークン再装備**(carrier apply はユーザー駆動が設計原則)で直るか
          → 直るなら「テスト中の連続 sync で carrier リビジョンが回った」だけの
@@ -222,6 +267,37 @@
       4. H-A が黒なら: seam 失敗理由の特定(EffectiveSexFor/policy/ResolveFormId の
          どれが false か)→ manifest 側にだけ **脱落ログ(1 行/content)** を追加する
          修正が最小(quiet 原則は列挙側のみに限定する)。
+      </details>
+
+### v1.5.0 で直す(2026-07-26 §F ランで確定)
+
+- [ ] **X-DIAG** carrier 診断 warn: manifest が content を宣言しているのに carrier
+      側で期待ボーンが **1 本も見つからない**場合、`carrier NIF の実パス + 期待/実際の
+      ボーン数`を warn 出力する。現状は「アタッチ済みで骨 0」と「まだアタッチ中」を
+      区別できず、retry 予算 4([SkinRebind.cpp:309](src/SkinRebind.cpp:309))を
+      使い切って**黙って諦める** — X-SMP が 10 秒で判るはずが一晩かかった直接原因。
+- [ ] **X-UI1** SMF「Blocked」ページの **Add が事実上機能しない**。
+      コンボ+InputText+Add を幅指定なしで `SameLine` 連結しているため
+      ([SmfUI.cpp:838-856](src/SmfUI.cpp:838))狭い窓では入力欄/ボタンが画面外へ
+      押し出される。加えて `Button(...) && s_blkValue[0] != '\0'` で**空入力時は
+      無言 no-op**。ログ実測でも `blacklist ... entry added` は 1 行も出ず、
+      remove/switch のみ出ている。修正 = `SetNextItemWidth` で幅を確定 +
+      `ImGuiInputTextFlags_EnterReturnsTrue` で Enter 追加 + 空入力時のフィードバック。
+      **F3/F5 の残りはこの修正後に再走**。
+- [ ] **X-UI2** SMF ピッカーの**捕獲拒否が無言**。`QueueCapture` は理由を
+      `s_status` に入れる([SmfUI.cpp:115](src/SmfUI.cpp:115))が、Boxes ページの
+      表示位置はページ最上部([SmfUI.cpp:386](src/SmfUI.cpp:386))で、ピッカーは
+      box の TreeNode 内部の深い位置 — 選択直後に目に入らない。MCM は拒否
+      ウィンドウを出すので体感差が大きい。修正 = 拒否時に `DebugNotification`、
+      またはピッカー直下へステータス行を出す。
+- [ ] **X-MAN** `ReloadSettingsFromDisk`(MCM/SMF の「ディスクから再読込」・
+      [Papyrus.cpp:584](src/Papyrus.cpp:584) / [SmfUI.cpp:308](src/SmfUI.cpp:308))は
+      **manifest を書き直さない**。`WriteCarrierManifest` は
+      `ReevaluateContentAdmissions`([BoxStore.cpp:2178](src/BoxStore.cpp:2178))
+      にしか無いため、json を手編集して reload した場合ポリシー変更は効くのに
+      manifest だけ stale で残る(実測: 10:45:18 に deny 追加 → manifest の mtime は
+      10:42 のまま)。修正 = reload 末尾でも manifest を書く(または reload を
+      quarantine トランザクションへ一本化)。
 
 ## §W ラン後の処理
 
