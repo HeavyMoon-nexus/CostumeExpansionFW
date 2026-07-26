@@ -461,6 +461,13 @@ namespace CostumeFW
     // catalog holds the id (review 2026-07-07 P1-1).
     std::string ContentHolder(const std::string& a_content);
 
+    // X-DIAG: the carrier NIF the holding box's token currently points at
+    // (meshes-relative, as carriers.json wrote it), or "" when the content is
+    // unheld or lives in the persist head-carrier class (which is a HDPT pool,
+    // not a token ARMA). For the "this item is still static" diagnostic - the
+    // file name is what tells a stale/overridden carrier from a real one.
+    std::string CarrierModelForContent(const std::string& a_content);
+
     // ROOT C (border audit 2026-07-09): TRUE if the colon-form id belongs to a CEF
     // plugin (CostumeFW.esp or the two pre-merge plugins). CEF's own records are box
     // tokens / carrier / pool / ability forms - NEVER valid CONTENT (content is

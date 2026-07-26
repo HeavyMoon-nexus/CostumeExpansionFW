@@ -309,6 +309,20 @@ namespace CostumeFW
         constexpr int kRebindRetryBudget = 4;  // heavy carriers load async for seconds
         constexpr auto kRebindRetryDelay = std::chrono::milliseconds(1000);
 
+        // --- X-DIAG: "still static after the retries" ---------------------------
+        // "the carrier attached but carries none of this content's bones" and
+        // "the carrier is still attaching" look IDENTICAL from the rebind - both
+        // are a 3p static fallback. The retry budget is what tells them apart:
+        // once it is spent the item is still static, so the file the token points
+        // at is either not the carrier that was built (a higher-priority mod
+        // masking it - the 2026-07-25 X-SMP fault was a 234-byte pristine stub
+        // winning over a 1MB built carrier) or was built without this content.
+        // Name the file and the bone counts once per episode instead of going
+        // quiet, which cost a whole night of triage.
+        std::uint32_t g_rebind3pFsmp = 0;   // per-injection, 3p skeleton only
+        std::uint32_t g_rebind3pRemap = 0;
+        std::unordered_set<std::string> g_staticDiagReported;
+
         std::atomic<int> g_rebindRetryBudget{ 0 };
         std::atomic<bool> g_rebindRetryQueued{ false };
         bool g_inRebindRetry = false;          // main-thread only (tasks + Reconcile)
@@ -368,6 +382,29 @@ namespace CostumeFW
             }).detach();
         }
 
+        // X-DIAG: the budget is spent and this item is STILL binding static.
+        // One line per content per episode (re-armed the moment it binds a
+        // physics node again, so a later regression reports afresh). The counts
+        // are THIS content's custom bones - the ones that exist only while its
+        // carrier is live - split into "bound to physics" vs "total".
+        void ReportStaticCarrier(const std::string& a_id)
+        {
+            if (!g_staticDiagReported.insert(a_id).second) {
+                return;
+            }
+            const std::string carrier = CarrierModelForContent(a_id);
+            const std::uint32_t expected = g_rebind3pFsmp + g_rebind3pRemap;
+            SKSE::log::warn(
+                "  carrier diagnostic '{}': {} of {} custom bone(s) bound to an FSMP "
+                "physics node after {} retries - carrier = '{}'. At 0 bound, the "
+                "carrier is attached but holds none of these bones: usually the wrong "
+                "FILE (another mod overriding meshes\\CostumeFW, or a pristine stub "
+                "from a release archive) or a carrier built without this content - "
+                "check that file, then re-equip the token.",
+                a_id, g_rebind3pFsmp, expected, kRebindRetryBudget,
+                carrier.empty() ? "<none: persist head-carrier or unheld>" : carrier);
+        }
+
         void RequestRebindRetry(const std::string& a_id)
         {
             if (std::find(g_rebindRetryIds.begin(), g_rebindRetryIds.end(), a_id) ==
@@ -379,6 +416,7 @@ namespace CostumeFW
             }
             if (g_rebindRetryBudget.fetch_sub(1) <= 0) {
                 g_rebindRetryBudget.fetch_add(1);  // keep at 0
+                ReportStaticCarrier(a_id);         // X-DIAG: out of retries, say why
                 return;
             }
             g_rebindRetryQueued = true;
@@ -584,14 +622,19 @@ namespace CostumeFW
                 SKSE::log::info("  bound {} bone(s) to FSMP physics-driven node(s) "
                                 "(SMP sway; e.g. {})", fsmpCount, firstFsmp);
             }
+            // Only a 3rd-person static fallback can mean "carrier still
+            // attaching" - FSMP never builds physics on the 1st-person
+            // skeleton, so a 1p remap is permanent and no reason to retry.
+            auto* pc = RE::PlayerCharacter::GetSingleton();
+            const bool is3p = pc && a_root != pc->Get3D(true);
+            if (is3p) {
+                g_rebind3pFsmp += fsmpCount;    // X-DIAG: per-injection tallies
+                g_rebind3pRemap += remapCount;
+            }
             if (remapCount) {
                 SKSE::log::warn("  remapped {} unresolved bone(s) to nearest ancestor "
                                 "(static, no SMP sway; e.g. {})", remapCount, firstRemap);
-                // Only a 3rd-person static fallback can mean "carrier still
-                // attaching" - FSMP never builds physics on the 1st-person
-                // skeleton, so a 1p remap is permanent and no reason to retry.
-                auto* pc = RE::PlayerCharacter::GetSingleton();
-                if (pc && a_root != pc->Get3D(true)) {
+                if (is3p) {
                     g_injectStatic3p = true;  // InjectInternal turns this into a retry
                 }
             }
@@ -912,6 +955,8 @@ namespace CostumeFW
 
             bool any = false;
             g_injectStatic3p = false;
+            g_rebind3pFsmp = 0;   // X-DIAG: tallies belong to THIS injection
+            g_rebind3pRemap = 0;
             // Multi-content carriers prefix this content's custom bones
             // (nifcarrier namespace isolation) - same id, same prefix.
             g_rebindPrefix = nifcarrier::ContentNamePrefix(a_id);
@@ -922,6 +967,11 @@ namespace CostumeFW
             g_boneRefSink = &collected;
             if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap, applyMorph, hideShapes, a_id, true);
+            }
+            if (g_rebind3pFsmp) {
+                // Bound to physics again - re-arm the X-DIAG report so a later
+                // regression is not swallowed by the once-per-episode guard.
+                g_staticDiagReported.erase(a_id);
             }
             if (g_injectStatic3p) {
                 // This item's 3p rebind fell to the static fallback - the carrier
@@ -1248,7 +1298,7 @@ namespace CostumeFW
         // the old picker, but only among candidates that passed hard admission.
         RE::TESObjectARMA* PickAdmittedAddonForPlayer(RE::TESObjectARMO* a_armo,
             const policy::CapturePolicy& a_policy, std::uint32_t a_localID,
-            const std::string& a_plugin, bool a_log)
+            const std::string& a_plugin, bool a_log, bool* a_allRefused = nullptr)
         {
             if (!a_armo || a_armo->armorAddons.empty()) {
                 return nullptr;
@@ -1261,6 +1311,11 @@ namespace CostumeFW
                 }
             }
             if (admitted.empty()) {
+                // X-LOG1: candidates existed and the policy turned every one of
+                // them away - that is a DECISION, not a failure to resolve.
+                if (a_allRefused) {
+                    *a_allRefused = true;
+                }
                 return nullptr;
             }
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1294,6 +1349,7 @@ namespace CostumeFW
             }
             RE::TESObjectARMA* arma = dh->LookupForm<RE::TESObjectARMA>(a_localID, a_plugin);
             const RE::TESFile* armaFile = nullptr;
+            bool policyRefused = false;  // X-LOG1: refused by the deny-list, not unresolvable
             if (arma) {
                 armaFile = AdmitArmaSource(arma, a_policy, a_localID, a_plugin, a_log);
                 if (!armaFile) {
@@ -1301,7 +1357,7 @@ namespace CostumeFW
                 }
             } else if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
                 arma = PickAdmittedAddonForPlayer(
-                    armo, a_policy, a_localID, a_plugin, a_log);
+                    armo, a_policy, a_localID, a_plugin, a_log, &policyRefused);
                 if (arma) {
                     // The candidate picker returned it only after this succeeded.
                     armaFile = arma->GetFile(0);
@@ -1309,8 +1365,19 @@ namespace CostumeFW
             }
             if (!arma || !armaFile) {
                 if (a_log) {
-                    SKSE::log::error(
-                        "ResolveArma: {:X}:{} has no admitted ARMA", a_localID, a_plugin);
+                    // X-LOG1: an explicit deny is policy working as designed, so it
+                    // logs at warn - error stays for "this really cannot resolve".
+                    // (In the 2026-07-26 run every single error in the log was this
+                    // one line, firing on deliberate fixture denials.)
+                    if (policyRefused) {
+                        SKSE::log::warn(
+                            "ResolveArma: {:X}:{} has no admitted ARMA "
+                            "(every candidate refused by the capture policy)",
+                            a_localID, a_plugin);
+                    } else {
+                        SKSE::log::error(
+                            "ResolveArma: {:X}:{} has no admitted ARMA", a_localID, a_plugin);
+                    }
                 }
                 return false;
             }

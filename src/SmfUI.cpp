@@ -113,6 +113,12 @@ namespace CostumeFW::SmfUI
             std::string why;
             if (!CanCaptureContent(a_id, &why)) {  // v1.3.2: blacklist + resolvability
                 s_status = why;
+                // X-UI2 (test run 2026-07-26): s_status alone reads as a SILENT
+                // refusal - it renders at the TOP of the Boxes page while the
+                // picker sits deep inside a box's tree node, so the reason is
+                // off-screen at the moment of the click. The MCM shows a modal
+                // here; match that with a notification.
+                RE::DebugNotification(("CostumeFW: " + why).c_str());
                 return;
             }
             s_status = UiOps::ContentHasScript(a_id)
@@ -149,6 +155,7 @@ namespace CostumeFW::SmfUI
             std::string why;
             if (!CanCaptureContent(a_id, &why)) {  // v1.3.2: blacklist + resolvability
                 s_status = why;
+                RE::DebugNotification(("CostumeFW: " + why).c_str());  // X-UI2
                 return;
             }
             s_status = UiOps::ContentHasScript(a_id)
@@ -835,6 +842,17 @@ namespace CostumeFW::SmfUI
 
             ImGui::Spacing();
             static const char* kKinds[] = { "name", "plugin", "id" };
+            // X-UI1 (test run 2026-07-26): this row used to be combo + input +
+            // button chained with SameLine and NO width hints, so a narrow SMF
+            // window let the input eat the line and pushed "Add" off-screen -
+            // the add path was unusable in practice (that run's log carries
+            // blacklist removals and switch flips, never a single "entry
+            // added"). Widths are pinned, Enter commits, and an empty commit
+            // says so instead of being a silent no-op.
+            constexpr float kKindW = 90.0f;
+            constexpr float kAddW = 60.0f;
+            constexpr float kMinValueW = 120.0f;
+            ImGui::SetNextItemWidth(kKindW);
             if (ImGui::BeginCombo("##blkKind", kKinds[s_blkKind])) {
                 for (int i = 0; i < 3; ++i) {
                     if (ImGui::Selectable(kKinds[i], i == s_blkKind)) {
@@ -844,15 +862,24 @@ namespace CostumeFW::SmfUI
                 ImGui::EndCombo();
             }
             ImGui::SameLine();
-            ImGui::InputText("##blkVal", s_blkValue, sizeof(s_blkValue));
+            const float rowAvail = ImGui::GetContentRegionAvail().x;
+            const float valueW = rowAvail - kAddW - 24.0f;  // 24 = two SameLine gaps
+            ImGui::SetNextItemWidth(valueW > kMinValueW ? valueW : kMinValueW);
+            const bool committed = ImGui::InputText("##blkVal", s_blkValue, sizeof(s_blkValue),
+                ImGui::ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::SameLine();
-            if (ImGui::Button("Add##blkAdd") && s_blkValue[0] != '\0') {
-                const std::string kind = kKinds[s_blkKind];
-                const std::string value = s_blkValue;
-                SKSE::GetTaskInterface()->AddTask(
-                    [kind, value] { AddCaptureBlacklistEntry(kind, value); });
-                s_status = std::format("queued: block {} '{}'", kind, value);
-                s_blkValue[0] = '\0';
+            if (ImGui::Button("Add##blkAdd") || committed) {
+                if (s_blkValue[0] == '\0') {
+                    s_status = "nothing to add - type a value first "
+                               "(name / plugin prefix / LOCALID:Plugin.esp)";
+                } else {
+                    const std::string kind = kKinds[s_blkKind];
+                    const std::string value = s_blkValue;
+                    SKSE::GetTaskInterface()->AddTask(
+                        [kind, value] { AddCaptureBlacklistEntry(kind, value); });
+                    s_status = std::format("queued: block {} '{}'", kind, value);
+                    s_blkValue[0] = '\0';
+                }
             }
             ImGui::TextWrapped(
                 "name = exact display name, or 'prefix*'. plugin = source-plugin "

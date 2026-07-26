@@ -1550,6 +1550,15 @@ namespace CostumeFW
         RebuildPersistAbility();
         ApplyBoxAbilities();
         ApplyCarrierOverrides(false);  // persist pool reconcile with actives back
+        // X-MAN (test run 2026-07-26): the manifest MUST be re-emitted here, not
+        // only inside the quarantine transaction. A hand-edited settings JSON +
+        // this reload (the MCM/SMF "reload from disk" lever) changed the policy
+        // and the admitted set while the manifest kept the OLD content list -
+        // observed as a deny taking visual effect at 12:45:18 with the manifest
+        // still stamped 12:42. Emitting it at the tail of the one function that
+        // rebuilds all derived state keeps "one manifest write per operation"
+        // (ReevaluateContentAdmissions no longer writes it a second time).
+        WriteCarrierManifest();
         SKSE::log::info("settings: reloaded from disk (MCM) - {} box(es), {}/{} persist active restored",
             g_boxes.size(), restored, actives.size());
     }
@@ -2180,8 +2189,11 @@ namespace CostumeFW
             for (const auto& box : g_boxes) {
                 RebuildBoxAbility(box.token);  // remove old SpellItem, then cache erase
             }
+            // X-MAN: the manifest emit moved INTO ReloadSettingsFromDisk's tail
+            // (same position in the sequence, but now every reload path gets it).
+            // Writing it again here would double the per-operation manifest
+            // updates that §F5 checks.
             ReloadSettingsFromDisk();
-            WriteCarrierManifest();
         }
     }
 
@@ -3357,6 +3369,23 @@ namespace CostumeFW
             return "persist";
         }
         return {};
+    }
+
+    std::string CarrierModelForContent(const std::string& a_content)
+    {
+        const std::string holder = ContentHolder(a_content);
+        if (holder.empty() || holder == "persist") {
+            return {};  // persist rides the HDPT pool, not a token ARMA
+        }
+        auto* armo = ResolveArmo(holder);
+        if (!armo || armo->armorAddons.empty()) {
+            return {};
+        }
+        const auto* arma = armo->armorAddons.front();
+        // Both sexes are repointed together (RepointCarrier), so either reads
+        // the live revision; female is the one that revision-compare uses.
+        const char* model = arma ? arma->bipedModels[RE::SEXES::kFemale].model.c_str() : nullptr;
+        return model ? std::string(model) : std::string{};
     }
 
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content)

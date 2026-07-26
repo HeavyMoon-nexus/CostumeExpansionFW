@@ -1,6 +1,40 @@
 # Changelog
 
-## v1.3.2 (2026-07-23)
+## v1.5.0 (2026-07-26)
+
+> Version numbering note: this is the successor to **v1.3.1**. The number jumps
+> to 1.5.0 because **v1.4.0-beta** (NPC support, GitHub pre-release only) already
+> occupies 1.4.x — the released line skips past it rather than colliding with it.
+> Everything below was developed as "v1.3.2" and shipped under this number; no
+> v1.3.2 was ever released.
+
+### Fixed (in-game test run, 2026-07-26)
+
+- **Blocked page: the Add button was unreachable.** The kind selector, the value
+  field and **Add** were chained on one line with no width hints, so a narrow SMF
+  window pushed **Add** off-screen — adding a deny-list entry was effectively
+  impossible (only removal worked). Widths are now pinned, **Enter** commits the
+  entry, and committing an empty field says so instead of doing nothing silently.
+- **Capture refusals are no longer silent in the SMF picker.** The reason was
+  written to a status line at the *top* of the Boxes page while the picker sits
+  deep inside a box's tree node — off-screen exactly when you need it. Refusals
+  now also raise a notification, matching the MCM's behaviour.
+- **"Reload settings from disk" left the carrier manifest stale.** The manifest is
+  now re-emitted at the end of every settings reload, not only inside the
+  deny-list transaction, so a hand-edited `CEF_settings.json` can no longer leave
+  the manifest describing the previous content set. (Still exactly one manifest
+  write per operation.)
+- **A permanently static costume now says why.** When an item's custom bones fall
+  back to the static ancestor remap and stay there after the rebind retries are
+  spent, CFW logs the **carrier file it is actually using** plus how many of the
+  content's custom bones bound to a physics node (`0 of 25`). Previously "the
+  carrier is still attaching" and "the carrier attached but carries none of these
+  bones" were indistinguishable and CFW simply went quiet — which is how a
+  masked carrier file (a higher-priority mod overriding `meshes\CostumeFW`) could
+  silently freeze every SMP costume.
+- **Deliberate deny-list refusals log at warn, not error.** `has no admitted ARMA`
+  now only reaches error level when the mesh genuinely cannot be resolved; a
+  refusal by policy is a decision and reads as one.
 
 ### Added
 - **Capture blacklist** (MARA compatibility - `MARA_COMPAT_PLAN.md`,

@@ -137,7 +137,7 @@ Save, then remove the mod.
 ## Mod compatibility
 
 - **Strip / unequip mods** work automatically: a box hides when its token is unequipped.
-- **Capture blacklist (v1.3.2).** The capture pickers deliberately skip: **runtime-created
+- **Capture blacklist (v1.5.0).** The capture pickers deliberately skip: **runtime-created
   (FF) items** (another mod's invisible host/utility items — reading their inventory data
   can crash instantly, and CEF could never restore them across a save anyway),
   **non-playable armors**, items on the **deny-list** (defaults ship for MARA's
@@ -145,7 +145,7 @@ Save, then remove the mod.
   **`CEF_NoCapture`** keyword — mod authors can tag their utility items via ESP or KID
   (see the included `CostumeFW_NoCapture_KID.ini` template) to keep them out of CEF.
 - **MARA (Multiple Amulets and Rings... Automatically).** Its "CORE Carrier" host item
-  crashed the game when picked in `+ Add worn item` (report: 2026-07-22); v1.3.2 blocks
+  crashed the game when picked in `+ Add worn item` (report: 2026-07-22); v1.5.0 blocks
   it (all four layers above match it). While MARA is running, CFW also **refuses to
   capture jewelry you are currently wearing** — stripping a worn ring/amulet out from
   under MARA crashes inside MARA itself — unequip it first, or capture it from your
