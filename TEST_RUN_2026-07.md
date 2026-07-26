@@ -178,13 +178,33 @@
 
 ## §R P-A(1.3.2): 汎用回帰(監査 §5-4 + Blocked UI)
 
+> 準備: §F の fixture(`houseCARL - DeniedAddon` / `houseCARL - AllowedWrapper`)は
+> **R4 まで有効のままにしておく**。deny エントリの *追加* は X-UI1 のため
+> `CEF_settings.json` の `captureBlacklist` 手編集 +「ディスクから再読込」で代用
+> (R4 は manifest を見ないので X-MAN の影響を受けない)。
+
 - [ ] **R1** Blocked ページ: 既定表示("CORE Carrier"/"MARA*")・name/plugin/id の
       追加/削除・`disableDefaults` トグルが json(`captureBlacklist`)へ永続化。
+      ※ **追加**は X-UI1 でブロック中 = 本項も部分判定になる(削除/トグル/既定表示
+      までを見る)。`disableDefaults` は M8 で実証済み。
 - [ ] **R2** hide-when-worn / body-morph opt-in / show-real-body の既存挙動不変。
 - [ ] **R3** RMSS(Selector of Skins)を P-A に入れている場合: show-real-body の
       肌一致(base-skin-first 修正の実機確認 — 2026-07-12 以来 pending)。
 - [ ] **R4** `cef` コンソール一式(list/shapes/persist)無事。`cef inject` に
       deny 対象 id を渡すと**拒否ログ**が出て注入されない(P2-1 ゲート)。
+      具体手順(fixture 利用・2 層を撃ち分ける):
+      1. `cef list` / `cef shapes 000801:AllowedWrapper.esp` / `cef persist` が
+         例外なく応答すること。
+      2. **R4-a(P2-1 = 登録境界)** ids に `000801:AllowedWrapper.esp` を入れて
+         reload → `cef inject 000801:AllowedWrapper.esp` →
+         ログ `register: inject '000801:AllowedWrapper.esp' not admitted - ...
+         (not registered)`([SkinRebind.cpp:2311](src/SkinRebind.cpp:2311))で
+         **注入されない**こと。
+      3. **R4-b(ARMA 層)** ids を外し plugins に `DeniedAddon` を入れて reload →
+         同じ inject → 今度は admission を通り、`ResolveArma: 801:...
+         skips ARMA ... deny-listed plugin` + `has no admitted ARMA` で
+         **モデル解決側が拒否**すること(F1 と同じ経路をコンソールから踏む)。
+      4. エントリを全削除して `cef inject` が通常どおり成功することを確認。
 - [ ] **R5** 新規ゲームでの初期化・`Prepare for uninstall` → 再有効化の往復。
 
 ## §B P-B(beta.1): NPC ゲート+スパイク+beta 既知バグ実証
