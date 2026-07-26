@@ -188,9 +188,14 @@
       `... id entry removed '000801:AllowedWrapper.esp'`(12:42:09)。
       `disableDefaults` トグルは M8 で実証済み。
       ⚠ **追加**は X-UI1 でブロック中のため未検証(X-UI1 修正後に F3/F5 とまとめて再走)。
-- [ ] **R2** hide-when-worn / body-morph opt-in / show-real-body の既存挙動不変。
-- [ ] **R3** RMSS(Selector of Skins)を P-A に入れている場合: show-real-body の
-      肌一致(base-skin-first 修正の実機確認 — 2026-07-12 以来 pending)。
+- [x] **R2 green(2026-07-26)** hide-when-worn / body-morph opt-in /
+      show-real-body の既存挙動が 1.3.2 でも不変(ユーザー目視)。
+- [-] **R3 スキップ(経過観察へ)** RMSS(Selector of Skins)は互換性確認目的で
+      入れてあるだけで**細かい設定を詰めていない**ため、肌一致の判定に足る条件が
+      作れず未実施。RMSS 互換機能(2026-07-12 の base-skin-first + ApplySkinTextures)
+      は**依頼元の Nexus ユーザーから以降クレームが無い**ことをもって暫定「動作中」
+      と扱い、**経過観察**とする。→ 苦情が来た時点で再開(§R3 は v1.5.0 の
+      ブロッカーにしない)。
 - [x] **R4 green(2 層とも実証・2026-07-26)** ログ実測:
       - **R4-a(P2-1 登録境界)** 12:41:20 `register: inject
         '000801:AllowedWrapper.esp' not admitted - blocked: id on the deny-list
@@ -221,7 +226,9 @@
          skips ARMA ... deny-listed plugin` + `has no admitted ARMA` で
          **モデル解決側が拒否**すること(F1 と同じ経路をコンソールから踏む)。
       4. エントリを全削除して `cef inject` が通常どおり成功することを確認。
-- [ ] **R5** 新規ゲームでの初期化・`Prepare for uninstall` → 再有効化の往復。
+- [ ] **R5 未実施(意図的に最後)** 新規ゲームでの初期化・`Prepare for uninstall`
+      → 再有効化の往復。セーブとログを畳むため、**§F/§R の再走(X-UI1 修正後)を
+      終えてから**に回す。
 
 ## §B P-B(beta.1): NPC ゲート+スパイク+beta 既知バグ実証
 
