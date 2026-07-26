@@ -159,19 +159,29 @@
       ログ実測(10:29:01 / 10:29:53): `ResolveArma: 801:AllowedWrapper.esp selects
       deny-listed ARMA '000800:DeniedAddon.esp' - refused`。鉄鎧メッシュ非表示化を
       確認。エントリ削除(10:32:51)で捕獲可能へ復帰。
-- [x] **F3 部分 green** 表示の即時消滅・**box 内容は保持**を確認。
-      ⚠ **manifest からの content 消滅は未実証** — deny の *追加* を
-      SMF Add で行えず(X-UI1)json 手編集+"reload settings from disk" で代用した結果、
-      `ReloadSettingsFromDisk` は manifest を書き直さない(→ X-MAN)ため
-      当該経路を一度も踏んでいない。**X-UI1 修正後に追加方向のみ再走**。
+- [x] **F3 green(v1.5.0 で再走・2026-07-26 23:57 → 07-27 00:22)** fixture wrapper を
+      **box 57**(token `000813:CostumeFW.esp`、content 1 件だけの純粋な観測条件)へ
+      捕獲し、SMF の Add から plugin `deniedaddon` を追加:
+      - 画面: 鉄の鎧が**即時消滅**、Remove で**即時復活**(ユーザー確認)。
+      - manifest: 追加時 23:57:41.695 と削除時 00:22:59.353 の**両方で
+        `carrier manifest updated`**(= 変化検知ログが両遷移で発火)。最終状態の
+        現物にも `000801:AllowedWrapper.esp -> Armor\Iron\F\CuirassLight_1.nif` が
+        復帰済み → deny 中は当該 content が manifest から抜けていた。
+      - settings: `Costume Box 57` の contents は**終始 `['000801:AllowedWrapper.esp']`**
+        = quarantine-lite(隠すが捨てない)。
+      ※ 入力は小文字 `deniedaddon` でも一致(plugin は前方一致・大小無視)。
 - [x] **F4 green** エントリ削除で鉄鎧が即時復活。
       ※ deny 有効中に MCM から再捕獲を試みて出た拒否ウィンドウは**正しい挙動**
       (捕獲ゲートの拒否。MCM は理由を出す = SMF との差が X-UI2 の裏付け)。
 - [x] **F5 部分 green** ログ実測: `carrier manifest updated` は全 5 回、いずれも
       別々の box 操作に 1 対 1(重複ゼロ)。persist head rebuild も
       `- / + / DoReset3D` が 1 操作 1 組(多重なし)。
-      ⚠ ただし deny **追加**方向の quarantine トランザクション自体が未実行のため、
-      その経路の 1 回性は未検証(F3 と同じ理由)。
+      **deny 追加/削除方向も v1.5.0 で実測して green**: 追加(23:57:41.515)→
+      manifest 1 回(.695)→ reload → `DoReset3D` 1 回(23:57:42.550)、
+      削除(00:22:59.155)→ manifest 1 回(.353)→ reload → `DoReset3D` 1 回。
+      **どちらも 1 操作 1 回**。対照として、box content に無関係な plugin
+      (`mystique lingerie`, 22:46:28)の追加では reload は走るが
+      `carrier manifest updated` は出ない = 変化検知が正しく黙っている。
       ※ 10:38:14 / 10:38:52 の mouth clean rebuild #1/#2 は既知の
       persist head-carrier teeth-drop watchdog の正常動作(自己修復済み)。
 - [x] **F6 green** ログ実測 10:48:50 `allowNonPlayable = true` / 10:49:06 `= false`。
@@ -187,7 +197,10 @@
       `capture: blacklist name entry removed 'testtesttest'`(12:32:44)/
       `... id entry removed '000801:AllowedWrapper.esp'`(12:42:09)。
       `disableDefaults` トグルは M8 で実証済み。
-      ⚠ **追加**は X-UI1 でブロック中のため未検証(X-UI1 修正後に F3/F5 とまとめて再走)。
+      **追加も v1.5.0 で green**: `capture: blacklist plugin entry added
+      'mystique lingerie'`(22:46:28)/`... 'deniedaddon'`(23:57:41)= この
+      ログ群で初めて出た "entry added"。`CEF_settings.json` の
+      `captureBlacklist.plugins` にも永続化を現物確認。
 - [x] **R2 green(2026-07-26)** hide-when-worn / body-morph opt-in /
       show-real-body の既存挙動が 1.3.2 でも不変(ユーザー目視)。
 - [-] **R3 スキップ(経過観察へ)** RMSS(Selector of Skins)は互換性確認目的で
@@ -319,12 +332,12 @@
 
 ### v1.5.0 で直す(2026-07-26 §F ランで確定)
 
-- [ ] **X-DIAG** carrier 診断 warn: manifest が content を宣言しているのに carrier
+- [x] **X-DIAG 修正・実機で初発火(v1.5.0)** carrier 診断 warn: manifest が content を宣言しているのに carrier
       側で期待ボーンが **1 本も見つからない**場合、`carrier NIF の実パス + 期待/実際の
       ボーン数`を warn 出力する。現状は「アタッチ済みで骨 0」と「まだアタッチ中」を
       区別できず、retry 予算 4([SkinRebind.cpp:309](src/SkinRebind.cpp:309))を
       使い切って**黙って諦める** — X-SMP が 10 秒で判るはずが一晩かかった直接原因。
-- [ ] **X-UI1** SMF「Blocked」ページの **Add が事実上機能しない**。
+- [x] **X-UI1 修正・実機実証済み(v1.5.0, 798fe6f)** SMF「Blocked」ページの **Add が事実上機能しない**。
       コンボ+InputText+Add を幅指定なしで `SameLine` 連結しているため
       ([SmfUI.cpp:838-856](src/SmfUI.cpp:838))狭い窓では入力欄/ボタンが画面外へ
       押し出される。加えて `Button(...) && s_blkValue[0] != '\0'` で**空入力時は
@@ -332,17 +345,17 @@
       remove/switch のみ出ている。修正 = `SetNextItemWidth` で幅を確定 +
       `ImGuiInputTextFlags_EnterReturnsTrue` で Enter 追加 + 空入力時のフィードバック。
       **F3/F5 の残りはこの修正後に再走**。
-- [ ] **X-UI2** SMF ピッカーの**捕獲拒否が無言**。`QueueCapture` は理由を
+- [~] **X-UI2 修正済み・目視確認待ち(v1.5.0)** SMF ピッカーの**捕獲拒否が無言**。`QueueCapture` は理由を
       `s_status` に入れる([SmfUI.cpp:115](src/SmfUI.cpp:115))が、Boxes ページの
       表示位置はページ最上部([SmfUI.cpp:386](src/SmfUI.cpp:386))で、ピッカーは
       box の TreeNode 内部の深い位置 — 選択直後に目に入らない。MCM は拒否
       ウィンドウを出すので体感差が大きい。修正 = 拒否時に `DebugNotification`、
       またはピッカー直下へステータス行を出す。
-- [ ] **X-LOG1**(小) 明示 deny による `ResolveArma: ... has no admitted ARMA` が
+- [~] **X-LOG1 修正済み・再確認待ち(v1.5.0)**(小) 明示 deny による `ResolveArma: ... has no admitted ARMA` が
       **[error]** レベル。2026-07-26 のランでは**ログ中の error 7 件が全てこれ**で、
       設計どおりの拒否が「障害」に見える。修正 = 拒否理由が policy 由来のときは
       warn へ落とす(真の解決失敗のみ error に残す)。
-- [ ] **X-MAN** `ReloadSettingsFromDisk`(MCM/SMF の「ディスクから再読込」・
+- [x] **X-MAN 修正・実機実証済み(v1.5.0)** `ReloadSettingsFromDisk`(MCM/SMF の「ディスクから再読込」・
       [Papyrus.cpp:584](src/Papyrus.cpp:584) / [SmfUI.cpp:308](src/SmfUI.cpp:308))は
       **manifest を書き直さない**。`WriteCarrierManifest` は
       `ReevaluateContentAdmissions`([BoxStore.cpp:2178](src/BoxStore.cpp:2178))
