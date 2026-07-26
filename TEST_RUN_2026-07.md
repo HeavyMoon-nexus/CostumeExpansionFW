@@ -183,15 +183,31 @@
 > `CEF_settings.json` の `captureBlacklist` 手編集 +「ディスクから再読込」で代用
 > (R4 は manifest を見ないので X-MAN の影響を受けない)。
 
-- [ ] **R1** Blocked ページ: 既定表示("CORE Carrier"/"MARA*")・name/plugin/id の
-      追加/削除・`disableDefaults` トグルが json(`captureBlacklist`)へ永続化。
-      ※ **追加**は X-UI1 でブロック中 = 本項も部分判定になる(削除/トグル/既定表示
-      までを見る)。`disableDefaults` は M8 で実証済み。
+- [x] **R1 部分 green(2026-07-26 12:32-12:42)** 削除がログ+json へ反映:
+      `capture: blacklist name entry removed 'testtesttest'`(12:32:44)/
+      `... id entry removed '000801:AllowedWrapper.esp'`(12:42:09)。
+      `disableDefaults` トグルは M8 で実証済み。
+      ⚠ **追加**は X-UI1 でブロック中のため未検証(X-UI1 修正後に F3/F5 とまとめて再走)。
 - [ ] **R2** hide-when-worn / body-morph opt-in / show-real-body の既存挙動不変。
 - [ ] **R3** RMSS(Selector of Skins)を P-A に入れている場合: show-real-body の
       肌一致(base-skin-first 修正の実機確認 — 2026-07-12 以来 pending)。
-- [ ] **R4** `cef` コンソール一式(list/shapes/persist)無事。`cef inject` に
-      deny 対象 id を渡すと**拒否ログ**が出て注入されない(P2-1 ゲート)。
+- [x] **R4 green(2 層とも実証・2026-07-26)** ログ実測:
+      - **R4-a(P2-1 登録境界)** 12:41:20 `register: inject
+        '000801:AllowedWrapper.esp' not admitted - blocked: id on the deny-list
+        (capture blacklist) (not registered)` → 注入されず。
+      - **R4-b(ARMA 層)** id エントリ削除後の 12:42:33、reload バーストから
+        独立した単発で `ResolveArma: 801:AllowedWrapper.esp skips ARMA B8000800
+        from deny-listed plugin 'DeniedAddon.esp'` + `has no admitted ARMA`
+        (成功時の `InjectArma ... 3p=` 行は無し)= admission を通ってから
+        モデル解決側で拒否された署名。
+      - **副産物(登録境界のもう 1 面)** 12:40:56 の reload で
+        `register: box content '000801:AllowedWrapper.esp' not admitted - ...
+        **(config kept, not registered)**` = quarantine-lite(設定は保持)の実証。
+      - ⚠ **未実施**: 手順 4 の陽性対照(全エントリ削除後に inject が成功し
+        `InjectArma ... 3p=` が出る)。ログに当該行なし。
+      - ⚠ **後始末漏れ**: セッション終了時点で `disableDefaults=true` /
+        `plugins=["DeniedAddon"]` が**残ったまま**(既定の MARA 遮断が無効)。
+        次回起動前に false / 空へ戻すこと。
       具体手順(fixture 利用・2 層を撃ち分ける):
       1. `cef list` / `cef shapes 000801:AllowedWrapper.esp` / `cef persist` が
          例外なく応答すること。
@@ -264,6 +280,11 @@
       `built=0 skipped(unchanged)=9` を返すため。**対処 = test mod の `meshes` を
       削除/hide**(ユーザー実施済み)→ 再装備で復旧。
       **恒久策候補は X-DIAG(下)**。
+      **2026-07-26 12:42 のログで復旧を実機確認**: `bound N bone(s) to FSMP
+      physics-driven node(s)` が 111 行、remap 111 行、しかも**両者のボーン分布が
+      完全一致**(XLS1/XLS2・VDFSA_bobr・Ellxe* とも bound と remap の両方に出る)
+      = 3p は FSMP 駆動へバインド、1p は仕様どおり静的 remap
+      ([SkinRebind.cpp:590](src/SkinRebind.cpp:590))という正常形。
       <details><summary>当時の triage 計画(記録)</summary>
 
       初動(次セッション):
@@ -310,6 +331,10 @@
       box の TreeNode 内部の深い位置 — 選択直後に目に入らない。MCM は拒否
       ウィンドウを出すので体感差が大きい。修正 = 拒否時に `DebugNotification`、
       またはピッカー直下へステータス行を出す。
+- [ ] **X-LOG1**(小) 明示 deny による `ResolveArma: ... has no admitted ARMA` が
+      **[error]** レベル。2026-07-26 のランでは**ログ中の error 7 件が全てこれ**で、
+      設計どおりの拒否が「障害」に見える。修正 = 拒否理由が policy 由来のときは
+      warn へ落とす(真の解決失敗のみ error に残す)。
 - [ ] **X-MAN** `ReloadSettingsFromDisk`(MCM/SMF の「ディスクから再読込」・
       [Papyrus.cpp:584](src/Papyrus.cpp:584) / [SmfUI.cpp:308](src/SmfUI.cpp:308))は
       **manifest を書き直さない**。`WriteCarrierManifest` は
