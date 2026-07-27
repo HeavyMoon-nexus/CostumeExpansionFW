@@ -2225,6 +2225,113 @@ namespace CostumeFW
         return changed;
     }
 
+    // --- persist-CTD test harness (2026-07-28) -----------------------------
+    // The crash needs a CEF holder node whose children array has a size and no
+    // usable buffer. Rather than trying to rebuild the reporter's load order,
+    // these two probe the hypothesis directly.
+
+    // `cef arraytest` - synthetic, needs NO mods and no costume. Builds holder
+    // nodes exactly the way InjectOnRoot does and reports the child array after
+    // every attach, for the OLD capacity (0, engine-grown) and for pre-sized
+    // ones. If Create(0) + AttachChild ever leaves size > 0 with an unusable
+    // buffer, it shows up here in one line and the hypothesis is proven in the
+    // console. If all rows stay walkable, the cause is elsewhere and this says
+    // so just as clearly.
+    std::vector<std::string> ChildArrayProbe()
+    {
+        std::vector<std::string> out;
+        const auto snap = [](RE::NiNode* a_n) {
+            const auto& k = a_n->GetChildren();
+            return std::format("size={} cap={} data={}", k.size(), k.capacity(),
+                static_cast<const void*>(k.begin()));
+        };
+        for (const std::uint16_t cap : { std::uint16_t{ 0 }, std::uint16_t{ 1 }, std::uint16_t{ 3 } }) {
+            RE::NiPointer<RE::NiNode> holder{ RE::NiNode::Create(cap) };
+            if (!holder) {
+                out.push_back(std::format("Create({}) returned null", cap));
+                continue;
+            }
+            holder->name = "CEF_ArrayProbe";
+            out.push_back(std::format("Create({}) -> {}", cap, snap(holder.get())));
+            for (int i = 0; i < 4; ++i) {
+                RE::NiPointer<RE::NiNode> child{ RE::NiNode::Create(0) };
+                if (!child) {
+                    break;
+                }
+                child->name = std::format("probe_child_{}", i).c_str();
+                holder->AttachChild(child.get(), true);  // firstAvail, as InjectOnRoot does
+                const bool ok = ChildrenWalkable(holder.get());
+                out.push_back(std::format("  +child{} -> {} walkable={}", i, snap(holder.get()),
+                    ok ? "yes" : "NO  <-- REPRODUCED"));
+            }
+            // The exact read the crash took, but only when it is safe to try.
+            if (ChildrenWalkable(holder.get())) {
+                const RE::BSFixedString probe{ "probe_child_2" };
+                auto* found = holder->GetObjectByName(probe);
+                out.push_back(std::format("  GetObjectByName('probe_child_2') -> {}",
+                    static_cast<const void*>(found)));
+            } else {
+                out.push_back("  GetObjectByName SKIPPED - walking this array is the crash");
+            }
+        }
+        return out;
+    }
+
+    // `cef nodediag` - live side. Reports the child array of every CEF node on
+    // the player, plus ANY node that fails the walkability guard. Run it right
+    // after the operation that crashes: if a holder is already bad here, we have
+    // caught the corruption without needing the crash.
+    std::vector<std::string> ChildArrayScan()
+    {
+        std::vector<std::string> out;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            out.push_back("no player");
+            return out;
+        }
+        int bad = 0, cef = 0;
+        for (int fp = 0; fp <= 1; ++fp) {
+            auto* root = player->Get3D(fp != 0);
+            auto* rootNode = root ? root->AsNode() : nullptr;
+            if (!rootNode) {
+                continue;
+            }
+            const char* tag = fp ? "1p" : "3p";
+            std::vector<RE::NiNode*> stack{ rootNode };
+            while (!stack.empty()) {
+                auto* node = stack.back();
+                stack.pop_back();
+                const std::string_view nm{ node->name.c_str() };
+                const bool ours = nm.starts_with(kNodePrefix) || nm == kRealBodyNode;
+                const bool walkable = ChildrenWalkable(node);
+                if (!walkable || ours) {
+                    const auto& k = node->GetChildren();
+                    out.push_back(std::format("[{}] {}{} size={} cap={} data={}", tag, nm,
+                        walkable ? "" : "  <<< UNWALKABLE", k.size(), k.capacity(),
+                        static_cast<const void*>(k.begin())));
+                    if (ours) {
+                        ++cef;
+                    }
+                    if (!walkable) {
+                        ++bad;
+                    }
+                }
+                if (!walkable) {
+                    continue;  // never descend into the thing that crashes
+                }
+                for (auto& child : node->GetChildren()) {
+                    if (auto* c = child.get(); c) {
+                        if (auto* cn = c->AsNode()) {
+                            stack.push_back(cn);
+                        }
+                    }
+                }
+            }
+        }
+        out.push_back(std::format("-- {} CEF node(s), {} unwalkable array(s)", cef, bad));
+        return out;
+    }
+
     void RebuildPlayerHead()
     {
         auto* player = RE::PlayerCharacter::GetSingleton();

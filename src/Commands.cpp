@@ -113,7 +113,8 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | "
+                  "hideshape | recover | headdiag | hair | nodediag | arraytest");
             return;
         }
 
@@ -384,6 +385,23 @@ namespace CostumeFW
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
+        } else if (sub == "arraytest" || sub == "nodediag") {
+            // persist-CTD harness (BUGREPORT_2026-07-27). Both run on the main
+            // thread and print to console AND log, so a tester can paste either.
+            const bool synthetic = (sub == "arraytest");
+            SKSE::GetTaskInterface()->AddTask([synthetic] {
+                const auto lines = synthetic ? ChildArrayProbe() : ChildArrayScan();
+                SKSE::log::info("--- cef {} ---", synthetic ? "arraytest" : "nodediag");
+                for (const auto& l : lines) {
+                    SKSE::log::info("  {}", l);
+                }
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print(synthetic ? "[CEF] arraytest:" : "[CEF] nodediag:");
+                    for (const auto& l : lines) {
+                        c->Print(("  " + l).c_str());
+                    }
+                }
+            });
         } else if (sub == "recover") {
             // Deliberate escape hatch for the STORE-ONLY return rule: the MCM
             // return flows never fabricate an item (a store miss on this save
@@ -400,7 +418,8 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | hideshape | recover | headdiag | hair");
+            Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | "
+                  "hideshape | recover | headdiag | hair | nodediag | arraytest");
         }
     }
 }

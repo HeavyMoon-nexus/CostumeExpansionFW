@@ -215,4 +215,17 @@ namespace CostumeFW
     // "_Head_" bones (e.g. from an equipped SMP hair) that the injection rebind
     // can then target. Console-prints a summary + logs the full list. Main thread.
     void HeadDiag();
+
+    // --- persist-CTD test harness (BUGREPORT_2026-07-27) --------------------
+    // `cef arraytest`: synthetic probe of the NiNode child array, needing no
+    // mods and no costume - builds holders the way InjectOnRoot does (old
+    // Create(0) + engine growth, and pre-sized) and reports the array after
+    // every attach. Reproduces the "size with no usable buffer" state, or
+    // rules the hypothesis out.
+    std::vector<std::string> ChildArrayProbe();
+
+    // `cef nodediag`: live scan of the player's skeletons - the child array of
+    // every CEF node, plus any node that fails the walkability guard. Run it
+    // right after the operation that used to crash.
+    std::vector<std::string> ChildArrayScan();
 }
