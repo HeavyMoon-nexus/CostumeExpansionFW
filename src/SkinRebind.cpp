@@ -461,17 +461,38 @@ namespace CostumeFW
             const std::uint32_t expected = g_rebind3pFsmp + g_rebind3pRemap;
             SKSE::log::warn(
                 "  carrier diagnostic '{}': {} of {} custom bone(s) bound to an FSMP "
-                "physics node after {} retries - carrier = '{}'. At 0 bound, the "
-                "carrier is attached but holds none of these bones: usually the wrong "
-                "FILE (another mod overriding meshes\\CostumeFW, or a pristine stub "
-                "from a release archive) or a carrier built without this content - "
-                "check that file, then re-equip the token.",
+                "physics node after {} retries - carrier = '{}'. FIRST thing to check "
+                "is CEF_sync.log: a content with no inline HDT xml is SKIPPED when the "
+                "carrier is built (\"skipped for the carrier\"), and then it can never "
+                "bind - that is by far the most common cause of 0 bound, and it is not "
+                "something re-equipping fixes. Otherwise: the wrong FILE (another mod "
+                "overriding meshes\\CostumeFW, or a pristine stub from a release "
+                "archive) - check that file, then re-equip the token.",
                 a_id, g_rebind3pFsmp, expected, kRebindRetryBudget,
                 carrier.empty() ? "<none: persist head-carrier or unheld>" : carrier);
+            SKSE::log::info("  '{}': parked - no more rebind retries until it binds "
+                            "physics again (a carrier rebuild or a 3D rebuild re-arms it)",
+                a_id);
         }
 
         void RequestRebindRetry(const std::string& a_id)
         {
+            // Already diagnosed as permanently static? Do not queue it again.
+            //
+            // In-game 2026-07-28: a content nifcarrier EXCLUDED from the carrier
+            // ("skipped for the carrier - no inline HDT xml") can never bind, but
+            // it still fell back to static on every pass, and every externally
+            // triggered Reconcile re-armed the retry budget - so the retry loop
+            // never ended. That run logged 35 retry rounds over 2.5 minutes,
+            // growing to 7 items, each round a full detach + NIF load + clone +
+            // rebind + reattach. Permanent scene-graph churn for work that cannot
+            // succeed. g_staticDiagReported is cleared the moment the item binds
+            // physics again (InjectInternal), so a carrier rebuild or a 3D rebuild
+            // still re-arms it - this parks the hopeless case, it does not give up
+            // on a recoverable one.
+            if (g_staticDiagReported.contains(a_id)) {
+                return;
+            }
             if (std::find(g_rebindRetryIds.begin(), g_rebindRetryIds.end(), a_id) ==
                 g_rebindRetryIds.end()) {
                 g_rebindRetryIds.push_back(a_id);

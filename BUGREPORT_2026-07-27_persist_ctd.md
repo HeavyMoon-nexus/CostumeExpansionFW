@@ -345,6 +345,70 @@ FSMP 4.0.1 仮説の検証としては、**ほぼ何も試していないに等�
 5. persist を **有効化して head-carrier を登録** → `DoReset3D` を走らせる
 6. 各ステップ直後に **`cef nodediag`**
 
+### `cef headdiag` の結果 — FSMP 4.0.1 は無罪、別の欠陥が出た(2026-07-28)
+
+**FSMP 4.0.1 互換性は問題なし:**
+
+- 命名は `hdtSSEPhysics_AutoRename_(Armor|Head)_<8hex>` のまま →
+  `ParseRenamedBone` は正常に動く。**懸念していた命名変更は起きていない**
+- CEF 自身のキャリアも実際にマージされている:
+  `bound 56 bone(s) to FSMP physics-driven node(s)
+   (e.g. GLDressH_A 1->hdtSSEPhysics_AutoRename_Head_00000008 C5A73E8E3_GLDressH_A 1)`
+  ← nifcarrier の名前空間プレフィックス付き = **persist head-carrier 経路は生きている**
+- headdiag 3p: `8 Armor + 94 Head physics bone(s), 2 merge group(s)`
+
+**では「remap されたまま戻らない」のは何か — `CEF_sync.log` に答えがあった:**
+
+```
+[sync] box46: content '…Gala_DressMAscot_1.nif' skipped for the carrier
+       - no inline HDT xml (not SMP, or defaultBBPs-driven which is not detected)
+[sync] box38: all 5 declared content(s) unresolved/excluded - keeping previous carrier
+[sync] box34: all 7 declared content(s) unresolved/excluded - keeping previous carrier
+[sync] box58: all 4 declared content(s) unresolved/excluded - keeping previous carrier
+[sync] box59: all 1 declared content(s) unresolved/excluded - keeping previous carrier
+[persist] 5 SMP content(s)
+```
+
+**21 コンテンツがキャリア構築時に除外されている**(inline HDT xml が無い =
+非 SMP、あるいは defaultBBPs 駆動で検出できない)。除外されたコンテンツの
+ボーンはキャリアに入っていないので、**原理的に永久にバインドできない**。
+
+### 派生して見つかった欠陥 2 件(CTD とは別。ただし環境的に関係しうる)
+
+**D1: 永久に成功しないリバインドを無限に再試行していた。**
+
+`RequestRebindRetry` は静的フォールバックのたびに再試行を積み、
+`Reconcile()` は外部起因のたびに `g_rebindRetryBudget` を**再武装**する。
+除外済みコンテンツは毎回必ず静的に落ちるので、**ループが終わらない**。
+実測: **35 ラウンド / 2.5 分、対象は 7 件まで増加、ログ末尾でもまだ継続中**。
+1 ラウンドごとに detach + NIF ロード + clone + リバインド + 再アタッチ。
+つまり **holder ノードを毎秒作っては壊し続けていた**。
+
+→ 修正: `g_staticDiagReported` に入っている(= 既に「恒久的に静的」と
+診断済みの)id は再試行を積まない。このセットは物理バインドに成功した
+瞬間に `InjectInternal` が消すので、**キャリア再生成や 3D 再構築があれば
+自動的に再武装される**。望みのない case だけを parking する。
+
+> ⚠ **これが CTD の原因だとは主張しない。** ただし報告者の環境
+> (persist 15-20 件、多くが非 SMP)では同じループが常時回っていたはずで、
+> **FSMP が head merge 世代を作り直している最中(本ログでも
+> `Head_00000002 → 5 → 8` と進んでいる)に、毎秒ノードを作り壊す**という
+> 状態は、children 配列を中途半端な瞬間に観測する条件そのものではある。
+
+**D2: 実行時の診断メッセージが嘘をついていた。**
+
+`carrier diagnostic ... 0 of N bound` は「**ファイルが違う。再装備しろ**」と
+案内していたが、実際の最頻原因は「**そのコンテンツはキャリア構築時に
+除外されている**」で、再装備では絶対に直らない。
+→ 修正: 最初に `CEF_sync.log` の `skipped for the carrier` を見ろ、と明示。
+
+**その他、記録しておくべき sync 側の警告:**
+
+- `[persist] WARNING proxy pool exhausted (8) - collision mesh '…' goes inert` ×2
+  → persist の proxy プールは **8 個上限**で、既に使い切っている。
+  persist を増やすほど衝突が黙って無効化される。**要スケール対策(別件)**
+- `[persist] WARNING collision mesh '…' has no skinned shape in the merge` ×6
+
 ### まだ分かっていないこと / 次の一手
 
 - **配列が壊れる原因は未特定**(`Create(0)` は否認された)。ガードのログ

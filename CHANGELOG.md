@@ -43,6 +43,22 @@
   `n of N shown` count — scrolling makes a long catalog reachable, filtering
   makes it navigable.
 
+- **A costume that can never get physics no longer retries forever.** When a
+  content's custom bones fall back to static, CFW schedules a re-injection in
+  case the physics carrier was still attaching — but a content that nifcarrier
+  *excluded* from the carrier (no inline HDT xml: not SMP, or driven by
+  defaultBBPs, which it cannot detect) can never bind, and every reconcile
+  re-armed the retry budget. Measured in-game: 35 retry rounds over two and a
+  half minutes, growing to seven items, each one a full detach, NIF load, clone,
+  rebind and reattach — constant scene-graph churn for work that cannot succeed.
+  Such a content is now parked once diagnosed, and re-armed automatically the
+  moment it binds physics again (a carrier rebuild or a 3D rebuild).
+- **The "0 of N bones bound" diagnostic no longer sends you the wrong way.** It
+  told you to check the carrier file and re-equip the token. The most common
+  cause is that the content was skipped when the carrier was built — which
+  `CEF_sync.log` states plainly (`skipped for the carrier`), and which
+  re-equipping cannot fix. The message now points there first.
+
 ### Changed
 
 - **Injected costumes allocate their node once instead of once per shape.** The
