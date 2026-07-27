@@ -9,6 +9,7 @@
 #include "RE/T/TESDataHandler.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <format>
 #include <string>
@@ -41,6 +42,7 @@ namespace CostumeFW::SmfUI
         // --- render-thread-only UI state (tasks never touch these) -----------
         std::string s_selContent;         // content id shown in the detail block
         char s_invFilter[64] = "";        // "+ Add from inventory" name filter
+        char s_catFilter[64] = "";        // Persist page: catalog row filter (X-SCROLL)
         char s_hideSlots[64] = "";        // hide-when-worn slot list edit buffer
         std::string s_hideSlotsFor;       // which content the buffer was loaded for
         char s_exportName[64] = "";       // "Export as preset" name buffer
@@ -53,6 +55,58 @@ namespace CostumeFW::SmfUI
         // user's intent until the live state catches up (menu close), then drop
         // the override. The MCM did the same via SetToggleOptionValue.
         std::unordered_map<std::string, bool> s_pendingWear;  // token -> desired
+
+        // --- scrollable list regions (X-SCROLL) ------------------------------
+        // Nexus report 2026-07-27 (recorded against v1.3.0): a persist catalog
+        // that outgrew the page height had NO way to reach its newest entries -
+        // the reporter had to DELETE old entries to get at the latest one. Every
+        // unbounded list on these pages now lives in its own child region: the
+        // list scrolls INSIDE a fixed frame while the page's controls (pickers,
+        // filters, add rows, destructive buttons) stay pinned OUTSIDE it, so a
+        // long list can never push them off-screen either (the X-UI1 failure
+        // mode, one axis over).
+        //
+        // The region takes whatever vertical space the host page has left. SMF
+        // owns the page window, so if it ever auto-sizes to content the avail
+        // height is small or negative - the floor keeps the region usable (and
+        // scrollable) in that case instead of collapsing to nothing.
+        constexpr float kListMinHeight = 180.0f;
+
+        // a_reserveBelow: height to leave for the controls drawn AFTER the list.
+        // BeginChild's return is deliberately ignored - content submission stays
+        // unconditional (a clipped region must not drop TreeNode/selection state),
+        // and EndChild is mandatory either way.
+        void BeginScrollList(const char* a_id, float a_reserveBelow = 0.0f)
+        {
+            float h = ImGui::GetContentRegionAvail().y - a_reserveBelow;
+            if (h < kListMinHeight) {
+                h = kListMinHeight;
+            }
+            ImGui::BeginChild(a_id, ImGui::ImVec2(0.0f, h), ImGui::ImGuiChildFlags_Border,
+                ImGui::ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        }
+
+        void EndScrollList()
+        {
+            ImGui::EndChild();
+        }
+
+        // Case-insensitive substring match; an empty needle passes everything.
+        // Pairs with the scroll regions: scrolling makes a long list reachable,
+        // filtering makes it navigable.
+        bool RowMatches(const std::string& a_hay, const char* a_needle)
+        {
+            if (!a_needle || a_needle[0] == '\0') {
+                return true;
+            }
+            const auto lower = [](std::string s) {
+                for (auto& c : s) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                return s;
+            };
+            return lower(a_hay).find(lower(a_needle)) != std::string::npos;
+        }
 
         // Biped-slot display names. C++ twin of the MCM's SlotName (psc) while
         // the MCM lives; SMF is the owning copy once the MCM retires.
@@ -395,6 +449,7 @@ namespace CostumeFW::SmfUI
             }
             ImGui::Separator();
 
+            BeginScrollList("##cfwboxlist");
             const int n = BoxCount();
             for (int i = 0; i < n; ++i) {
                 const BoxDefInfo b = BoxAt(i);
@@ -545,6 +600,7 @@ namespace CostumeFW::SmfUI
                 }
                 ImGui::TreePop();
             }
+            EndScrollList();
         }
 
         void __stdcall RenderPersist()
@@ -609,12 +665,50 @@ namespace CostumeFW::SmfUI
                 return std::find(actives.begin(), actives.end(), id) != actives.end();
             };
 
-            ImGui::SeparatorText(
-                std::format("Catalog ({}) - shared across saves", contents.size()).c_str());
+            // Active on this save but no longer in the shared catalog. Computed
+            // BEFORE the scroll region so it can ride inside it (one scrollable
+            // area for everything list-shaped on this page).
+            std::vector<std::string> uncat;
+            for (const auto& id : actives) {
+                if (std::find(contents.begin(), contents.end(), id) == contents.end()) {
+                    uncat.push_back(id);
+                }
+            }
+
+            // X-SCROLL: the catalog is the list that grows without bound (one row
+            // per captured costume piece, shared across saves). Filter + scroll.
+            ImGui::InputText("Catalog filter##pcf", s_catFilter, sizeof(s_catFilter));
+            // One name resolve per entry per frame (the header, the filter and the
+            // count all read it) - this callback runs every frame.
+            std::vector<std::string> names;
+            names.reserve(contents.size());
+            std::size_t shown = 0;
             for (const auto& id : contents) {
+                names.push_back(ItemDisplayName(id));
+                if (RowMatches(names.back(), s_catFilter)) {
+                    ++shown;
+                }
+            }
+            ImGui::SeparatorText(
+                (shown == contents.size()
+                        ? std::format("Catalog ({}) - shared across saves", contents.size())
+                        : std::format("Catalog ({} of {} shown) - shared across saves", shown,
+                              contents.size()))
+                    .c_str());
+
+            // Reserve the row "Remove all persist" occupies below the region, so a
+            // long catalog can never push that button (or the uncataloged rows)
+            // out of reach - the exact failure the report describes.
+            BeginScrollList("##pclist",
+                contents.empty() ? 0.0f : ImGui::GetFrameHeightWithSpacing());
+            for (std::size_t i = 0; i < contents.size(); ++i) {
+                const std::string& id = contents[i];
+                if (!RowMatches(names[i], s_catFilter)) {
+                    continue;
+                }
                 const bool act = isActive(id);
-                const std::string header = std::format("{}{}###pc{}", ItemDisplayName(id),
-                    act ? "  [ON]" : "", id);
+                const std::string header =
+                    std::format("{}{}###pc{}", names[i], act ? "  [ON]" : "", id);
                 if (!ImGui::TreeNode(header.c_str())) {
                     continue;
                 }
@@ -671,28 +765,8 @@ namespace CostumeFW::SmfUI
                 }
                 ImGui::TreePop();
             }
-            if (!contents.empty() && ImGui::Button("Remove all persist##prall")) {
-                SKSE::GetTaskInterface()->AddTask([] {
-                    const auto all = PersistContents();
-                    const auto act = PersistActiveIds();
-                    for (const auto& id : all) {
-                        // Return only what THIS save shows (P1-4).
-                        if (std::find(act.begin(), act.end(), id) != act.end()) {
-                            ReturnStoredItem(id, true);
-                            UiOps::SetPersistActive(id, false);
-                        }
-                        UiOps::RemovePersist(id, false);
-                    }
-                    RE::DebugNotification("CostumeFW: removed all persist");
-                });
-            }
-
-            // Active on this save but no longer in the shared catalog.
-            std::vector<std::string> uncat;
-            for (const auto& id : actives) {
-                if (std::find(contents.begin(), contents.end(), id) == contents.end()) {
-                    uncat.push_back(id);
-                }
+            if (shown == 0 && !contents.empty()) {
+                ImGui::TextDisabled("(no catalog entry matches the filter)");
             }
             if (!uncat.empty()) {
                 ImGui::SeparatorText(
@@ -714,6 +788,24 @@ namespace CostumeFW::SmfUI
                     }
                 }
             }
+            EndScrollList();
+
+            // Pinned below the scroll region (see the reserve above).
+            if (!contents.empty() && ImGui::Button("Remove all persist##prall")) {
+                SKSE::GetTaskInterface()->AddTask([] {
+                    const auto all = PersistContents();
+                    const auto act = PersistActiveIds();
+                    for (const auto& id : all) {
+                        // Return only what THIS save shows (P1-4).
+                        if (std::find(act.begin(), act.end(), id) != act.end()) {
+                            ReturnStoredItem(id, true);
+                            UiOps::SetPersistActive(id, false);
+                        }
+                        UiOps::RemovePersist(id, false);
+                    }
+                    RE::DebugNotification("CostumeFW: removed all persist");
+                });
+            }
         }
 
         void __stdcall RenderPresets()
@@ -729,6 +821,7 @@ namespace CostumeFW::SmfUI
                 ImGui::TextDisabled("(none - export a box as a preset, or install a CEFP_*.json)");
                 return;
             }
+            BeginScrollList("##cfwpresetlist");
             for (const auto& p : s_list) {
                 const std::string assigned = PresetAssignedTo(p.name);
                 const std::string stat = assigned.empty()
@@ -762,6 +855,7 @@ namespace CostumeFW::SmfUI
                 }
                 ImGui::TreePop();
             }
+            EndScrollList();
         }
 
         void __stdcall RenderDiagnostics()
@@ -774,6 +868,9 @@ namespace CostumeFW::SmfUI
                 s_lines = DiagLines();
                 s_loaded = true;
             }
+            // Grows with the store (one line per box content / persist entry) -
+            // the report's "can't reach the bottom" applies here too.
+            BeginScrollList("##cfwdiaglist");
             for (const auto& l : s_lines) {
                 if (l.rfind("# ", 0) == 0) {
                     ImGui::SeparatorText(l.c_str() + 2);
@@ -781,6 +878,7 @@ namespace CostumeFW::SmfUI
                     ImGui::TextUnformatted(l.c_str());
                 }
             }
+            EndScrollList();
         }
     }
 
@@ -813,6 +911,10 @@ namespace CostumeFW::SmfUI
                     [noDefaults] { SetCaptureBlacklistFlag("disableDefaults", noDefaults); });
             }
 
+            // X-SCROLL: the deny-list is user-grown; keep the add row (X-UI1) and
+            // its help text below the region so they stay reachable at any size.
+            BeginScrollList("##blklist",
+                ImGui::GetFrameHeightWithSpacing() + 4.0f * ImGui::GetTextLineHeightWithSpacing());
             ImGui::SeparatorText("Shipped defaults");
             for (const auto& name : view.defaultNames) {
                 ImGui::Text(view.disableDefaults ? "name: %s (off)" : "name: %s", name.c_str());
@@ -839,6 +941,7 @@ namespace CostumeFW::SmfUI
             renderRows("name", view.names);
             renderRows("plugin", view.plugins);
             renderRows("id", view.ids);
+            EndScrollList();
 
             ImGui::Spacing();
             static const char* kKinds[] = { "name", "plugin", "id" };
