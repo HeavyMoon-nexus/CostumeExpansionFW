@@ -115,6 +115,62 @@ namespace CostumeFW
         std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> g_boundBoneRefs;
         std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
 
+        // Detach every node named a_name under a_root, WITHOUT ever dereferencing
+        // NiAVObject::parent. Returns how many were removed.
+        //
+        // CONFIRMED CTD 2026-07-27 (three crash logs across v1.3.1 and v1.5.0, all
+        // the same instruction): DetachRealBody did `if (auto* p = n->parent)
+        // p->DetachChild(n)` and `p` was a DANGLING pointer - the faulting read was
+        // p's vtable, and p held 0x7FF6...+0x1AF7A0, an address inside SkyrimSE's
+        // CODE section. The dead-bind sweep already documents why (see
+        // HasDeadPhysicsBind): FSMP retires a merge generation and frees the parent
+        // while the child is still referenced, so "liveness is membership, never a
+        // parent-chain walk". Every live-tree detach now follows that rule: descend
+        // from the root and detach through the parent we ARRIVED THROUGH, which we
+        // have just dereferenced successfully. A stale ->parent can no longer be
+        // read at all, let alone called through.
+        template <class Pred>
+        int DetachMatchingFrom(RE::NiAVObject* a_root, Pred a_match)
+        {
+            auto* rootNode = a_root ? a_root->AsNode() : nullptr;
+            if (!rootNode) {
+                return 0;
+            }
+            int removed = 0;
+            std::vector<RE::NiNode*> stack{ rootNode };
+            while (!stack.empty()) {
+                auto* parent = stack.back();
+                stack.pop_back();
+                // Collect first: DetachChild mutates the child array we iterate.
+                // NiPointer keeps each match alive across its own detach.
+                std::vector<RE::NiPointer<RE::NiAVObject>> hits;
+                for (auto& child : parent->GetChildren()) {
+                    auto* obj = child.get();
+                    if (!obj) {
+                        continue;
+                    }
+                    if (a_match(obj)) {
+                        hits.push_back(child);  // do NOT descend into a match
+                    } else if (auto* node = obj->AsNode()) {
+                        // Safe to hold raw: only matches are detached, and we never
+                        // descend into one, so no ancestor of a queued node is removed.
+                        stack.push_back(node);
+                    }
+                }
+                for (auto& hit : hits) {
+                    parent->DetachChild(hit.get());
+                    ++removed;
+                }
+            }
+            return removed;
+        }
+
+        int DetachNamedFrom(RE::NiAVObject* a_root, const RE::BSFixedString& a_name)
+        {
+            return DetachMatchingFrom(
+                a_root, [&](RE::NiAVObject* a_obj) { return a_obj->name == a_name; });
+        }
+
         void DetachNodes(const std::string& a_id)
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -122,43 +178,13 @@ namespace CostumeFW
                 return;
             }
             g_boundBoneRefs.erase(a_id);  // release the bone pins with the attach
-            const std::string nodeName = NodeName(a_id);
+            const RE::BSFixedString nodeName{ NodeName(a_id).c_str() };
             auto detachFrom = [&](RE::NiAVObject* a_root, const char* a_tag) {
-                if (!a_root) {
-                    return;
-                }
-                int removed = 0;
-                // GetObjectByName returns the FIRST match only; loop until none.
-                while (auto* node = a_root->GetObjectByName(nodeName)) {
-                    auto* parent = node->parent;
-                    if (!parent) {
-                        break;  // can't detach a parentless match; avoid infinite loop
-                    }
-                    parent->DetachChild(node);
-                    ++removed;
-                }
-                SKSE::log::debug("  DetachNodes[{}] '{}' removed {}", a_tag, nodeName, removed);
+                const int removed = DetachNamedFrom(a_root, nodeName);
+                SKSE::log::debug("  DetachNodes[{}] '{}' removed {}", a_tag, nodeName.c_str(), removed);
             };
             detachFrom(player->Get3D(false), "3p");
             detachFrom(player->Get3D(true), "1p");
-        }
-
-        // Recursively collect every node whose name starts with kNodePrefix. Does
-        // not descend INTO a matched holder (its children are the bare geometry).
-        void CollectInjected(RE::NiAVObject* a_obj, std::vector<RE::NiAVObject*>& a_out)
-        {
-            if (!a_obj) {
-                return;
-            }
-            if (std::string_view(a_obj->name.c_str()).starts_with(kNodePrefix)) {
-                a_out.push_back(a_obj);
-                return;
-            }
-            if (auto* node = a_obj->AsNode()) {
-                for (auto& child : node->GetChildren()) {
-                    CollectInjected(child.get(), a_out);
-                }
-            }
         }
 
         void Unregister(const std::string& a_id)
@@ -1006,14 +1032,12 @@ namespace CostumeFW
             if (!player) {
                 return;
             }
+            // The confirmed 2026-07-27 CTD site. This used to read n->parent and
+            // call through it; that pointer can be freed memory (see
+            // DetachNamedFrom). Membership-based detach only.
+            static const RE::BSFixedString kRealBodyName{ kRealBodyNode };
             for (int fp = 0; fp <= 1; ++fp) {
-                if (auto* root = player->Get3D(fp != 0)) {
-                    if (auto* n = root->GetObjectByName(kRealBodyNode)) {
-                        if (auto* p = n->parent) {
-                            p->DetachChild(n);
-                        }
-                    }
-                }
+                DetachNamedFrom(player->Get3D(fp != 0), kRealBodyName);
             }
         }
 
@@ -1793,18 +1817,13 @@ namespace CostumeFW
         }
         int total = 0;
         auto sweep = [&](RE::NiAVObject* a_root, const char* a_tag) {
-            if (!a_root) {
-                return;
-            }
-            std::vector<RE::NiAVObject*> found;
-            CollectInjected(a_root, found);
-            for (auto* node : found) {
-                if (auto* parent = node->parent) {
-                    parent->DetachChild(node);
-                    ++total;
-                }
-            }
-            SKSE::log::info("DetachAllInjected[{}]: removed {} CostumeFW_* node(s)", a_tag, found.size());
+            // Membership-based, like every other live-tree detach: never read
+            // ->parent (see DetachNamedFrom - that is the confirmed CTD).
+            const int removed = DetachMatchingFrom(a_root, [](RE::NiAVObject* a_obj) {
+                return std::string_view(a_obj->name.c_str()).starts_with(kNodePrefix);
+            });
+            total += removed;
+            SKSE::log::info("DetachAllInjected[{}]: removed {} CostumeFW_* node(s)", a_tag, removed);
         };
         sweep(player->Get3D(false), "3p");
         sweep(player->Get3D(true), "1p");
@@ -2305,9 +2324,13 @@ namespace CostumeFW
             }
             std::map<std::string, std::uint32_t> groups;  // "<prefix>_<8hex>" -> bone count
             std::uint32_t armorTotal = 0, headTotal = 0;
-            std::vector<RE::NiAVObject*> stack{ a_root };
+            // Carry the parent NAME down the walk instead of reading obj->parent:
+            // these are exactly the FSMP-renamed nodes whose ->parent can point at
+            // a freed node of a retired merge generation (the confirmed CTD class -
+            // see DetachNamedFrom). A diagnostic must not be the thing that crashes.
+            std::vector<std::pair<RE::NiAVObject*, std::string>> stack{ { a_root, "<root>" } };
             while (!stack.empty()) {
-                auto* obj = stack.back();
+                auto [obj, parentName] = std::move(stack.back());
                 stack.pop_back();
                 if (!obj) {
                     continue;
@@ -2322,17 +2345,17 @@ namespace CostumeFW
                     } else {
                         ++armorTotal;
                     }
-                    const char* parent = obj->parent ? obj->parent->name.c_str() : "<null>";
                     // World position: a merged-but-sane bone sits near its anchor
                     // (head ~ pelvis height); one at the origin / thousands of units
                     // away is the "stretched everywhere" failure signature.
                     const auto& wp = obj->world.translate;
                     SKSE::log::info("  headdiag[{}] {} (parent '{}') world=({:.1f},{:.1f},{:.1f})",
-                        a_tag, nm, parent, wp.x, wp.y, wp.z);
+                        a_tag, nm, parentName, wp.x, wp.y, wp.z);
                 }
                 if (auto* node = obj->AsNode()) {
+                    const std::string myName{ node->name.c_str() };
                     for (auto& child : node->GetChildren()) {
-                        stack.push_back(child.get());
+                        stack.emplace_back(child.get(), myName);
                     }
                 }
             }

@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **The crash when adding to Persist is fixed.** Confirmed from three crash logs
+  (v1.3.1 and v1.5.0, same faulting instruction in both): CEF detached its
+  injected nodes by reading `NiAVObject::parent` and calling `DetachChild`
+  through it — and that pointer can already be freed. FSMP retires a physics
+  merge generation and releases the parent while the child is still referenced,
+  so the next detach read a dead object's vtable and took the game down. CEF's
+  own dead-bind sweep documents this exact hazard ("liveness is membership,
+  never a parent-chain walk") and was written to avoid it; four places had not
+  been converted. They all now find the parent by walking down from the live
+  skeleton root, and never dereference `parent` at all.
+
+  This is why it looked random and why it happened through **both** the MCM and
+  the SMF UI, on **every** version people tried back to v1.2.1: the detach runs
+  at the end of `Reconcile()`, which every persist operation queues — adding an
+  item, removing one, or just toggling "Active on this save".
+
 - **Long lists in the SMF UI are reachable again.** Every unbounded list —
   the **Persist** catalog, the **Boxes** list, **Presets**, **Blocked** and
   **Diagnostics** — now lives in its own scrollable region instead of running
@@ -33,11 +49,12 @@
   — persist costumes get no SMP physics while it is off — but it turns "does the
   head rebuild cause this crash?" into a test a reporter can actually run.
 
-> The **CTD on persist add** from the same report is *not* addressed here.
-> See `BUGREPORT_2026-07-27_persist_ctd.md` for the code audit (F1 unsynchronised
-> cross-thread access to the injection registry / settings store, F2 the facegen
-> head rebuild every persist add triggers) — both still need the reporter's full
-> crash log to confirm, and neither fix has been written.
+> Full analysis, including the disassembly that identified the crash site and the
+> two hypotheses the logs ruled **out**, is in
+> `BUGREPORT_2026-07-27_persist_ctd.md`. The stage markers and the
+> `bPersistHeadRebuild` switch below were built to chase this before the logs
+> arrived; they are kept because they are useful instrumentation, not because the
+> crash still needs them.
 
 ## v1.5.0 (2026-07-26)
 
