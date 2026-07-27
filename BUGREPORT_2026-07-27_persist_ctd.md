@@ -198,7 +198,30 @@ if (auto* n = root->GetObjectByName(kRealBodyNode)) {
 「2 個目で」「Active の ON/OFF だけでも」→ **どれも `Reconcile()` を通り、
 その末尾の `DetachRealBody` が全ノードを走査する**から。
 
-### なぜ配列が壊れるのか — 最有力の容疑者
+### なぜ配列が壊れるのか — 容疑者 1: `Create(0)`(**実測で否認**)
+
+> **結論を先に: 2026-07-28 の in-game 実測(`cef arraytest`)で否認された。**
+> 以下は経緯として残す。
+
+**実測結果**(オーナー環境, AE 1.6.1170):
+
+```
+Create(0) -> size=0 cap=0 data=0x0
+  +child0 -> size=1 cap=1 data=0x27d9085e5a8 walkable=yes
+  +child1 -> size=2 cap=2 data=0x27d0187f1c8 walkable=yes
+  +child2 -> size=3 cap=3 data=0x27d0187e6a8 walkable=yes
+  +child3 -> size=4 cap=4 data=0x27d9438c738 walkable=yes
+```
+
+`Create(0)` + `AttachChild` は**毎回正しく伸長する**。壊れた状態は作られない。
+→ **この仮説は死んだ。**
+
+ただし同じ実測から、`Create(0)` は **attach のたびに再確保+コピー**している
+ことも分かった(capacity が size にぴったり追従している)。20 シェイプの
+コスチュームなら 20 回の再確保。`Create(geoms.size())` への変更は
+**効率改善としては妥当**なので残すが、**修正ではない**。
+
+### なぜ配列が壊れるのか — 容疑者(以下は当時の推論。上記で否認済み)
 
 壊れているのは **CEF 自身が作ったノード**なので、作り方を疑うのが筋。
 
@@ -237,12 +260,42 @@ holder->AttachChild(g.get(), true);           // 以降エンジンに伸長さ�
 geometry 引き剥がしの 2 箇所だけで、**どちらも読み込んだ直後の private clone**
 (live tree ではない)なので対象外。
 
+### ローカル再現の試み(2026-07-28, オーナー環境)
+
+`cef arraytest` → `cef nodediag` → 報告者手順、の 3 段で実施。
+
+| 測定 | 結果 |
+|---|---|
+| `cef arraytest` | 全行 `walkable=yes` → **`Create(0)` 仮説を否認** |
+| persist 追加 3 回(うち 2 回は同一プラグインの 2 アイテムを 1.3 秒間隔) | 全ステージ通過、CTD なし |
+| persist off → head part 解除 → `DoReset3D` | 正常完了(F2 チェーンも通した) |
+| ガードのヒット (`unwalkable`) | **0 件** |
+| `[error]` 行 | **0 件** |
+| active items | 32 |
+
+**→ ローカルでは再現しなかった。**
+
+⚠ **これは「修正が効いた」証拠にはならない。** オーナー環境ではそもそも
+一度も再現していない(数週間のテストで一度も出ていない)。非再現は
+**期待どおりの結果**であって、修正の有効性については何も語らない。
+言えるのは **リグレッションが無いこと**だけ。
+
+なお `cef nodediag` は 07:13 の 1 回だけで、そのとき CEF ノードは 0 個
+(`-- 0 CEF node(s), 0 unwalkable array(s)`)。**32 アイテム有効な状態での
+ライブ走査はまだ未実施** — これは無料でできる残りの測定。
+
 ### まだ分かっていないこと / 次の一手
 
-- **`Create(0)` が本当に原因かは未証明。** ガードのログ
+- **配列が壊れる原因は未特定**(`Create(0)` は否認された)。ガードのログ
   (`scene: node '...' has an unwalkable children array (size=.. cap=.. data=..)`)
-  が次の報告で出れば、**どのノードがいつ壊れるか**が一発で分かる。
-  出なくなれば `Create` 側で当たり。
+  が報告者の環境で出れば、**どのノードがいつ壊れるか**が一発で分かる。
+- **次の容疑者は skee(RaceMenu)**。CEF が自分のホルダーを**外部コードに
+  直接渡す唯一の場所**が `BodyMorph::ApplyToNode(player, holder)` で、
+  skee は既に本 mod の注入ノードで問題を起こした前科がある
+  (wig への body morph で ~15GB のメモリ膨張)。しかも報告者は
+  **「ここ 2 週間で RaceMenu が更新された」**と明言しており、症状の時期と一致する。
+  → 報告者に聞くべきこと: **落ちたアイテムで "Body morph" を ON にしていたか**。
+  ローカルでも「複数の persist アイテムで body morph を ON にして叩く」で試せる。
 - **1 巡目の F1(無同期のクロススレッドアクセス)は依然として実在の欠陥**。
   今回の CTD の原因ではなかったが、別課題として残す。
 - 報告者の別症状 **「MHW の角が Hide helmet になる」「最新エントリが消える」**

@@ -13,12 +13,13 @@
   off the end and returned a value that is not a node at all, which CEF then
   used as one.
 
-  Three changes: holder nodes are now created with their child array sized up
-  front instead of empty-and-grown (the most likely way an array ends up in that
-  state); any node whose child array is inconsistent is skipped with a log line
-  naming it, rather than walked into; and the detach paths no longer read
-  `NiAVObject::parent`, which is what turned the second case into a crash inside
-  a code address.
+  Two changes harden it: any node whose child array is inconsistent is skipped
+  with a log line naming it, rather than walked into; and the detach paths no
+  longer read `NiAVObject::parent`, which is what turned the second case into a
+  crash inside a code address. **What actually corrupts the array is still
+  unknown** — the leading suspect (holder nodes being created with an empty
+  child array and grown by the engine) was measured in-game and cleared, so the
+  hunt continues.
 
   This is why it looked random and why it happened through **both** the MCM and
   the SMF UI, on **every** version people tried back to v1.2.1: that sweep runs
@@ -42,6 +43,14 @@
   `n of N shown` count — scrolling makes a long catalog reachable, filtering
   makes it navigable.
 
+### Changed
+
+- **Injected costumes allocate their node once instead of once per shape.** The
+  holder node's child array was created empty and grown by the engine, which
+  reallocates and copies on every single attach — a 20-shape costume did 20
+  reallocations. It is now sized from the shape count up front. (Measured with
+  the new `cef arraytest`, which was built to test something else entirely.)
+
 ### Diagnostics (for the persist-CTD investigation)
 
 - **Stage markers for adding to Persist.** The path now logs
@@ -52,6 +61,11 @@
   rebuild tail that follows `[done]`. `capture[enchant]` marks the inventory read,
   and `persist head: rebuild requested (...)` (was debug-only) marks the entry to
   the head-rebuild chain. Documented in `LOG_REFERENCE_EN/JA.md`.
+- **`cef arraytest` / `cef nodediag` console commands.** `arraytest` builds
+  holder nodes the way injection does and reports the child array after every
+  attach — it needs no mods and no costume, and it is what cleared the
+  empty-array suspect above. `nodediag` scans both player skeletons and reports
+  the child array of every CEF node, plus any node that fails the sanity guard.
 - **`bPersistHeadRebuild` troubleshooting switch** (`CostumeExpansionFW.ini`,
   `[Diagnostics]`, default `1`). Set to `0` to skip the facegen head rebuild CEF
   fires a few seconds after a persist change. Not a fix and not a supported mode

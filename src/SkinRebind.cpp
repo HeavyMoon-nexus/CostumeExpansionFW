@@ -932,13 +932,16 @@ namespace CostumeFW
             // own internal bone nodes behind in 'clone' (destroyed at scope end).
             // Attaching the internal skeleton was the static/float cause.
             //
-            // Size the child array UP FRONT (leading suspect for the persist CTD -
-            // see ChildrenWalkable). This used to be Create(0): a zero-capacity
-            // NiTObjectArray, grown by the engine on the first AttachChild. The
-            // crashed nodes are exactly these holders, and their arrays carried a
-            // size with no usable buffer - the state a growth path that never
-            // allocates would leave. geoms.size() is already known here, so the
-            // array is allocated by the constructor and that path is never taken.
+            // Size the child array UP FRONT. This used to be Create(0), and that
+            // WAS the leading suspect for the persist CTD until `cef arraytest`
+            // measured it in-game (2026-07-28): Create(0) + AttachChild grows
+            // correctly every time - capacity 1,2,3,4 with a valid buffer at each
+            // step - so it does NOT produce the crashed state. Suspect refuted.
+            //
+            // Kept purely as an efficiency change, which the same measurement
+            // justifies: growing from zero reallocates and copies on EVERY attach
+            // (capacity tracked size exactly), so a 20-shape costume did 20
+            // reallocations. geoms.size() is known here; one allocation covers it.
             RE::NiNode* holder =
                 RE::NiNode::Create(static_cast<std::uint16_t>(std::min<std::size_t>(geoms.size(), 0xFFFF)));
             holder->name = a_nodeName.c_str();
