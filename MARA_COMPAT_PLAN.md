@@ -272,6 +272,53 @@ enchant snapshot・sync まで各個検証済み)。ただし null-safe ≠ dang
 - 併せて **MARA の正確な導入ファイル名**(MARA.dll 版数)を聞けると triage ログ(§3.3-4)の
   文言検証に使える。
 
+### 7.1-r6 最終返信文(2026-07-27・**これを投稿する**)
+
+> 前提: **v1.5.0 は GitHub リリース済み**(全テスト green: §A/§M/§F/§R)。
+> r5 は「次の更新で入る」前提の文面だったため、**公開済みの事実に合わせて全面改稿**。
+> 方針は「案 B」= 報告者の特定が解決に直結したことを明示し、blacklist が
+> **MARA 名指しではなく構造的な仕組み**であることを説明する(MARA 作者が CORE/GEAR を
+> 公開予定 = 同型 mod が増える見込みへの先回り)。
+> **MARA 作者への連絡(§7.2)は送付しない** — 2026 年 3 月以降更新が無く、
+> 到達可能性が低いため(オーナー判断 2026-07-27)。
+> 投稿タイミング: **Nexus へ 1.5.0 をアップロードした後**(本文が「公開済み」を前提に
+> 書かれているため)。
+
+送付用本文(EN・Nexus posts 返信):
+
+> Hi InubashiriMomizi — thanks for the report, and especially for naming the
+> exact item. That detail is what made this findable. "CORE Carrier" is created
+> by MARA at runtime and has no plugin file behind it, and CFW's capture picker
+> was reading a field that only items from a plugin have. It crashed while the
+> list was being built, before you could click anything.
+>
+> Fixed, and it is out now as 1.5.0. I installed MARA here and tested CFW both
+> with and without it — and I reproduced your crash on 1.3.1 first, so I could
+> be sure the fix addresses the actual cause rather than a symptom.
+>
+> What changed is deliberately not a "block MARA" list. CFW now refuses this
+> whole class of item structurally: anything created at runtime, or with no
+> defining plugin file, is skipped before CFW touches its inventory data, and
+> that check sits on every route into CFW — not just the picker, but presets,
+> the console, settings and save restore, and other mods calling CFW's script
+> API. Items like that could never survive a save/load in CFW's model anyway,
+> so refusing them is the correct answer and not only the safe one. On top of
+> that there is a deny-list you can edit yourself (the new "Blocked" page — by
+> name, plugin or FormID), and mod authors can tag their own utility items with
+> a CEF_NoCapture keyword so that no user has to.
+>
+> One deliberate exception, only while MARA is running: CFW refuses to capture
+> jewelry you are currently WEARING. Unequip it first, or capture it from your
+> inventory. Taking a worn ring or amulet out from under MARA turned out to
+> crash inside MARA itself, so CFW turns that into a message instead.
+>
+> Version note: 1.5.0 follows 1.3.1. The number skips 1.4.x because that
+> belongs to the NPC-support beta over on GitHub — you are not missing an
+> update.
+>
+> Thanks again. If anything still misbehaves with MARA installed, tell me and
+> I will take a look.
+
 ### 7.1-r5 改訂返信文(簡潔版・2026-07-24・送付はユーザー)
 
 > 前提の変更: **MARA をローカル導入した**ため、実機検証(MARA あり/なしの両動作)は
