@@ -77,7 +77,13 @@ Indented lines are details of the operation right above them.
 
 ## 6. persist head: / mouth: — head parts
 - `persist head: + '...' / - '...' (ID)` — head part registered / deregistered
+- `persist head: rebuild requested (...) - DoReset3D in ~500ms` — the rebuild chain
+  has started; the actual rebuild follows about half a second later
 - `persist head: DoReset3D (facegen rebuild)` — face rebuild issued
+- **[warn]** `persist head: DoReset3D SUPPRESSED (bPersistHeadRebuild=0)` — you (or a
+  developer's troubleshooting instructions) turned the rebuild off in
+  `CostumeExpansionFW.ini`. Persist costumes get no SMP physics in this mode — set
+  it back to 1 when you are done testing.
 - `mouth: '...' registered but ABSENT from facegen head (...) - clean rebuild #N` — **auto-fix for the known "teeth disappear" issue** (detected a few seconds after load, then rebuilt)
 - **[warn]** `mouth: '...' still dropped after N rebuild(s) - giving up` — auto-fix gave up (please report this)
 
@@ -90,6 +96,13 @@ Indented lines are details of the operation right above them.
 - `custody: created hidden store ... / captured 1x '...' / returned stored '...' / fabricated 1x '...'` — storing and returning the original item
 - **[warn]** `custody: ...` — defenses against store inconsistencies (usually self-healing)
 - `persist on/off: '...' on this save` — per-save persist toggle
+- `persist-add[catalog|register|reconcile|ability|manifest|done] '...'` — **stage
+  markers for adding an item to Persist.** The log is flushed line by line, so if
+  the game crashes, the **last `persist-add[...]` line names the stage that was
+  running**. `[catalog]` runs on the UI's own thread; everything from `[register]`
+  on runs on the main thread one frame later; after `[done]` only the carrier
+  rebuild / head rebuild tail is left. Quote this line in a bug report.
+- `capture[enchant] '...'` — the capture flow is reading that item's inventory entry
 - **[warn]** `persist: ... rejected / refusing` — refused (not in catalog, conflicts with a box, etc.)
 - **[warn]** `hide:/gender:/morph:/realbody:/hideshape: '...' is held by no box/persist - ignoring` — setting change on an ID that nothing holds
 - `recover: granted 1x '...'` — rescue grant via `cef recover`

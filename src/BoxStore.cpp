@@ -1608,6 +1608,13 @@ namespace CostumeFW
             g_persist.push_back(content);  // catalog add (shared across saves)
             WriteJson();
         }
+        // Stage marker (persist-CTD investigation 2026-07-27). The log flushes per
+        // line (logger.h), so on a CTD the LAST "persist-add[...]" line names the
+        // stage that was running. This is the first one: the click was accepted,
+        // on the caller's thread (Papyrus VM for the MCM, render for SMF) - so a
+        // crash between here and [register] is the UI-thread half.
+        SKSE::log::info("persist-add[catalog] '{}' accepted (catalog {} entries)",
+            content, g_persist.size());
         return true;
     }
 
@@ -2908,6 +2915,9 @@ namespace CostumeFW
                 return false;
             }
         }
+        // Stage marker: shared by the box and persist capture flows, and it reads
+        // the player's inventory entry - the step the MARA class of crash lives in.
+        SKSE::log::info("capture[enchant] '{}'", a_content);
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t baseId = ResolveFormId(a_content);
         if (!player || baseId == 0) {

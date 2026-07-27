@@ -77,7 +77,12 @@ box構成の変更 → キャリアNIF再生成 → 差し替え、の自動ル�
 
 ## 6. persist head: / mouth: — 頭部パーツ
 - `persist head: + '...' / - '...' (ID)` — 頭部パーツの登録/解除
+- `persist head: rebuild requested (...) - DoReset3D in ~500ms` — 再構築チェーンの開始。
+  実際の再構築は約0.5秒後
 - `persist head: DoReset3D (facegen rebuild)` — 顔の再構築を発行
+- **[warn]** `persist head: DoReset3D SUPPRESSED (bPersistHeadRebuild=0)` —
+  `CostumeExpansionFW.ini` で再構築を切っている状態(切り分け用)。
+  このモードでは persist の SMP 物理が付きません。検証が終わったら 1 に戻してください
 - `mouth: '...' registered but ABSENT from facegen head (...) - clean rebuild #N` — **歯が消える既知問題の自動修復**(ロード数秒後に検知して再構築)
 - **[warn]** `mouth: '...' still dropped after N rebuild(s) - giving up` — 自動修復を断念(要報告)
 
@@ -90,6 +95,13 @@ box構成の変更 → キャリアNIF再生成 → 差し替え、の自動ル�
 - `custody: created hidden store ... / captured 1x '...' / returned stored '...' / fabricated 1x '...'` — 原品(元アイテム)の保管と返却
 - **[warn]** `custody: ...` 各種 — 保管庫の不整合に対する防御(通常は自動回復)
 - `persist on/off: '...' on this save` — セーブ単位のpersist切替
+- `persist-add[catalog|register|reconcile|ability|manifest|done] '...'` — **persist
+  追加のステージマーカー。** ログは1行ごとにフラッシュされるので、CTD したときは
+  **最後に残った `persist-add[...]` 行が、落ちた時点で実行中だった段階**を示します。
+  `[catalog]` は UI 自身のスレッド、`[register]` 以降は1フレーム後のメインスレッド、
+  `[done]` の後はキャリア再生成 / head 再構築の尾部だけです。バグ報告にはこの行を
+  引用してください。
+- `capture[enchant] '...'` — capture 処理がそのアイテムのインベントリ項目を読んでいる段階
 - **[warn]** `persist: ... rejected / refusing` — カタログ未登録・box重複などによる拒否
 - **[warn]** `hide:/gender:/morph:/realbody:/hideshape: '...' is held by no box/persist - ignoring` — 未保有IDへの設定操作を無視
 - `recover: granted 1x '...'` — `cef recover` による救済付与

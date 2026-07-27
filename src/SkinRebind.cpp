@@ -1,6 +1,7 @@
 #include "SkinRebind.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "Config.h"  // PersistHeadRebuildEnabled (F2 diagnostic lever)
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
@@ -2100,6 +2101,10 @@ namespace CostumeFW
         SKSE::log::info("mouth: '{}' registered but ABSENT from facegen head ({}) - clean "
                         "rebuild #{} (persist head-carrier teeth drop)",
             eid ? eid : "?", a_reason ? a_reason : "", g_mouthRestoreRetries.load());
+        if (!PersistHeadRebuildEnabled()) {  // same lever: no facegen rebuild at all
+            SKSE::log::warn("mouth: rebuild SUPPRESSED (bPersistHeadRebuild=0)");
+            return;
+        }
         player->DoReset3D(false);
         g_headRebuildGraceUntil = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         RunAfterDelayMs(1500, [] { Reconcile(); });
@@ -2160,6 +2165,11 @@ namespace CostumeFW
         if (!player || !player->Get3D(false)) {
             return;  // no 3D yet - the engine builds the head with the current set
         }
+        if (!PersistHeadRebuildEnabled()) {  // F2 diagnostic lever (ini)
+            SKSE::log::warn("persist head: DoReset3D SUPPRESSED (bPersistHeadRebuild=0) - "
+                            "diagnostic mode, persist SMP physics will not attach");
+            return;
+        }
         ++g_persistDiag.headRebuildExecuted;
         SKSE::log::info("persist head: DoReset3D (facegen rebuild)");
         player->DoReset3D(false);
@@ -2181,6 +2191,10 @@ namespace CostumeFW
         // requests into ONE DoReset3D ~500ms after the LAST request, so FSMP
         // rebuilds the wig physics once (not per settings-write / sync / pass).
         ++g_persistDiag.headRebuildRequested;
+        // Info, not debug: this is the entry to the F2 chain and has to be visible
+        // in a user-supplied log (debug lines are filtered out - logger.h).
+        SKSE::log::info("persist head: rebuild requested ({}) - DoReset3D in ~500ms",
+            a_reason ? a_reason : "");
         const auto rev = ++g_headRebuildRev;
         if (g_headRebuildQueued.exchange(true)) {
             SKSE::log::debug("persist head: rebuild coalesced ({})", a_reason ? a_reason : "");

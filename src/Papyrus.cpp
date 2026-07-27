@@ -560,11 +560,23 @@ namespace CostumeFW
                 return false;
             }
             SKSE::GetTaskInterface()->AddTask([content] {
+                // Stage markers (persist-CTD investigation 2026-07-27): everything
+                // below runs on the MAIN thread one frame after the click. The log
+                // flushes per line, so the last surviving marker names the stage
+                // the crash happened in - which is what separates hypothesis F1
+                // (UI thread vs main thread) from F2 (the head rebuild that the
+                // [manifest] stage sets in motion, ~2.5-3.5s later).
+                SKSE::log::info("persist-add[register] '{}'", content);
                 RegisterBoxById(content, {});  // token-less -> always shown
+                SKSE::log::info("persist-add[reconcile] '{}'", content);
                 Reconcile();
+                SKSE::log::info("persist-add[ability] '{}'", content);
                 RebuildPersistAbility();  // contents changed -> re-synth persist enchant
                 ApplyBoxAbilities();
+                SKSE::log::info("persist-add[manifest] '{}'", content);
                 SyncPersistManifest();  // persist manifest fragment tracks the ACTIVE set (M2)
+                SKSE::log::info("persist-add[done] '{}' - any crash after this line is the "
+                                "carrier-sync / head-rebuild tail, not the add itself", content);
             });
             return true;
         }
