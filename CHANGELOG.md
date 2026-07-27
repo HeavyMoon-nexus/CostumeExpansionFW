@@ -4,21 +4,30 @@
 
 ### Fixed
 
-- **The crash when adding to Persist is fixed.** Confirmed from three crash logs
-  (v1.3.1 and v1.5.0, same faulting instruction in both): CEF detached its
-  injected nodes by reading `NiAVObject::parent` and calling `DetachChild`
-  through it — and that pointer can already be freed. FSMP retires a physics
-  merge generation and releases the parent while the child is still referenced,
-  so the next detach read a dead object's vtable and took the game down. CEF's
-  own dead-bind sweep documents this exact hazard ("liveness is membership,
-  never a parent-chain walk") and was written to avoid it; four places had not
-  been converted. They all now find the parent by walking down from the live
-  skeleton root, and never dereference `parent` at all.
+- **The crash when adding to Persist.** Six crash logs (v1.3.1 and v1.5.0) all
+  land on the same operation: the sweep at the end of `Reconcile()` that walks
+  the player's skeleton looking for CEF's own nodes. Three fault inside the
+  engine's `NiNode::GetObjectByName` while indexing the child array of a
+  **CEF-injected holder node** — an array reporting a size with no usable
+  buffer behind it. The other three fault just after, because that same walk ran
+  off the end and returned a value that is not a node at all, which CEF then
+  used as one.
+
+  Three changes: holder nodes are now created with their child array sized up
+  front instead of empty-and-grown (the most likely way an array ends up in that
+  state); any node whose child array is inconsistent is skipped with a log line
+  naming it, rather than walked into; and the detach paths no longer read
+  `NiAVObject::parent`, which is what turned the second case into a crash inside
+  a code address.
 
   This is why it looked random and why it happened through **both** the MCM and
-  the SMF UI, on **every** version people tried back to v1.2.1: the detach runs
-  at the end of `Reconcile()`, which every persist operation queues — adding an
-  item, removing one, or just toggling "Active on this save".
+  the SMF UI, on **every** version people tried back to v1.2.1: that sweep runs
+  for every persist operation — adding an item, removing one, or just toggling
+  "Active on this save".
+
+  The array-sanity log line is deliberate: if it appears in a future report it
+  names the node and the moment, which is the one thing the crash logs could not
+  give us.
 
 - **Long lists in the SMF UI are reachable again.** Every unbounded list —
   the **Persist** catalog, the **Boxes** list, **Presets**, **Blocked** and

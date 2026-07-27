@@ -115,20 +115,49 @@ namespace CostumeFW
         std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> g_boundBoneRefs;
         std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
 
-        // Detach every node named a_name under a_root, WITHOUT ever dereferencing
-        // NiAVObject::parent. Returns how many were removed.
+        // --- unwalkable children array (the persist CTD, root cause) -----------
+        // SIX of the reporter's thirteen 2026-07-27 crash logs are CEF, and all six
+        // are the SAME operation - DetachRealBody's GetObjectByName("CEF_RealBody")
+        // sweep. They are two faces of one defect: a CEF holder node whose children
+        // array cannot be walked.
         //
-        // CONFIRMED CTD 2026-07-27 (three crash logs across v1.3.1 and v1.5.0, all
-        // the same instruction): DetachRealBody did `if (auto* p = n->parent)
-        // p->DetachChild(n)` and `p` was a DANGLING pointer - the faulting read was
-        // p's vtable, and p held 0x7FF6...+0x1AF7A0, an address inside SkyrimSE's
-        // CODE section. The dead-bind sweep already documents why (see
-        // HasDeadPhysicsBind): FSMP retires a merge generation and frees the parent
-        // while the child is still referenced, so "liveness is membership, never a
-        // parent-chain walk". Every live-tree detach now follows that rule: descend
-        // from the root and detach through the parent we ARRIVED THROUGH, which we
-        // have just dereferenced successfully. A stale ->parent can no longer be
-        // read at all, let alone called through.
+        //   3x  fault INSIDE the engine at SkyrimSE.exe+0xD1D9D7 =
+        //       NiNode::GetObjectByName+0x37, "mov rcx,[rax+rbx*8]", with
+        //       rax (children._data) = 0x1 and rbx (index) = 0. RCX names the node
+        //       and it is one of OURS: "CostumeFW_0017E9_Clothing_Loot2_esp".
+        //   3x  fault AFTER it returned. The walk fell off the same kind of array
+        //       and returned *(node + 0x110) - the value every NiNode carries
+        //       there, the vtable pointer of its own children array. (Checked
+        //       against SkyrimSE.exe's .rdata: the returned pointer is exactly
+        //       NiNode's vtable - 0x10, i.e. the NiTObjectArray vtable.) The old
+        //       code then read ->parent off that non-object and called DetachChild
+        //       through a code address.
+        //
+        // So it is NOT a dangling ->parent (the first reading of these logs) and
+        // NOT a thread race: the bad values are deterministic - identical across
+        // two game sessions, two EXE base addresses and two CEF builds.
+        //
+        // Walking such a node is fatal for whoever does it, engine or us. Refuse,
+        // and leave a line naming the node instead of taking the game down.
+        bool ChildrenWalkable(RE::NiNode* a_node)
+        {
+            const auto& kids = a_node->GetChildren();
+            if (kids.size() == 0) {
+                return true;  // nothing to iterate (end() == begin())
+            }
+            if (kids.size() > kids.capacity()) {
+                return false;  // more elements than storage
+            }
+            // A non-empty array must point at a real allocation. The observed 0x1
+            // and a null buffer both land here; any plausible heap pointer passes.
+            return reinterpret_cast<std::uintptr_t>(kids.begin()) >= 0x10000;
+        }
+
+        // Detach every match under a_root. We descend ourselves and detach through
+        // the parent we ARRIVED THROUGH - a node just walked successfully - so
+        // NiAVObject::parent is never dereferenced. That is the rule
+        // HasDeadPhysicsBind already states ("liveness is membership, never a
+        // parent-chain walk"); every live-tree detach follows it now.
         template <class Pred>
         int DetachMatchingFrom(RE::NiAVObject* a_root, Pred a_match)
         {
@@ -141,6 +170,15 @@ namespace CostumeFW
             while (!stack.empty()) {
                 auto* parent = stack.back();
                 stack.pop_back();
+                if (!ChildrenWalkable(parent)) {
+                    SKSE::log::error(
+                        "scene: node '{}' has an unwalkable children array (size={} cap={} "
+                        "data={}) - skipping it; this is the persist-CTD signature",
+                        parent->name.c_str(), parent->GetChildren().size(),
+                        parent->GetChildren().capacity(),
+                        static_cast<const void*>(parent->GetChildren().begin()));
+                    continue;
+                }
                 // Collect first: DetachChild mutates the child array we iterate.
                 // NiPointer keeps each match alive across its own detach.
                 std::vector<RE::NiPointer<RE::NiAVObject>> hits;
@@ -513,7 +551,7 @@ namespace CostumeFW
                             it->second = id;
                         }
                     }
-                    if (auto* node = obj->AsNode()) {
+                    if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
                         for (auto& child : node->GetChildren()) {
                             stack.push_back(child.get());
                         }
@@ -893,7 +931,16 @@ namespace CostumeFW
             // Reparent the BARE geometry into a fresh holder, leaving the NIF's
             // own internal bone nodes behind in 'clone' (destroyed at scope end).
             // Attaching the internal skeleton was the static/float cause.
-            RE::NiNode* holder = RE::NiNode::Create(0);
+            //
+            // Size the child array UP FRONT (leading suspect for the persist CTD -
+            // see ChildrenWalkable). This used to be Create(0): a zero-capacity
+            // NiTObjectArray, grown by the engine on the first AttachChild. The
+            // crashed nodes are exactly these holders, and their arrays carried a
+            // size with no usable buffer - the state a growth path that never
+            // allocates would leave. geoms.size() is already known here, so the
+            // array is allocated by the constructor and that path is never taken.
+            RE::NiNode* holder =
+                RE::NiNode::Create(static_cast<std::uint16_t>(std::min<std::size_t>(geoms.size(), 0xFFFF)));
             holder->name = a_nodeName.c_str();
             for (auto& g : geoms) {
                 if (auto* p = g->parent) {
@@ -2352,7 +2399,7 @@ namespace CostumeFW
                     SKSE::log::info("  headdiag[{}] {} (parent '{}') world=({:.1f},{:.1f},{:.1f})",
                         a_tag, nm, parentName, wp.x, wp.y, wp.z);
                 }
-                if (auto* node = obj->AsNode()) {
+                if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
                     const std::string myName{ node->name.c_str() };
                     for (auto& child : node->GetChildren()) {
                         stack.emplace_back(child.get(), myName);

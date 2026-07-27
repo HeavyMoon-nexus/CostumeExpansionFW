@@ -80,11 +80,15 @@
 
 ## 確定した原因(クラッシュログ解析, 2026-07-28)
 
-報告者から 13 本のクラッシュログ + 経緯メモが届いた。うち **CEF が faulting
-module のものが 3 本**(他は SMPFixes.dll / SkyrimSE.exe / VCRUNTIME で、報告者が
-別途追っていた SMP Fixes の件)。
+報告者から 13 本のクラッシュログ + 経緯メモが届いた。
 
-### 3 本とも同一の命令で落ちている
+> **重要(2 巡目で判明・1 巡目の記述を訂正):**
+> CEF 起因は **3 本ではなく 6 本**。faulting module が `SkyrimSE.exe` の 3 本も
+> **CEF から呼ばれたエンジン関数**の中で落ちている。
+> そして原因は「`->parent` が dangling」**ではない**。詳細は
+> §真の原因 — CEF ホルダーノードの children 配列が壊れている を読むこと。
+
+### まず 3 本(CEF が faulting module)は同一の命令
 
 | ログ | 版 | faulting |
 |---|---|---|
@@ -138,51 +142,109 @@ if (auto* n = root->GetObjectByName(kRealBodyNode)) {
 }
 ```
 
-### なぜ落ちるか — 本 repo が既に文書化していた罠
+### 真の原因 — CEF ホルダーノードの children 配列が壊れている
 
-`HasDeadPhysicsBind` のコメント(`src/SkinRebind.cpp`)に、そのものずばりの記述が
-ある:
+**1 巡目の結論(「`->parent` が dangling。FSMP が親を解放した」)は誤りだった。**
+`->parent` を辿るのが危険なのは事実だが、それは**症状であって原因ではない**。
 
-> "liveness is membership, never a parent-chain walk: **a retired node's ->parent
-> can dangle** even while the node itself is pinned alive"
+決め手は、faulting module が `SkyrimSE.exe` の 3 本のスタックだった:
 
-FSMP は merge 世代を退役させるとき親ノードを解放するが、子は他所から参照されて
-生き残る。dead-bind sweep はこれを避けるために**わざと**親チェーンを歩かない設計に
-してある。ところが **live tree に対して `->parent` を読む場所が 4 箇所残っていた**。
-`DetachRealBody` はその 1 つで、`Reconcile()` の末尾 = **persist の全操作が通る**。
+```
+[0] SkyrimSE.exe+0x0D1D9D7  -> 70299+0x37   mov rcx,[rax+rbx*8]
+[1] SkyrimSE.exe+0x0D1D9EC  -> 70299+0x4C
+[2] CostumeExpansionFW.dll+0x00412AF   ← CEF から呼ばれている
+[3] CostumeExpansionFW.dll+0x005ED35
+[4] skse64_1_6_1170.dll+0x00189DF      ← タスクポンプ(メインスレッド)
+```
 
-これで報告者の証言が全部揃う:
+`SkyrimSE.exe+0xD1D9A0` は **`NiNode::GetObjectByName`**(NiNode vtable の
+`+0x150` スロット。EXE の RTTI から確認)。落ちているのはその **+0x37**、
+`mov rcx,[rax+rbx*8]` = **children 配列のインデックス**。レジスタ:
 
-- 「MCM でも SMF でも」→ どちらも `Reconcile()` をキューするから。
-- 「v1.2.1 まで戻しても出る」→ この行はずっと前から同じ。
-- 「2 個目を追加したとき」「Active を ON/OFF するだけでも」→ どれも `Reconcile()`。
-- **「"Costume persist physics updated" の通知は出ない」**(報告者の明言)→
-  head rebuild(F2)まで到達していない。**F2 は無罪**。
-- 落ちるのはメインスレッドのタスク内 → **F1(UI スレッドとの競合)でもない**。
+| | 値 | 意味 |
+|---|---|---|
+| `RAX` | **`0x1`** | `children._data`(配列の実体ポインタ) |
+| `RBX` | `0x0` | インデックス |
+| `RCX`/`RDI` | `(NiNode*) "CostumeFW_0017E9_Clothing_Loot2_esp"` | **CEF が注入したホルダー** |
+| `RDX` | `(char*) "CEF_RealBody"` | 探索中の名前 |
+
+つまり **CEF のホルダーノードの `children._data` が `0x1`**、しかも
+`size >= 1`。**実体の無い配列を size だけ持っている状態**。3 本とも同じ。
+
+そして CEF が faulting module の 3 本は、**同じ壊れ方のもう一つの顔**:
+
+- `GetObjectByName` はこの配列を踏み外し、**`*(node + 0x110)` を返した**。
+  `+0x110` は `NiNode::children` のオフセット(CommonLibSSE
+  `RelocateMember(this, 0x110, 0x138)`)なので、返ったのは
+  **children 配列自身の vtable ポインタ**。
+- EXE の `.rdata` を実測して裏取り済み: 返り値 `0x19AB140` は
+  `NiNode` の vtable(`0x19AB150`)の **0x10 手前** =
+  `NiTObjectArray<NiPointer<NiAVObject>>` の vtable。RTTI の
+  complete object locator まで一致。
+- `DetachRealBody` はそれを node として `->parent`(`+0x30`)を読み、
+  **NiNode の vtable の中**(`+0x20` スロット)を親ポインタとして
+  `DetachChild` を呼んで死んだ。
+
+**したがって:**
+
+- **ダングリングポインタではない。** 値は**決定論的**で、
+  ゲームセッション 2 回・EXE ベースアドレス 2 種・CEF ビルド 2 種を
+  またいで完全に同一。ランダムな解放後メモリならこうはならない。
+- **スレッド競合(F1)でもない。** 落ちるのは全部メインスレッドのタスク内。
+- **head rebuild(F2)でもない。** 報告者が「"Costume persist physics
+  updated" の通知は出ない」と明言している。
+
+報告者の証言も全部これで揃う。「MCM でも SMF でも」「v1.2.1 まで戻しても」
+「2 個目で」「Active の ON/OFF だけでも」→ **どれも `Reconcile()` を通り、
+その末尾の `DetachRealBody` が全ノードを走査する**から。
+
+### なぜ配列が壊れるのか — 最有力の容疑者
+
+壊れているのは **CEF 自身が作ったノード**なので、作り方を疑うのが筋。
+
+```cpp
+RE::NiNode* holder = RE::NiNode::Create(0);   // ← 容量 0 で作っていた
+...
+holder->AttachChild(g.get(), true);           // 以降エンジンに伸長させる
+```
+
+`NiNode::Create(std::uint16_t a_arrBufLen)` は
+`malloc` → `memset(0)` → **ゲームの ctor** を呼ぶ。`NiTArray` の
+コンストラクタは `_capacity > 0` のときだけ `_data` を確保する
+(CommonLibSSE `NiTArray.h`)。つまり `Create(0)` は
+**`_data = null` / `_capacity = 0` の配列**を作り、最初の `AttachChild` で
+エンジンの伸長パスに入る。観測された「`size` はあるのに `_data` が使えない」
+状態は、**その伸長パスが確保に失敗した(あるいは伸長幅 0 で回らなかった)
+場合にちょうど残る形**。
+
+`InjectOnRoot` では `holder` を作る時点で `geoms.size()` が確定しているので、
+**最初から実容量で作れば伸長パスを一度も通らない**。そう変更した。
+
+> ⚠ これは**状況証拠**であり、`Create(0)` が壊す決定的証明ではない。
+> 反証されうるし、その場合ガード(下)のログが次の報告で答えを出す。
 
 ### 修正(実装済み・in-game 未検証)
 
-`->parent` を**一切参照しない**membership ベースの detach に置換した
-(`DetachMatchingFrom` / `DetachNamedFrom`)。ルートから降りて、
-**今まさに参照に成功した親**経由で `DetachChild` する。置き換えた 4 箇所:
-
-| 箇所 | 内容 |
+| 変更 | 内容 |
 |---|---|
-| `DetachRealBody` | **確定したクラッシュ地点** |
-| `DetachNodes` | 同型。全 detach 経路が通る本命の隣 |
-| `DetachAllInjected` | `cef detachall` の掃除(`CollectInjected` は不要になり削除) |
-| `cef headdiag` | `obj->parent->name` を読んでいた。**FSMP の rename ノードそのもの**を対象にする診断で、同じ理由で落ちうる。親名は走査中に持ち回る形へ |
+| `InjectOnRoot` | `NiNode::Create(0)` → **`Create(geoms.size())`**。容量 0 の伸長パスを踏まない(上記の容疑者への対処) |
+| `ChildrenWalkable()` | **新規ガード**。`size > capacity`、または `size > 0` なのに `data` が `0x10000` 未満(観測値 `0x1`・null)なら「歩けない」と判定 |
+| `DetachMatchingFrom` | 走査前にガード。引っかかったら **ノード名・size・capacity・data をログに出して skip**。CTD がログ 1 行になる |
+| `HasDeadPhysicsBind` / `cef headdiag` | 同じガードを適用(どちらも children を手で走査する) |
+| `DetachRealBody` / `DetachNodes` / `DetachAllInjected` / `cef headdiag` | `->parent` 参照を全廃し、**降りてきた親**経由で detach(1 巡目の修正。原因ではなかったが、壊れた木を触ったときに死に方が悪くなるのは事実なので維持) |
 
 残る `->parent` 参照は `RebindGeometry` の祖先探索と `InjectOnRoot` の
 geometry 引き剥がしの 2 箇所だけで、**どちらも読み込んだ直後の private clone**
 (live tree ではない)なので対象外。
 
-### まだ分かっていないこと
+### まだ分かっていないこと / 次の一手
 
-- **`CEF_RealBody` ノードの親がなぜ死ぬのか**の正確な経路(FSMP がどの世代で
-  何を解放したか)は未特定。今回の修正は「死んだ親を触らない」ことで
-  **クラッシュを止める**もので、親が死ぬこと自体は止めていない。
-  ノードは membership 走査で確実に外れるので機能上の欠落は無い。
+- **`Create(0)` が本当に原因かは未証明。** ガードのログ
+  (`scene: node '...' has an unwalkable children array (size=.. cap=.. data=..)`)
+  が次の報告で出れば、**どのノードがいつ壊れるか**が一発で分かる。
+  出なくなれば `Create` 側で当たり。
+- **1 巡目の F1(無同期のクロススレッドアクセス)は依然として実在の欠陥**。
+  今回の CTD の原因ではなかったが、別課題として残す。
 - 報告者の別症状 **「MHW の角が Hide helmet になる」「最新エントリが消える」**
   は本件とは別。ESL 化 + zEdit マージ環境である点(報告者メモ)から
   ARMA 解決側を疑うべきで、**別件として追う**。
