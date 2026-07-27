@@ -243,9 +243,25 @@
          skips ARMA ... deny-listed plugin` + `has no admitted ARMA` で
          **モデル解決側が拒否**すること(F1 と同じ経路をコンソールから踏む)。
       4. エントリを全削除して `cef inject` が通常どおり成功することを確認。
-- [ ] **R5 未実施(意図的に最後)** 新規ゲームでの初期化・`Prepare for uninstall`
-      → 再有効化の往復。セーブとログを畳むため、**§F/§R の再走(X-UI1 修正後)を
-      終えてから**に回す。
+- [x] **R5 green(2026-07-27・v1.5.0)** 新規ゲーム初期化 → `Prepare for uninstall`
+      → 再有効化の往復。ログ 2 本(①= `R5testlog.txt` 13:34-13:57、②= 通常出力
+      14:02〜)とも **`[error]` 0 件**。
+      - ① 新規ゲームで箱作成(slot 57)→ バニラ 2 点捕獲 →
+        `custody: created hidden store FF000A70` + `captured 1x ...` ×2。
+      - ① uninstall(13:56:38): `custody: returned stored '03C9FE:Skyrim.esm'
+        to player` + `'03CA00:...'` = **2 点とも返却**、
+        `settings: wrote 1 box def(s) (enabled=false)`。
+      - ② 再起動後: `settings: loaded 1 box(es) (2 content) ... enabled=false`
+        (無効状態が永続)→ `cosave: hidden store FF000A70 restored` /
+        **`restored 0 item(s)`**(返却済みなので空 = 二重付与なし)→
+        14:02:46 再有効化 `enabled=true` → `Reconcile: 2 active item(s)` で
+        再注入まで復帰。
+      - ※ uninstall 時の `DetachAllInjected: removed 0 node(s)` は、その時点で
+        トークン未装備(`wear: false`)だったため。返却経路(本題)は踏んでいる。
+      - ※ `NOT SHOWN 'CostumeFW_03C9FE_Skyrim_esm' ... no skinned geometry in NIF`
+        は**バグではない** — `hideShapes` に当該 content の `["Pants","3BA"]` が
+        入っており、その NIF の skinned shape が全部隠れた結果(設定現物で確認)。
+        文言が誤解を招く点は X-LOG2 として記録。
 
 ## §B P-B(beta.1): NPC ゲート+スパイク+beta 既知バグ実証
 
@@ -361,6 +377,13 @@
       box の TreeNode 内部の深い位置 — 選択直後に目に入らない。MCM は拒否
       ウィンドウを出すので体感差が大きい。修正 = 拒否時に `DebugNotification`、
       またはピッカー直下へステータス行を出す。
+- [ ] **X-LOG2**(小・v1.5.1 送り) hide-shape で**全 shape が隠れた**ときの
+      `NOT SHOWN ... no skinned geometry in NIF` が、NIF 側の欠陥のように読める。
+      実際はユーザー設定どおりの結果(R5 で実例: `hideShapes` = `["Pants","3BA"]`)。
+      修正案 = 隠した数を数え、`geoms.empty()` かつ hide が 1 件以上なら
+      「all N shape(s) hidden by your hide-shape rules」と言い分ける
+      ([SkinRebind.cpp:837](src/SkinRebind.cpp:837) / [:861](src/SkinRebind.cpp:861))。
+      X-DIAG/X-LOG1 と同じ「黙る・誤って責める」系の是正。
 - [x] **X-LOG1 修正・実機確認済み(v1.5.0)** — 2026-07-26/27 のセッションで
       `ResolveArma: 801:AllowedWrapper.esp has no admitted ARMA (every candidate
       refused by the capture policy)` が **[warning]**、かつセッション全体の
