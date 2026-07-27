@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased (v1.5.1 candidate)
+
+### Fixed
+
+- **Long lists in the SMF UI are reachable again.** Every unbounded list —
+  the **Persist** catalog, the **Boxes** list, **Presets**, **Blocked** and
+  **Diagnostics** — now lives in its own scrollable region instead of running
+  off the bottom of the page. Reported on Nexus (2026-07-27, recorded against
+  v1.3.0): a persist catalog that outgrew the page height had no way to reach
+  its newest entries, so the only way to get at the latest capture was to
+  **delete older ones**. The page's own controls (pickers, filters, the
+  Blocked **Add** row, **Remove all persist**) now sit outside the scrolling
+  region, so a long list can no longer push them off-screen either.
+- **Persist catalog filter.** A name filter over the catalog, with an
+  `n of N shown` count — scrolling makes a long catalog reachable, filtering
+  makes it navigable.
+
+### Diagnostics (for the persist-CTD investigation)
+
+- **Stage markers for adding to Persist.** The path now logs
+  `persist-add[catalog] → [register] → [reconcile] → [ability] → [manifest] →
+  [done]` at info level. The log is flushed line by line, so after a crash the
+  **last marker names the stage that was running** — which separates a crash in
+  the UI-thread half from one in the main-thread half, and both from the carrier
+  rebuild tail that follows `[done]`. `capture[enchant]` marks the inventory read,
+  and `persist head: rebuild requested (...)` (was debug-only) marks the entry to
+  the head-rebuild chain. Documented in `LOG_REFERENCE_EN/JA.md`.
+- **`bPersistHeadRebuild` troubleshooting switch** (`CostumeExpansionFW.ini`,
+  `[Diagnostics]`, default `1`). Set to `0` to skip the facegen head rebuild CEF
+  fires a few seconds after a persist change. Not a fix and not a supported mode
+  — persist costumes get no SMP physics while it is off — but it turns "does the
+  head rebuild cause this crash?" into a test a reporter can actually run.
+
+> The **CTD on persist add** from the same report is *not* addressed here.
+> See `BUGREPORT_2026-07-27_persist_ctd.md` for the code audit (F1 unsynchronised
+> cross-thread access to the injection registry / settings store, F2 the facegen
+> head rebuild every persist add triggers) — both still need the reporter's full
+> crash log to confirm, and neither fix has been written.
+
 ## v1.5.0 (2026-07-26)
 
 > Version numbering note: this is the successor to **v1.3.1**. The number jumps
