@@ -1453,19 +1453,73 @@ namespace CostumeFW
             }
             auto* player = RE::PlayerCharacter::GetSingleton();
             auto* race = player ? player->GetRace() : nullptr;
-            if (race) {
+
+            // SLOT FIRST, race as the tiebreaker. PickBodyAddon learned this on
+            // 2026-07-10 ("not the first race-matching addon (which may be
+            // hands/feet/genital) - TNG's skin gave femalehands") but the CONTENT
+            // path never got the same treatment: it took the first race match out
+            // of the armature regardless of which body part that addon draws.
+            //
+            // An ARMO whose armature holds more than one addon is common - a
+            // helmet plus its hair-hiding piece, a costume plus a bundled base -
+            // and picking the wrong member injects the wrong MESH. That is the
+            // shape of the 2026-07-27 report: "the Helms would Persist but the
+            // Horns would turn into Hide helmets", two items from one mod where
+            // one resolved right and the other picked a sibling addon.
+            //
+            // The ARMO's own slot mask says which part the user captured, so
+            // prefer an addon that actually covers one of those slots.
+            const std::uint32_t want = static_cast<std::uint32_t>(a_armo->GetSlotMask());
+            const auto covers = [want](RE::TESObjectARMA* a_addon) {
+                return want == 0 ||
+                       (static_cast<std::uint32_t>(a_addon->GetSlotMask()) & want) != 0;
+            };
+            const auto raceExact = [race](RE::TESObjectARMA* a_addon) {
+                return race && a_addon->race == race;
+            };
+            const auto raceExtra = [race](RE::TESObjectARMA* a_addon) {
+                if (!race) {
+                    return false;
+                }
+                for (auto* extra : a_addon->additionalRaces) {
+                    if (extra == race) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            // Best to worst. Slot-matching tiers come first because an addon that
+            // draws the wrong part is wrong even when its race is right; the
+            // race-only tiers preserve the old behaviour as a floor.
+            const std::pair<const char*, std::function<bool(RE::TESObjectARMA*)>> tiers[] = {
+                { "slot+race", [&](RE::TESObjectARMA* a) { return covers(a) && raceExact(a); } },
+                { "slot+altrace", [&](RE::TESObjectARMA* a) { return covers(a) && raceExtra(a); } },
+                { "slot", [&](RE::TESObjectARMA* a) { return covers(a); } },
+                { "race", [&](RE::TESObjectARMA* a) { return raceExact(a); } },
+                { "altrace", [&](RE::TESObjectARMA* a) { return raceExtra(a); } },
+            };
+            for (const auto& [why, match] : tiers) {
                 for (auto* addon : admitted) {
-                    if (addon->race == race) {
+                    if (match(addon)) {
+                        if (a_log && admitted.size() > 1) {
+                            SKSE::log::info(
+                                "  addon pick {:X}:{}: '{}' by {} (armo slots {:08X}, addon "
+                                "slots {:08X}, {} candidate(s))",
+                                a_localID, a_plugin,
+                                addon->GetFormEditorID() ? addon->GetFormEditorID() : "?", why,
+                                want, static_cast<std::uint32_t>(addon->GetSlotMask()),
+                                admitted.size());
+                        }
                         return addon;
                     }
                 }
-                for (auto* addon : admitted) {
-                    for (auto* extra : addon->additionalRaces) {
-                        if (extra == race) {
-                            return addon;
-                        }
-                    }
-                }
+            }
+            if (a_log && admitted.size() > 1) {
+                SKSE::log::warn(
+                    "  addon pick {:X}:{}: no addon covers the item's slots ({:08X}) or the "
+                    "player's race - falling back to the first of {} candidate(s); the injected "
+                    "mesh may be the wrong body part",
+                    a_localID, a_plugin, want, admitted.size());
             }
             return admitted.front();
         }

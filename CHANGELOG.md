@@ -43,6 +43,22 @@
   `n of N shown` count — scrolling makes a long catalog reachable, filtering
   makes it navigable.
 
+- **A captured item could come back as the wrong piece of armour.** When an
+  outfit record carries more than one addon in its armature — a helmet plus its
+  hair-hiding piece, a costume plus a bundled base — CFW took the first one that
+  matched your race and never checked *which body part it draws*. So a captured
+  item could inject a sibling addon's mesh instead of its own, which is how a
+  pair of horns ends up rendering as a plain hide helmet while the helm from the
+  same mod captures correctly. CFW now prefers an addon that actually covers the
+  slots the captured item occupies, with race as the tiebreaker, and logs which
+  addon it picked and why whenever there was more than one candidate.
+
+  The skin path was fixed this way in July 2026, after the same bug served up a
+  pair of hands instead of a body; the content path never got the same
+  treatment. Reported on Nexus 2026-07-27 ("the Helms would Persist but the
+  Horns would turn into Hide helmets") — **not confirmed against that user's
+  setup yet**, but it is the defect their description points at.
+
 - **CFW's stored state is no longer read and written from two threads at once.**
   The injection registry carried a "main thread only" note, but the MCM reads it
   from the Papyrus VM thread and the SMF page reads it every frame from the
