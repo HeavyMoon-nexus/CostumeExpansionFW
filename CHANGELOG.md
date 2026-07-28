@@ -67,6 +67,26 @@
   reallocations. It is now sized from the shape count up front. (Measured with
   the new `cef arraytest`, which was built to test something else entirely.)
 
+### Added
+
+- **A "Physics bones" section on the Diagnostics page** (both the MCM and the
+  SMF UI), because "my costume lost its physics" turned out to be a budget race
+  nothing surfaced. It reports **Bone Limit Extender** detection, how many custom
+  bones your shown content needs and how many actually got physics, and how many
+  bones FSMP merged on your character — split into CFW's own and everyone else's.
+
+  When none of CFW's carrier bones were merged it says so outright: FSMP takes a
+  carrier whole or not at all, so another SMP-heavy mod is winning the actor's
+  bone budget and your costumes will hang static until you raise the ceiling or
+  wear/persist less. Measured while chasing this: with one popular body-collision
+  mod enabled, FSMP merged 102 bones on the test character and **not one of them
+  was CFW's**; with it disabled the same character merged 3453 CFW carrier bones.
+
+  There is deliberately no "N / limit" figure. Bone Limit Extender publishes no
+  constant we can read, and the ceiling that actually bites is FSMP's per-actor
+  merge budget, which depends on your whole load order — so the page reports what
+  was asked for against what was granted, which needs no constant to act on.
+
 ### Diagnostics (for the persist-CTD investigation)
 
 - **Stage markers for adding to Persist.** The path now logs

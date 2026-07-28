@@ -79,6 +79,13 @@ namespace CostumeFW
             std::string tokenId;        // box token colon-form id; empty = persist class
             RE::FormID tokenForm{ 0 };  // resolved token FormID (0 if persist)
             RE::SEX resolvedSex{ RE::SEXES::kFemale };  // sex m3p/m1p were resolved for
+            // Last 3p injection's bind outcome, for the bone-budget readout. A
+            // content whose bones all land in staticBones gets no SMP sway - and
+            // when that is the WHOLE registry, CEF lost the actor's bone budget to
+            // another SMP mod (measured 2026-07-28: with SOFTBODY enabled, none of
+            // CEF's carrier bones were merged at all).
+            std::uint32_t fsmpBones{ 0 };    // bound to an FSMP physics node
+            std::uint32_t staticBones{ 0 };  // fell back to the static ancestor remap
         };
         std::vector<ActiveItem> g_active;
 
@@ -1070,6 +1077,16 @@ namespace CostumeFW
                 // Bound to physics again - re-arm the X-DIAG report so a later
                 // regression is not swallowed by the once-per-episode guard.
                 g_staticDiagReported.erase(a_id);
+            }
+            // Record this injection's 3p bind outcome for the bone-budget readout
+            // (Diagnostics page). Written before the retry so the numbers reflect
+            // the pass the user is looking at.
+            for (auto& it : g_active) {
+                if (it.id == a_id) {
+                    it.fsmpBones = g_rebind3pFsmp;
+                    it.staticBones = g_rebind3pRemap;
+                    break;
+                }
             }
             if (g_injectStatic3p) {
                 // This item's 3p rebind fell to the static fallback - the carrier
@@ -2353,6 +2370,80 @@ namespace CostumeFW
             }
         }
         out.push_back(std::format("-- {} CEF node(s), {} unwalkable array(s)", cef, bad));
+        return out;
+    }
+
+    // --- bone budget readout (Diagnostics page) -----------------------------
+    // Measured, never guessed. There is no number we can honestly print as "the
+    // limit": Bone Limit Extender (Nexus 177636, skyrimbonelimitfix.dll) ships
+    // no config and states no constant, nifcarrier has no bone ceiling of its
+    // own, and the ceiling that actually bites is FSMP's per-actor merge budget,
+    // which depends on the whole load order. So report what IS measurable - what
+    // CEF asked for, what it got, and who else is on the actor - and let the gap
+    // be the signal.
+    //
+    // In-game 2026-07-28: with SOFTBODY enabled, FSMP merged 8+94 bones and NONE
+    // of them were CEF's; with it disabled the same character merged 2226+1227
+    // CEF carrier bones. All-or-nothing per carrier, so "asked 3453 / merged 0"
+    // is exactly the line a user in that state needs to see.
+    BoneBudgetInfo BoneBudget()
+    {
+        BoneBudgetInfo out{};
+        for (const auto& it : g_active) {
+            out.askedBones += it.fsmpBones + it.staticBones;
+            out.boundBones += it.fsmpBones;
+            out.staticBones += it.staticBones;
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* root = player ? player->Get3D(false) : nullptr;
+        auto* rootNode = root ? root->AsNode() : nullptr;
+        if (!rootNode) {
+            return out;
+        }
+        // nifcarrier stamps every CEF content bone with "C<8hex>_"
+        // (NifCarrierCore ContentNamePrefix) - that is how we tell our merged
+        // bones from another mod's inside the same skeleton.
+        const auto isCefBone = [](std::string_view a_suffix) {
+            if (a_suffix.size() < 10 || a_suffix.front() != 'C' || a_suffix[9] != '_') {
+                return false;
+            }
+            for (std::size_t i = 1; i < 9; ++i) {
+                if (std::isxdigit(static_cast<unsigned char>(a_suffix[i])) == 0) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        std::set<std::string> groups, cefGroups;
+        std::vector<RE::NiNode*> stack{ rootNode };
+        while (!stack.empty()) {
+            auto* node = stack.back();
+            stack.pop_back();
+            bool head = false;
+            std::uint32_t id = 0;
+            std::string_view suffix;
+            if (ParseRenamedBone(std::string_view(node->name.c_str()), head, id, suffix)) {
+                const std::string grp = std::format("{}{:08X}", head ? "Head_" : "Armor_", id);
+                groups.insert(grp);
+                ++out.mergedTotal;
+                if (isCefBone(suffix)) {
+                    ++out.mergedCef;
+                    cefGroups.insert(grp);
+                }
+            }
+            if (!ChildrenWalkable(node)) {
+                continue;
+            }
+            for (auto& child : node->GetChildren()) {
+                if (auto* c = child.get(); c) {
+                    if (auto* cn = c->AsNode()) {
+                        stack.push_back(cn);
+                    }
+                }
+            }
+        }
+        out.mergeGroups = static_cast<std::uint32_t>(groups.size());
+        out.cefMergeGroups = static_cast<std::uint32_t>(cefGroups.size());
         return out;
     }
 

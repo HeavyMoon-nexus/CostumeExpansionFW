@@ -1717,6 +1717,39 @@ namespace CostumeFW
             out.push_back(s);
         }
 
+        // --- Physics bones -------------------------------------------------
+        // Why there is no "N / limit" here: Bone Limit Extender ships no
+        // readable constant, and the ceiling that actually bites is FSMP's
+        // per-actor merge budget, which depends on the whole load order. So
+        // this reports what CFW asked for against what it actually got - the
+        // gap is the signal, and it needs no constant to be actionable.
+        // (2026-07-28: with SOFTBODY on, FSMP merged 102 bones and none were
+        // CFW's; with it off the same character merged 3453 CFW carrier bones.)
+        {
+            const auto bb = BoneBudget();
+            out.push_back("# Physics bones");
+            out.push_back(std::string("Bone Limit Extender: ") +
+                          (GetModuleHandleA("skyrimbonelimitfix.dll")
+                                  ? "detected (raises the ceiling)"
+                                  : "not detected (Nexus 177636 - recommended with CFW)"));
+            out.push_back("CFW content needs: " + std::to_string(bb.askedBones) +
+                          " custom bone(s) - physics " + std::to_string(bb.boundBones) +
+                          " / static " + std::to_string(bb.staticBones));
+            out.push_back("FSMP merged on player: " + std::to_string(bb.mergedTotal) +
+                          " bone(s) in " + std::to_string(bb.mergeGroups) + " group(s); CFW's own " +
+                          std::to_string(bb.mergedCef) + " in " + std::to_string(bb.cefMergeGroups));
+            if (bb.askedBones > 0 && bb.mergedCef == 0) {
+                out.push_back("  ^ NONE of CFW's carrier bones were merged. FSMP merges a "
+                              "carrier whole or not at all, so another SMP-heavy mod is "
+                              "taking the actor's bone budget - CFW costumes hang static. "
+                              "Install Bone Limit Extender, or reduce what is worn/persisted.");
+            } else if (bb.staticBones > bb.boundBones) {
+                out.push_back("  ^ most bones fell back to static (no SMP sway). Check "
+                              "CEF_sync.log for 'skipped for the carrier' - content with no "
+                              "inline HDT xml is never given physics.");
+            }
+        }
+
         nlohmann::json cj;
         {
             std::ifstream f(kCarriersJsonPath);

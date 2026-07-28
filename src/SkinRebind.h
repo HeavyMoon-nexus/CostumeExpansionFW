@@ -216,6 +216,23 @@ namespace CostumeFW
     // can then target. Console-prints a summary + logs the full list. Main thread.
     void HeadDiag();
 
+    // --- bone budget (Diagnostics page) -------------------------------------
+    // Everything here is MEASURED. No absolute ceiling is reported: Bone Limit
+    // Extender ships no constant we can read, and the limit that actually bites
+    // is FSMP's per-actor merge budget, which depends on the whole load order.
+    // "asked vs bound" is the self-calibrating signal instead.
+    struct BoneBudgetInfo
+    {
+        std::uint32_t askedBones{ 0 };   // custom bones CEF's shown content needs
+        std::uint32_t boundBones{ 0 };   // of those, bound to an FSMP physics node
+        std::uint32_t staticBones{ 0 };  // of those, fell back static (no SMP sway)
+        std::uint32_t mergedTotal{ 0 };  // FSMP-renamed bones on the 3p skeleton
+        std::uint32_t mergedCef{ 0 };    // of those, carrying nifcarrier's C<8hex>_
+        std::uint32_t mergeGroups{ 0 };      // distinct FSMP merge groups
+        std::uint32_t cefMergeGroups{ 0 };   // groups holding at least one CEF bone
+    };
+    BoneBudgetInfo BoneBudget();
+
     // --- persist-CTD test harness (BUGREPORT_2026-07-27) --------------------
     // `cef arraytest`: synthetic probe of the NiNode child array, needing no
     // mods and no costume - builds holders the way InjectOnRoot does (old
