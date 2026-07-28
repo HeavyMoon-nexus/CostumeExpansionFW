@@ -409,6 +409,67 @@ FSMP 4.0.1 仮説の検証としては、**ほぼ何も試していないに等�
   persist を増やすほど衝突が黙って無効化される。**要スケール対策(別件)**
 - `[persist] WARNING collision mesh '…' has no skinned shape in the merge` ×6
 
+### D1/D2 修正後の検証(2026-07-28 16:58-17:13)
+
+DLL スタンプ `2026-07-28 08:13:06` = 新ビルドで起動確認済み。
+
+| 指標 | 修正前 | 修正後 |
+|---|---|---|
+| `Reconcile` 呼び出し | 123 | 33 |
+| `rebind retry: re-injecting` | 35 | **5** |
+| `parked - no more rebind` | — | **9** |
+| `bound N bone(s) to FSMP` | 87 | 70 |
+| `remapped N unresolved` | 1711 | **344** |
+| unwalkable ガードヒット / `[error]` | 0 / 0 | **0 / 0** |
+
+**Reconcile 回数が違うので生の件数では比較にならない。1 Reconcile あたりに正規化:**
+
+| | 修正前 | 修正後 |
+|---|---|---|
+| FSMP バインド | 0.71 | **2.12**(約 3 倍) |
+| 静的リマップ | 13.9 | **10.4**(減) |
+| 再試行 | 0.28 | **0.15**(減) |
+
+→ **① churn 停止・② 物理の退行なし、両方確認。** バインドはむしろ改善している
+(望みのない再試行が止まった分、成功する注入に回っている)。
+
+### ③ の再現試行は MARA の巻き添えで中断(CEF 無関係)
+
+`crash-2026-07-28-17-13-30.log`:
+
+```
+Unhandled exception "EXCEPTION_ACCESS_VIOLATION"
+  at MARA.dll+0x00097A4   movzx r14d, byte ptr [rsi]
+[ 0]..[ 7]  MARA.dll  (8 フレーム連続)
+[ 8]        skse64_1_6_1170.dll+0x189DF   ← タスクポンプ
+```
+
+**CEF のフレームはゼロ。** 参照されている CEF オブジェクトも無し
+(モジュール一覧に名前があるだけ)。
+
+中身を読むと MARA 自身のバグ:
+
+- `RBX` の型注釈が
+  `std::_Fmt_iterator_buffer<std::back_insert_iterator<std::basic_string<char>>,...>*`
+  → **MARA は `std::format` の中にいる**
+- `RSI = 0x64006E00610074` をリトルエンディアンでバイト展開すると
+  `74 00 61 00 6E 00 64 00` = **UTF-16LE の "t a n d"** — つまり
+  **ワイド文字列の中身をポインタとして扱っている**
+- そこへ `movzx r14d, byte ptr [rsi]` = 1 バイト読みに行って死ぬ
+
+本 repo が記録している MARA 案件(`MARA_CRASH_CLASS_AUDIT.md`: faulting =
+`CostumeExpansionFW.dll+0x8241C` = **CEF の中で**落ちる)とは**別クラス**。
+こちらは **MARA の中だけで完結**している。
+
+**そして決定的に重要:報告者の環境に `MARA.dll` は無い。**
+報告者のログにあるのは `Sisterhood Mara.esp` / `HSRiften - Temple of Mara.esp`
+という**名前が似ているだけの無関係な ESP** で、MARA の SKSE プラグインは
+入っていない。
+
+→ **MARA はローカル環境だけのノイズ。** ③ をやり直す前に
+**`test CEF bug` プロファイルで MARA を無効化すること。**
+有効なままだと再現テストが何度でもこれに殺される。
+
 ### まだ分かっていないこと / 次の一手
 
 - **配列が壊れる原因は未特定**(`Create(0)` は否認された)。ガードのログ
