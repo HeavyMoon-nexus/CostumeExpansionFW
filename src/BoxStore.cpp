@@ -1,6 +1,7 @@
 #include "BoxStore.h"
 #include "BodyMorph.h"
 #include "SkinRebind.h"
+#include "StoreLock.h"
 #include "nifcarrier/NifCarrierCore.h"
 
 #include "RE/A/ActorEquipManager.h"
@@ -1046,6 +1047,7 @@ namespace CostumeFW
 
     void LoadBoxes()
     {
+        StoreLock lk;
         g_boxes.clear();
         g_persist.clear();
         g_hideRules.clear();
@@ -1357,11 +1359,13 @@ namespace CostumeFW
 
     void ApplyCarrierOverrides(bool a_refreshChanged)
     {
+        StoreLock lk;
         ApplyCarrierOverridesImpl(a_refreshChanged);
     }
 
     void PersistCarrierStatus()
     {
+        StoreLock lk;
         auto* console = RE::ConsoleLog::GetSingleton();
         const auto say = [&](const std::string& s) {
             SKSE::log::info("{}", s);
@@ -1408,6 +1412,7 @@ namespace CostumeFW
 
     void PersistCarrierRemove()
     {
+        StoreLock lk;
         // Deregister the whole production pool - the rescue lever for a
         // contaminated save; the pool re-registers on the next content change /
         // `cef persist regen`. (The PoC-leftover purge is gone with the v1.2.1
@@ -1427,11 +1432,13 @@ namespace CostumeFW
 
     bool CefEnabled()
     {
+        StoreLock lk;
         return g_cefEnabled;
     }
 
     bool SetCefEnabled(bool a_on)
     {
+        StoreLock lk;
         g_cefEnabled = a_on;
         WriteJson();
         return g_cefEnabled;
@@ -1439,6 +1446,7 @@ namespace CostumeFW
 
     bool IsBoxToken(std::uint32_t a_form)
     {
+        StoreLock lk;
         if (a_form == 0) {
             return false;
         }
@@ -1452,6 +1460,7 @@ namespace CostumeFW
 
     void ReplenishToken(std::uint32_t a_tokenForm)
     {
+        StoreLock lk;
         if (a_tokenForm == 0) {
             return;
         }
@@ -1489,6 +1498,7 @@ namespace CostumeFW
 
     void RefreshWornToken(const std::string& a_token)
     {
+        StoreLock lk;
         const std::uint32_t formId = ResolveFormId(a_token);
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -1509,6 +1519,7 @@ namespace CostumeFW
 
     void ReapplyBoxes()
     {
+        StoreLock lk;
         for (const auto& b : g_boxes) {
             for (const auto& c : b.contents) {
                 RegisterBoxById(c, b.token);
@@ -1522,6 +1533,7 @@ namespace CostumeFW
 
     void ReloadSettingsFromDisk()
     {
+        StoreLock lk;
         // Snapshot this save's persist actives BEFORE the registry is wiped -
         // they are co-save state, invisible to the settings JSON.
         const auto actives = ActivePersistIds();
@@ -1565,11 +1577,13 @@ namespace CostumeFW
 
     std::vector<std::string> PersistContents()
     {
+        StoreLock lk;
         return g_persist;
     }
 
     bool AddPersistContent(const std::string& a_content)
     {
+        StoreLock lk;
         if (a_content.empty()) {
             return false;
         }
@@ -1620,6 +1634,7 @@ namespace CostumeFW
 
     bool RemovePersistContent(const std::string& a_content)
     {
+        StoreLock lk;
         const auto it = std::find(g_persist.begin(), g_persist.end(), a_content);
         if (it == g_persist.end()) {
             return false;
@@ -1638,6 +1653,7 @@ namespace CostumeFW
 
     bool PersistSetActive(const std::string& a_id, bool a_on)
     {
+        StoreLock lk;
         std::string id = a_id;  // ROOT D: canonical so catalog / active compares match
         CanonicalizeColonId(id);
         bool active = false;
@@ -1683,16 +1699,19 @@ namespace CostumeFW
 
     void SyncPersistManifest()
     {
+        StoreLock lk;
         WriteCarrierManifest();
     }
 
     std::vector<std::string> PersistActiveIds()
     {
+        StoreLock lk;
         return ActivePersistIds();
     }
 
     std::vector<std::string> DiagLines()
     {
+        StoreLock lk;
         std::vector<std::string> out;
         out.push_back("# Status");
         out.push_back(std::string("CEF master: ") + (g_cefEnabled ? "enabled" : "DISABLED"));
@@ -1835,12 +1854,14 @@ namespace CostumeFW
 
     std::vector<int> HideSlotsFor(const std::string& a_id)
     {
+        StoreLock lk;
         const auto it = g_hideRules.find(a_id);
         return it == g_hideRules.end() ? std::vector<int>{} : it->second;
     }
 
     bool SetHideSlots(const std::string& a_id, const std::vector<int>& a_slots)
     {
+        StoreLock lk;
         if (a_id.empty()) {
             return false;
         }
@@ -1869,12 +1890,14 @@ namespace CostumeFW
 
     int GenderModeFor(const std::string& a_id)
     {
+        StoreLock lk;
         const auto it = g_genderModes.find(a_id);
         return it == g_genderModes.end() ? 0 : it->second;
     }
 
     bool SetGenderMode(const std::string& a_id, int a_mode)
     {
+        StoreLock lk;
         if (a_id.empty()) {
             return false;
         }
@@ -1898,11 +1921,13 @@ namespace CostumeFW
 
     bool BodyMorphOn(const std::string& a_id)
     {
+        StoreLock lk;
         return g_bodyMorphOn.contains(a_id);
     }
 
     bool SetBodyMorphOn(const std::string& a_id, bool a_on)
     {
+        StoreLock lk;
         if (a_id.empty()) {
             return false;
         }
@@ -1923,11 +1948,13 @@ namespace CostumeFW
 
     bool ShowRealBodyOn(const std::string& a_id)
     {
+        StoreLock lk;
         return g_showRealBody.contains(a_id);
     }
 
     bool SetShowRealBodyOn(const std::string& a_id, bool a_on)
     {
+        StoreLock lk;
         if (a_id.empty()) {
             return false;
         }
@@ -1948,12 +1975,14 @@ namespace CostumeFW
 
     std::vector<std::string> HideShapesFor(const std::string& a_id)
     {
+        StoreLock lk;
         const auto it = g_hideShapes.find(a_id);
         return it != g_hideShapes.end() ? it->second : std::vector<std::string>{};
     }
 
     bool IsHideShape(const std::string& a_id, const std::string& a_shape)
     {
+        StoreLock lk;
         const auto it = g_hideShapes.find(a_id);
         return it != g_hideShapes.end() &&
                std::find(it->second.begin(), it->second.end(), a_shape) != it->second.end();
@@ -1961,6 +1990,7 @@ namespace CostumeFW
 
     bool SetHideShape(const std::string& a_id, const std::string& a_shape, bool a_on)
     {
+        StoreLock lk;
         if (a_id.empty() || a_shape.empty()) {
             return false;
         }
@@ -1991,6 +2021,7 @@ namespace CostumeFW
 
     std::vector<std::pair<std::string, int>> ContentShapesFor(const std::string& a_id)
     {
+        StoreLock lk;
         const auto it = g_contentShapes.find(a_id);
         return it != g_contentShapes.end() ? it->second
                                            : std::vector<std::pair<std::string, int>>{};
@@ -1999,6 +2030,7 @@ namespace CostumeFW
     void SetContentShapes(const std::string& a_id,
         const std::vector<std::pair<std::string, int>>& a_shapes)
     {
+        StoreLock lk;
         g_contentShapes[a_id] = a_shapes;
     }
 
@@ -2017,12 +2049,14 @@ namespace CostumeFW
 
     std::shared_ptr<const policy::CapturePolicy> CapturePolicySnapshot()
     {
+        StoreLock lk;
         return PolicySlot().load();
     }
 
     CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo,
         const policy::CapturePolicy& a_policy)
     {
+        StoreLock lk;
         if (!a_armo) {
             return CaptureBlock::kDynamicForm;  // treat as never-capturable
         }
@@ -2075,12 +2109,14 @@ namespace CostumeFW
 
     CaptureBlock CaptureBlockReason(RE::TESObjectARMO* a_armo)
     {
+        StoreLock lk;
         const auto pol = CapturePolicySnapshot();
         return CaptureBlockReason(a_armo, *pol);
     }
 
     bool IsCaptureBlocked(RE::TESObjectARMO* a_armo)
     {
+        StoreLock lk;
         return CaptureBlockReason(a_armo) != CaptureBlock::kNone;
     }
 
@@ -2104,6 +2140,7 @@ namespace CostumeFW
     bool IsContentAdmissible(const std::string& a_id,
         const policy::CapturePolicy& a_policy, std::string* a_why, bool a_log)
     {
+        StoreLock lk;
         // Layered admission (review P1-3/P2-1), one policy snapshot for the
         // whole evaluation. Deliberately WITHOUT the resolvability check so
         // the registration boundary can use it on ids whose resolve failure
@@ -2155,6 +2192,7 @@ namespace CostumeFW
 
     bool IsContentAdmissible(const std::string& a_id, std::string* a_why, bool a_log)
     {
+        StoreLock lk;
         const auto pol = CapturePolicySnapshot();
         return IsContentAdmissible(a_id, *pol, a_why, a_log);
     }
@@ -2168,11 +2206,13 @@ namespace CostumeFW
 
     void SetMaraPresent(bool a_present)
     {
+        StoreLock lk;
         g_maraPresent = a_present;
     }
 
     bool CanCaptureContent(const std::string& a_id, std::string* a_why, bool a_physicalCapture)
     {
+        StoreLock lk;
         // One policy generation covers the semantic base gate and the selected
         // ARMA/model gate. Unresolved content keeps the pre-1.3.2 UX message.
         const auto pol = CapturePolicySnapshot();
@@ -2254,6 +2294,7 @@ namespace CostumeFW
 
     bool SetCaptureBlacklistFlag(const std::string& a_flag, bool a_on)
     {
+        StoreLock lk;
         // Copy-and-publish (review P1-5): never mutate the published policy.
         // Note: no "allowDynamic" - the dynamic-form skip is a hard invariant.
         auto next = *CapturePolicySnapshot();
@@ -2278,6 +2319,7 @@ namespace CostumeFW
 
     bool GetCaptureBlacklistFlag(const std::string& a_flag)
     {
+        StoreLock lk;
         const auto pol = CapturePolicySnapshot();
         if (a_flag == "allowNonPlayable") {
             return pol->allowNonPlayable;
@@ -2316,6 +2358,7 @@ namespace CostumeFW
 
     CaptureBlacklistView GetCaptureBlacklist()
     {
+        StoreLock lk;
         const auto pol = CapturePolicySnapshot();
         CaptureBlacklistView view;
         view.defaultNames = policy::DefaultBlockNames();
@@ -2330,6 +2373,7 @@ namespace CostumeFW
 
     bool AddCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value)
     {
+        StoreLock lk;
         // Copy-and-publish (review P1-5).
         auto next = *CapturePolicySnapshot();
         auto* bucket = BlacklistBucket(next, a_kind);
@@ -2355,6 +2399,7 @@ namespace CostumeFW
 
     bool RemoveCaptureBlacklistEntry(const std::string& a_kind, const std::string& a_value)
     {
+        StoreLock lk;
         // Copy-and-publish (review P1-5).
         auto next = *CapturePolicySnapshot();
         auto* bucket = BlacklistBucket(next, a_kind);
@@ -2376,6 +2421,7 @@ namespace CostumeFW
 
     std::vector<WornItem> WornArmors()
     {
+        StoreLock lk;
         std::vector<WornItem> out;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
@@ -2418,6 +2464,7 @@ namespace CostumeFW
 
     std::vector<WornItem> InventoryArmors(const std::string& a_filter)
     {
+        StoreLock lk;
         std::vector<WornItem> out;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
@@ -2484,6 +2531,7 @@ namespace CostumeFW
 
     std::vector<std::string> TokenPool()
     {
+        StoreLock lk;
         std::vector<std::pair<int, std::string>> pairs;
         auto* dh = RE::TESDataHandler::GetSingleton();
         if (!dh) {
@@ -2513,6 +2561,7 @@ namespace CostumeFW
 
     std::vector<std::string> FreeTokens()
     {
+        StoreLock lk;
         std::vector<std::string> out;
         for (const auto& t : TokenPool()) {
             if (FindBox(t) < 0) {
@@ -2524,17 +2573,20 @@ namespace CostumeFW
 
     std::string NextFreeToken()
     {
+        StoreLock lk;
         const auto free = FreeTokens();
         return free.empty() ? std::string{} : free.front();
     }
 
     int TokenSlot(const std::string& a_token)
     {
+        StoreLock lk;
         return SlotNumberOf(ResolveArmo(a_token));
     }
 
     int BoxIndexForSlot(int a_slot)
     {
+        StoreLock lk;
         for (std::size_t i = 0; i < g_boxes.size(); ++i) {
             if (SlotNumberOf(ResolveArmo(g_boxes[i].token)) == a_slot) {
                 return static_cast<int>(i);
@@ -2545,6 +2597,7 @@ namespace CostumeFW
 
     std::string LoreBoxContentsForSlot(int a_slot)
     {
+        StoreLock lk;
         for (const auto& b : g_boxes) {
             if (SlotNumberOf(ResolveArmo(b.token)) != a_slot) {
                 continue;
@@ -2563,12 +2616,14 @@ namespace CostumeFW
 
     bool BoxEnabled(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         return idx >= 0 && g_boxes[idx].enabled;
     }
 
     bool SetBoxEnabled(const std::string& a_token, bool a_enabled)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
@@ -2581,12 +2636,14 @@ namespace CostumeFW
 
     int BoxArmorType(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         return idx < 0 ? 0 : g_boxes[idx].armorType;
     }
 
     bool SetBoxArmorType(const std::string& a_token, int a_type)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
@@ -2599,6 +2656,7 @@ namespace CostumeFW
 
     bool NewBox(const std::string& a_label)
     {
+        StoreLock lk;
         const std::string token = NextFreeToken();
         if (token.empty()) {
             SKSE::log::warn("boxes: NewBox - token pool exhausted");
@@ -2609,6 +2667,7 @@ namespace CostumeFW
 
     std::string ItemDisplayName(const std::string& a_colonId)
     {
+        StoreLock lk;
         const std::uint32_t formId = ResolveFormId(a_colonId);
         if (formId == 0) {
             return a_colonId;
@@ -2898,6 +2957,7 @@ namespace CostumeFW
 
     std::vector<WornItem> AbilityCatalog()
     {
+        StoreLock lk;
         std::vector<WornItem> out;
         auto* dh = RE::TESDataHandler::GetSingleton();
         if (!dh) {
@@ -2923,12 +2983,14 @@ namespace CostumeFW
 
     std::string BoxAbility(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         return idx < 0 ? std::string{} : g_boxes[idx].ability;
     }
 
     bool SetBoxAbility(const std::string& a_token, const std::string& a_ability)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
@@ -2940,6 +3002,7 @@ namespace CostumeFW
 
     void RemoveBoxAbilitySpell(const std::string& a_ability)
     {
+        StoreLock lk;
         if (a_ability.empty()) {
             return;
         }
@@ -2952,6 +3015,7 @@ namespace CostumeFW
 
     bool CaptureEnchant(const std::string& a_content)
     {
+        StoreLock lk;
         // v1.3.2 r3 (re-review P2-2): function-boundary admission. The UIs
         // pre-gate for UX, but this native is public to any mod - without
         // this line an external caller could point it at a blocked static
@@ -3055,6 +3119,7 @@ namespace CostumeFW
 
     void ApplyBoxAbilities()
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
             return;
@@ -3079,6 +3144,7 @@ namespace CostumeFW
 
     void RebuildBoxAbility(const std::string& a_token)
     {
+        StoreLock lk;
         auto it = g_boxSpells.find(a_token);
         if (it == g_boxSpells.end()) {
             return;  // not built yet; ApplyBoxAbilities builds it fresh
@@ -3092,6 +3158,7 @@ namespace CostumeFW
 
     void RebuildPersistAbility()
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (g_persistSpell && player && player->HasSpell(g_persistSpell)) {
             player->RemoveSpell(g_persistSpell);
@@ -3102,6 +3169,7 @@ namespace CostumeFW
 
     void ClearBoxSpellCache()
     {
+        StoreLock lk;
         // Dynamic ability forms aren't serialized; a save/load drops them from the
         // actor. Just forget our cache so the next apply rebuilds from scratch.
         g_boxSpells.clear();
@@ -3111,6 +3179,7 @@ namespace CostumeFW
 
     std::string BoxStatsSummary(int a_index)
     {
+        StoreLock lk;
         if (a_index < 0 || a_index >= static_cast<int>(g_boxes.size())) {
             return {};
         }
@@ -3179,6 +3248,7 @@ namespace CostumeFW
 
     void SetStoreRef(RE::TESObjectREFR* a_store)
     {
+        StoreLock lk;
         if (!a_store) {
             g_storeFormId = 0;
             return;
@@ -3201,16 +3271,19 @@ namespace CostumeFW
 
     std::uint32_t StoreFormId()
     {
+        StoreLock lk;
         return g_storeFormId;
     }
 
     void RestoreStoreFormId(std::uint32_t a_id)
     {
+        StoreLock lk;
         g_storeFormId = a_id;
     }
 
     RE::TESObjectREFR* EnsureStoreRef()
     {
+        StoreLock lk;
         if (g_storeFormId) {
             auto* f = RE::TESForm::LookupByID(g_storeFormId);
             if (auto* r = f ? f->As<RE::TESObjectREFR>() : nullptr) {
@@ -3241,6 +3314,7 @@ namespace CostumeFW
 
     bool CaptureItemToStore(const std::string& a_id)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_id);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -3276,6 +3350,7 @@ namespace CostumeFW
 
     bool WearBoxToken(const std::string& a_token, bool a_wear)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_token);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -3299,6 +3374,7 @@ namespace CostumeFW
 
     void GiveOrRemoveToken(const std::string& a_token, bool a_give)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_token);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -3320,6 +3396,7 @@ namespace CostumeFW
 
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_id);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -3352,6 +3429,7 @@ namespace CostumeFW
 
     bool RecoverContentItem(const std::string& a_id)
     {
+        StoreLock lk;
         // ROOT A ([2279]): drain the store first, fabricate only on a store miss -
         // so recovering a still-stored item no longer mints a second copy.
         if (ReturnStoredItem(a_id, true)) {
@@ -3364,11 +3442,13 @@ namespace CostumeFW
 
     int BoxCount()
     {
+        StoreLock lk;
         return static_cast<int>(g_boxes.size());
     }
 
     BoxDefInfo BoxAt(int a_index)
     {
+        StoreLock lk;
         if (a_index < 0 || a_index >= static_cast<int>(g_boxes.size())) {
             return {};
         }
@@ -3377,6 +3457,7 @@ namespace CostumeFW
 
     bool BoxWornAt(int a_index)
     {
+        StoreLock lk;
         const std::uint32_t form = BoxTokenFormAt(a_index);
         if (form == 0) {
             return false;
@@ -3387,6 +3468,7 @@ namespace CostumeFW
 
     std::uint32_t BoxTokenFormAt(int a_index)
     {
+        StoreLock lk;
         if (a_index < 0 || a_index >= static_cast<int>(g_boxes.size())) {
             return 0;
         }
@@ -3395,12 +3477,14 @@ namespace CostumeFW
 
     std::vector<std::string> BoxContents(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         return idx < 0 ? std::vector<std::string>{} : g_boxes[idx].contents;
     }
 
     bool IsTokenColonId(const std::string& a_id)
     {
+        StoreLock lk;
         const auto colon = a_id.find(':');
         if (colon == std::string::npos) {
             return false;
@@ -3414,6 +3498,7 @@ namespace CostumeFW
 
     std::string ContentHolder(const std::string& a_content)
     {
+        StoreLock lk;
         if (a_content.empty()) {
             return {};
         }
@@ -3431,6 +3516,7 @@ namespace CostumeFW
 
     std::string CarrierModelForContent(const std::string& a_content)
     {
+        StoreLock lk;
         const std::string holder = ContentHolder(a_content);
         if (holder.empty() || holder == "persist") {
             return {};  // persist rides the HDPT pool, not a token ARMA
@@ -3448,6 +3534,7 @@ namespace CostumeFW
 
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content)
     {
+        StoreLock lk;
         if (a_token.empty()) {
             return false;
         }
@@ -3510,6 +3597,7 @@ namespace CostumeFW
 
     bool RemoveBoxContent(const std::string& a_token, const std::string& a_content)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
@@ -3534,6 +3622,7 @@ namespace CostumeFW
 
     bool RemoveBox(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
@@ -3546,6 +3635,7 @@ namespace CostumeFW
 
     bool SetBoxLabel(const std::string& a_token, const std::string& a_label)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
@@ -3557,6 +3647,7 @@ namespace CostumeFW
 
     std::string PresetAssignedTo(const std::string& a_presetName)
     {
+        StoreLock lk;
         if (a_presetName.empty()) {
             return {};
         }
@@ -3573,12 +3664,14 @@ namespace CostumeFW
 
     std::string PersistPreset()
     {
+        StoreLock lk;
         return g_persistPreset;
     }
 
     bool AssignPresetToPersist(const std::string& a_presetName,
         const std::vector<std::string>& a_contents)
     {
+        StoreLock lk;
         if (a_presetName.empty()) {
             return false;
         }
@@ -3609,6 +3702,7 @@ namespace CostumeFW
 
     bool ClearPersistPreset()
     {
+        StoreLock lk;
         g_persistPreset.clear();  // contents remain (now manual)
         WriteJson();
         return true;
@@ -3616,6 +3710,7 @@ namespace CostumeFW
 
     std::string BoxPreset(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         return idx < 0 ? std::string{} : g_boxes[idx].preset;
     }
@@ -3623,6 +3718,7 @@ namespace CostumeFW
     bool AssignPreset(const std::string& a_token, const std::string& a_presetName,
         const std::vector<std::string>& a_contents)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0 || a_presetName.empty()) {
             return false;
@@ -3657,6 +3753,7 @@ namespace CostumeFW
 
     bool ClearPreset(const std::string& a_token)
     {
+        StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;

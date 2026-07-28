@@ -43,6 +43,19 @@
   `n of N shown` count — scrolling makes a long catalog reachable, filtering
   makes it navigable.
 
+- **CFW's stored state is no longer read and written from two threads at once.**
+  The injection registry carried a "main thread only" note, but the MCM reads it
+  from the Papyrus VM thread and the SMF page reads it every frame from the
+  render thread, while CFW's own background tasks were adding to it, removing
+  from it and rewriting its entries. Box and persist definitions were worse:
+  they are written *synchronously* on whichever thread the UI ran on, because
+  the MCM needs the accept-or-refuse answer before it moves your item. Nothing
+  guarded any of it. Every store function now takes one shared lock.
+
+  This was found while investigating the persist crash and is **not** its cause —
+  that crash happens entirely on the main thread. It is a real defect on its own
+  and is fixed on its own merits.
+
 - **A costume that can never get physics no longer retries forever.** When a
   content's custom bones fall back to static, CFW schedules a re-injection in
   case the physics carrier was still attaching — but a content that nifcarrier

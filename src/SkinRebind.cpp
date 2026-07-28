@@ -1,6 +1,7 @@
 #include "SkinRebind.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "StoreLock.h"
 #include "Config.h"  // PersistHeadRebuildEnabled (F2 diagnostic lever)
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
@@ -525,6 +526,11 @@ namespace CostumeFW
             SKSE::log::info("  rebind retry queued (+{}ms): FSMP carrier may still be attaching",
                 std::chrono::duration_cast<std::chrono::milliseconds>(kRebindRetryDelay).count());
             RunAfterDelay(std::chrono::steady_clock::now() + kRebindRetryDelay, []() {
+                // Locked explicitly: this payload calls the anonymous-namespace
+                // DetachNodes and touches g_rebindRetryIds directly, so it is the
+                // one main-thread path into the registry that does not arrive
+                // through a locked exported function.
+                StoreLock lk;
                 g_rebindRetryQueued = false;
                 ++g_persistDiag.rebindRetries;
                 const auto ids = std::move(g_rebindRetryIds);
@@ -1586,6 +1592,7 @@ namespace CostumeFW
 
     bool InjectSkinned(const std::string& a_nifPath, const std::string& a_id)
     {
+        StoreLock lk;
         const ModelRef m{ a_nifPath, nullptr };
         Register(a_id, m, m);
         return InjectInternal(a_id, m, m);
@@ -1593,6 +1600,7 @@ namespace CostumeFW
 
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn)
     {
+        StoreLock lk;
         RunAfterDelay(std::chrono::steady_clock::now() + std::chrono::milliseconds(a_ms),
             std::move(a_fn));
     }
@@ -1611,6 +1619,7 @@ namespace CostumeFW
 
     void BindWatchdogTick()
     {
+        StoreLock lk;
         // Grace after a head rebuild: FSMP's old/new generations overlap for a few
         // seconds, and judging that as "dead" here would pile on re-injects that
         // each can trigger another FSMP rebuild (Engine Fixes arena per rebuild).
@@ -1634,6 +1643,7 @@ namespace CostumeFW
 
     void StartBindWatchdogOnce()
     {
+        StoreLock lk;
         static std::atomic<bool> started{ false };
         if (started.exchange(true)) {
             return;
@@ -1663,6 +1673,7 @@ namespace CostumeFW
 
     void Reconcile()
     {
+        StoreLock lk;
         StartBindWatchdogOnce();
         ++g_persistDiag.reconcileCalls;
         if (g_active.empty()) {
@@ -1758,11 +1769,13 @@ namespace CostumeFW
 
     std::uint32_t ResolveFormId(const std::string& a_colonId)
     {
+        StoreLock lk;
         return ResolveFormID(a_colonId);
     }
 
     bool IsTrackedToken(RE::FormID a_form)
     {
+        StoreLock lk;
         if (a_form == 0) {
             return false;
         }
@@ -1776,6 +1789,7 @@ namespace CostumeFW
 
     bool CanonicalizeColonId(std::string& a_id)
     {
+        StoreLock lk;
         // Delegates to the pure policy module (r2: single source of truth for
         // parse/format, incl. the never-truncate formatter - host-tested).
         return policy::CanonicalizeColonIdStr(a_id);
@@ -1784,6 +1798,7 @@ namespace CostumeFW
     bool ResolveAdmittedModelPath(const std::string& a_contentId, RE::SEX a_sex,
         const policy::CapturePolicy& a_policy, std::string& a_nifOut, bool a_log)
     {
+        StoreLock lk;
         // One policy generation covers both the content's base form and the
         // selected addon. This is the only seam carrier-manifest code may use.
         if (!IsContentAdmissible(a_contentId, a_policy, nullptr, a_log)) {
@@ -1805,6 +1820,7 @@ namespace CostumeFW
 
     bool CanResolveContent(const std::string& a_contentId)
     {
+        StoreLock lk;
         const auto pol = CapturePolicySnapshot();
         std::string nif;
         return ResolveAdmittedModelPath(
@@ -1813,6 +1829,7 @@ namespace CostumeFW
 
     std::vector<std::pair<std::string, int>> EnumerateContentShapes(const std::string& a_id)
     {
+        StoreLock lk;
         // Main thread only: resolve the content's ARMA model, load the NIF, list its
         // skinned shapes (name + first dismember biped slot), and cache the result so
         // the MCM's GetContentShapes can read it without a VM-thread NIF load. Empty
@@ -1841,11 +1858,13 @@ namespace CostumeFW
 
     RE::SEX EffectiveSexFor(const std::string& a_id)
     {
+        StoreLock lk;
         return EffectiveSex(a_id);
     }
 
     bool RegisterBoxById(const std::string& a_contentId, const std::string& a_tokenId)
     {
+        StoreLock lk;
         // ROOT D: register under canonical ids so the registry key, the gender-map
         // lookup, and active-vs-catalog matching agree with the (canonical) config
         // side regardless of how this id was spelled at its source.
@@ -1886,6 +1905,7 @@ namespace CostumeFW
 
     bool DefineBox(const std::string& a_contentId, const std::string& a_tokenId)
     {
+        StoreLock lk;
         if (!RegisterBoxById(a_contentId, a_tokenId)) {
             SKSE::log::error("DefineBox: failed content='{}' token='{}'", a_contentId, a_tokenId);
             return false;
@@ -1897,6 +1917,7 @@ namespace CostumeFW
 
     void DetachAll()
     {
+        StoreLock lk;
         // Copy ids first - DetachSkinned mutates g_active via Unregister.
         std::vector<std::string> ids;
         ids.reserve(g_active.size());
@@ -1913,6 +1934,7 @@ namespace CostumeFW
 
     int DetachAllInjected()
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
             return 0;
@@ -1934,6 +1956,7 @@ namespace CostumeFW
 
     void ListActive()
     {
+        StoreLock lk;
         SKSE::log::info("active: {} item(s)", g_active.size());
         if (auto* c = RE::ConsoleLog::GetSingleton()) {
             c->Print("[CEF] active items:");
@@ -2093,6 +2116,7 @@ namespace CostumeFW
     bool ReconcilePersistHeadParts(const std::vector<RE::BGSHeadPart*>& a_desired,
         const std::vector<RE::BGSHeadPart*>& a_pool)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* base = player ? player->GetActorBase() : nullptr;
         if (!base) {
@@ -2142,6 +2166,7 @@ namespace CostumeFW
     // head, one clean DoReset3D restores it. Main thread only. (HANDOVER teeth bug.)
     void RestoreMouthIfDropped(const char* a_reason)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* base = player ? player->GetActorBase() : nullptr;
         if (!player || !base) {
@@ -2234,6 +2259,7 @@ namespace CostumeFW
 
     bool PlayerHasHeadPart(RE::BGSHeadPart* a_part)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* base = player ? player->GetActorBase() : nullptr;
         return base && a_part && HasHeadPart(base, a_part);
@@ -2241,6 +2267,7 @@ namespace CostumeFW
 
     bool SweepLegacyCfwHeadParts(const std::vector<RE::BGSHeadPart*>& a_currentPool)
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* base = player ? player->GetActorBase() : nullptr;
         if (!base || !base->headParts) {
@@ -2294,6 +2321,7 @@ namespace CostumeFW
     // so just as clearly.
     std::vector<std::string> ChildArrayProbe()
     {
+        StoreLock lk;
         std::vector<std::string> out;
         const auto snap = [](RE::NiNode* a_n) {
             const auto& k = a_n->GetChildren();
@@ -2338,6 +2366,7 @@ namespace CostumeFW
     // caught the corruption without needing the crash.
     std::vector<std::string> ChildArrayScan()
     {
+        StoreLock lk;
         std::vector<std::string> out;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
@@ -2402,6 +2431,7 @@ namespace CostumeFW
     // is exactly the line a user in that state needs to see.
     BoneBudgetInfo BoneBudget()
     {
+        StoreLock lk;
         BoneBudgetInfo out{};
         for (const auto& it : g_active) {
             out.askedBones += it.fsmpBones + it.staticBones;
@@ -2467,6 +2497,7 @@ namespace CostumeFW
 
     void RebuildPlayerHead()
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !player->Get3D(false)) {
             return;  // no 3D yet - the engine builds the head with the current set
@@ -2493,6 +2524,7 @@ namespace CostumeFW
 
     void RequestPersistHeadRebuild(const char* a_reason)
     {
+        StoreLock lk;
         // Debounce: coalesce a burst of ApplyPersistCarrier-driven rebuild
         // requests into ONE DoReset3D ~500ms after the LAST request, so FSMP
         // rebuilds the wig physics once (not per settings-write / sync / pass).
@@ -2518,6 +2550,7 @@ namespace CostumeFW
 
     std::string PersistDiagString()
     {
+        StoreLock lk;
         const auto& d = g_persistDiag;
         return "headRebuild(req/exec)=" + std::to_string(d.headRebuildRequested) + "/" +
                std::to_string(d.headRebuildExecuted) +
@@ -2530,6 +2563,7 @@ namespace CostumeFW
 
     bool ChangeHeadPartPoC(const std::string& a_id)
     {
+        StoreLock lk;
         // FSMP approach-C active PoC (stage 1): drive a head-part change from CEF
         // code (NOT RaceMenu UI) and force a facegen head rebuild, to test whether
         // FSMP's facegen path (2) enumerates a CODE-changed head part - i.e. does
@@ -2587,6 +2621,7 @@ namespace CostumeFW
 
     void HeadDiag()
     {
+        StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
             return;
@@ -2694,6 +2729,7 @@ namespace CostumeFW
 
     bool InjectArma(std::uint32_t a_localID, const std::string& a_plugin, const std::string& a_id)
     {
+        StoreLock lk;
         // Public console/self-test entrance: admit the actual form identity,
         // not the caller's optional registry label.
         const auto pol = CapturePolicySnapshot();
@@ -2709,6 +2745,7 @@ namespace CostumeFW
 
     bool RegisterArmaById(const std::string& a_id)
     {
+        StoreLock lk;
         // Co-save restore keeps unresolved/blocked ids via ROOT H. Canonicalize
         // the registry key, but never delete the configured/co-save entry.
         std::string cid = a_id;
@@ -2738,6 +2775,7 @@ namespace CostumeFW
 
     bool InjectArmaById(const std::string& a_id)
     {
+        StoreLock lk;
         // Papyrus RegisterPersist entrance: one policy generation covers base
         // admission and the selected addon all the way into the primitive.
         std::string cid = a_id;
@@ -2758,6 +2796,7 @@ namespace CostumeFW
     }
     std::vector<ActiveItemInfo> ActiveSnapshot()
     {
+        StoreLock lk;
         std::vector<ActiveItemInfo> v;
         v.reserve(g_active.size());
         for (const auto& it : g_active) {
@@ -2768,11 +2807,13 @@ namespace CostumeFW
 
     void ClearRegistry()
     {
+        StoreLock lk;
         g_active.clear();
     }
 
     void DetachSkinned(const std::string& a_id)
     {
+        StoreLock lk;
         Unregister(a_id);
         DetachNodes(a_id);
         SKSE::log::debug("  detached {}", a_id);
@@ -2780,11 +2821,13 @@ namespace CostumeFW
 
     void HideInjectedNodes(const std::string& a_id)
     {
+        StoreLock lk;
         DetachNodes(a_id);  // registry untouched: Reconcile re-injects
     }
 
     void RefreshGender(const std::string& a_id)
     {
+        StoreLock lk;
         for (auto& it : g_active) {
             if (it.id == a_id) {
                 DetachNodes(a_id);                  // drop old-sex node, keep registered
@@ -2797,6 +2840,7 @@ namespace CostumeFW
 
     void InjectTestFromFile()
     {
+        StoreLock lk;
         const std::string line = ReadTestPath();
         if (line.empty()) {
             SKSE::log::error("test inject: empty Data\\SKSE\\Plugins\\CostumeExpansionFW_test.txt");
@@ -2842,6 +2886,7 @@ namespace CostumeFW
 
     void DetachTest()
     {
+        StoreLock lk;
         DetachSkinned("test");
         if (auto* console = RE::ConsoleLog::GetSingleton()) {
             console->Print("CostumeFW: detached test NIF");
