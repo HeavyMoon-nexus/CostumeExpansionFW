@@ -509,6 +509,44 @@ model repoint → `DoReset3D`** という最も危険な系列を通した。FSM
 4. Bone Limit Extender / CBBE 3BA + SOFTBODY のボディ構成
 5. persist 15-20 件、1 アイテムで最大 152 カスタムボーン
 
+### ④ SoftBody 除外テスト(2026-07-28 17:39-17:47)— **SoftBody は外れていなかった**
+
+**このランは SoftBody 仮説を検証していない。** プロファイル
+`test CEF bug` の modlist を実測:
+
+```
+line 224: +SOFTBODY - More perfect physical collision of the body 3.08   ← 有効
+line 225: -SOFTBODY - ... 3.00
+line 223: -GT - Softbody v3.26
+（他の softbody 系 16 件はすべて無効）
+```
+
+`modlist.txt` の更新時刻は **17:39:01**、ゲーム開始は **17:39:08** →
+**この状態でゲームが動いた**ことが確定。3.08 だけ有効なまま残っている。
+
+**しかも SoftBody 3.08 の中身が仮説を強く支持する:**
+
+| | |
+|---|---|
+| SMP XML | **29 ファイル**(`Softbody.xml`, `GT+++.xml` …)|
+| **`skeleton.nif` / `skeletonbeast.nif`** | **4 ファイル — プレイヤースケルトンを上書きしている** |
+| ESP | `HDT SMP Object - Simple.esp`, `RaceMenuMorphsCBBE.esp` |
+
+報告者の言う「CEF と SoftBody は同じようにスケルトンを触る」は**文字通り正しい**。
+CEF はそのスケルトンの `NPC Root [Root]` にホルダーを付け、ボーンを**名前で**
+解決している。**要再テスト: line 224 を無効化すること。**
+
+**このランで得られたもの(仮説検証とは別に有効):**
+
+| | |
+|---|---|
+| `DoReset3D` | 4 回 |
+| `cef nodediag` 最終 | **42 ノード / unwalkable 0** |
+| unwalkable ガード / `[error]` / CTD | 0 / 0 / なし |
+| **D1 parking が実運用で作動** | `carrier diagnostic '000D6F:Aether Outfit.esp': 0 of 2 bound` → 直後に `parked - no more rebind retries until it binds physics again` |
+
+D1 は実際のフローで意図どおり動いた(1 件を診断して駐車、以後ループしない)。
+
 ### まだ分かっていないこと / 次の一手
 
 - **配列が壊れる原因は未特定**(`Create(0)` は否認された)。ガードのログ
