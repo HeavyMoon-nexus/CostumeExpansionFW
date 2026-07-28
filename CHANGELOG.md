@@ -70,22 +70,25 @@
 ### Added
 
 - **A "Physics bones" section on the Diagnostics page** (both the MCM and the
-  SMF UI), because "my costume lost its physics" turned out to be a budget race
-  nothing surfaced. It reports **Bone Limit Extender** detection, how many custom
-  bones your shown content needs and how many actually got physics, and how many
-  bones FSMP merged on your character — split into CFW's own and everyone else's.
+  SMF UI), because "my costume lost its physics" turned out to be a race nothing
+  surfaced. It covers two separate things that are easy to confuse:
 
-  When none of CFW's carrier bones were merged it says so outright: FSMP takes a
-  carrier whole or not at all, so another SMP-heavy mod is winning the actor's
-  bone budget and your costumes will hang static until you raise the ceiling or
-  wear/persist less. Measured while chasing this: with one popular body-collision
-  mod enabled, FSMP merged 102 bones on the test character and **not one of them
-  was CFW's**; with it disabled the same character merged 3453 CFW carrier bones.
+  **Heaviest shape — N / 80.** Skyrim SE skins on the GPU and passes a shape's
+  bones in a ~3840-byte DX11 constant buffer, so **80 bones per shape, per draw**;
+  a shape over that crashes when it is copied into the buffer, which is exactly
+  what **Bone Limit Extender** (Nexus 177636) lifts. The page reports your
+  heaviest injected shape against that 80, names the costume it belongs to, and
+  warns loudly if you are over it without the extender installed.
 
-  There is deliberately no "N / limit" figure. Bone Limit Extender publishes no
-  constant we can read, and the ceiling that actually bites is FSMP's per-actor
-  merge budget, which depends on your whole load order — so the page reports what
-  was asked for against what was granted, which needs no constant to act on.
+  **FSMP merge — asked vs granted.** How many custom bones your shown content
+  needs, how many got physics, how many fell back to static, and how many bones
+  FSMP merged on your character — split into CFW's own and everyone else's. If
+  none of CFW's carrier bones were merged it says so: FSMP takes a carrier whole
+  or not at all, so something else on the actor won. Measured while chasing this:
+  with one popular body-collision mod enabled, FSMP merged 102 bones on the test
+  character and **not one was CFW's**; disabling it took the same character to
+  3453 CFW carrier bones. This axis has no citable ceiling — it depends on your
+  whole load order — so it reports the gap rather than inventing a denominator.
 
 ### Diagnostics (for the persist-CTD investigation)
 

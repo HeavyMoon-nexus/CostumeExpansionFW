@@ -86,6 +86,7 @@ namespace CostumeFW
             // CEF's carrier bones were merged at all).
             std::uint32_t fsmpBones{ 0 };    // bound to an FSMP physics node
             std::uint32_t staticBones{ 0 };  // fell back to the static ancestor remap
+            std::uint32_t maxShapeBones{ 0 };  // worst single shape, vs the 80 ceiling
         };
         std::vector<ActiveItem> g_active;
 
@@ -393,6 +394,14 @@ namespace CostumeFW
         // quiet, which cost a whole night of triage.
         std::uint32_t g_rebind3pFsmp = 0;   // per-injection, 3p skeleton only
         std::uint32_t g_rebind3pRemap = 0;
+        // Highest bone count on any SINGLE skinned shape of this injection. This
+        // is the number the vanilla 80-bone ceiling applies to: SSE skins on the
+        // GPU and passes the shape's bones in a ~3840-byte DX11 constant buffer,
+        // i.e. 80 bones per DRAW - a shape over that crashed the game when it was
+        // copied into the buffer, which is precisely what Bone Limit Extender
+        // (Nexus 177636) lifts. Per shape, NOT per actor: the FSMP merge totals
+        // reported next to it are a different axis entirely.
+        std::uint32_t g_maxShapeBones = 0;
         std::unordered_set<std::string> g_staticDiagReported;
 
         std::atomic<int> g_rebindRetryBudget{ 0 };
@@ -647,6 +656,9 @@ namespace CostumeFW
                 rttiName, n, a_skin->numMatrices, a_skin->boneWorldTransforms != nullptr);
             if (n == 0) {
                 return true;
+            }
+            if (n > g_maxShapeBones) {
+                g_maxShapeBones = n;  // vs the 80-bone DX11 skinning ceiling
             }
 
             std::uint32_t remapCount = 0;
@@ -1062,6 +1074,7 @@ namespace CostumeFW
             g_injectStatic3p = false;
             g_rebind3pFsmp = 0;   // X-DIAG: tallies belong to THIS injection
             g_rebind3pRemap = 0;
+            g_maxShapeBones = 0;
             // Multi-content carriers prefix this content's custom bones
             // (nifcarrier namespace isolation) - same id, same prefix.
             g_rebindPrefix = nifcarrier::ContentNamePrefix(a_id);
@@ -1085,6 +1098,7 @@ namespace CostumeFW
                 if (it.id == a_id) {
                     it.fsmpBones = g_rebind3pFsmp;
                     it.staticBones = g_rebind3pRemap;
+                    it.maxShapeBones = g_maxShapeBones;
                     break;
                 }
             }
@@ -2393,6 +2407,10 @@ namespace CostumeFW
             out.askedBones += it.fsmpBones + it.staticBones;
             out.boundBones += it.fsmpBones;
             out.staticBones += it.staticBones;
+            if (it.maxShapeBones > out.worstShapeBones) {
+                out.worstShapeBones = it.maxShapeBones;
+                out.worstShapeContent = it.id;
+            }
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* root = player ? player->Get3D(false) : nullptr;

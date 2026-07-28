@@ -1718,20 +1718,34 @@ namespace CostumeFW
         }
 
         // --- Physics bones -------------------------------------------------
-        // Why there is no "N / limit" here: Bone Limit Extender ships no
-        // readable constant, and the ceiling that actually bites is FSMP's
-        // per-actor merge budget, which depends on the whole load order. So
-        // this reports what CFW asked for against what it actually got - the
-        // gap is the signal, and it needs no constant to be actionable.
-        // (2026-07-28: with SOFTBODY on, FSMP merged 102 bones and none were
-        // CFW's; with it off the same character merged 3453 CFW carrier bones.)
+        // Two independent axes; see SkinRebind.h BoneBudgetInfo. The 80 is a
+        // real constant (SSE's DX11 skinning constant buffer, per SHAPE, per
+        // draw - what Bone Limit Extender lifts). The FSMP merge totals have no
+        // citable ceiling, so they report asked-vs-granted instead.
         {
             const auto bb = BoneBudget();
+            const bool ble = GetModuleHandleA("skyrimbonelimitfix.dll") != nullptr;
             out.push_back("# Physics bones");
             out.push_back(std::string("Bone Limit Extender: ") +
-                          (GetModuleHandleA("skyrimbonelimitfix.dll")
-                                  ? "detected (raises the ceiling)"
-                                  : "not detected (Nexus 177636 - recommended with CFW)"));
+                          (ble ? "detected - the 80-bone limit is lifted"
+                               : "NOT detected (Nexus 177636)"));
+            // Axis (1): per-shape, against the citable 80.
+            {
+                std::string s = "Heaviest shape: " + std::to_string(bb.worstShapeBones) +
+                                " / " + std::to_string(kVanillaShapeBoneLimit) +
+                                " bone(s) per shape (vanilla GPU skinning buffer)";
+                if (!bb.worstShapeContent.empty()) {
+                    s += " - " + ItemDisplayName(bb.worstShapeContent);
+                }
+                out.push_back(s);
+                if (bb.worstShapeBones > kVanillaShapeBoneLimit && !ble) {
+                    out.push_back("  ^ OVER the vanilla limit with no Bone Limit Extender. "
+                                  "Skyrim SE copies a shape's bones into an 80-bone DX11 "
+                                  "buffer to skin it on the GPU, and crashes past that. "
+                                  "Install Bone Limit Extender (Nexus 177636).");
+                }
+            }
+            // Axis (2): FSMP merge, asked vs granted.
             out.push_back("CFW content needs: " + std::to_string(bb.askedBones) +
                           " custom bone(s) - physics " + std::to_string(bb.boundBones) +
                           " / static " + std::to_string(bb.staticBones));
@@ -1739,10 +1753,11 @@ namespace CostumeFW
                           " bone(s) in " + std::to_string(bb.mergeGroups) + " group(s); CFW's own " +
                           std::to_string(bb.mergedCef) + " in " + std::to_string(bb.cefMergeGroups));
             if (bb.askedBones > 0 && bb.mergedCef == 0) {
-                out.push_back("  ^ NONE of CFW's carrier bones were merged. FSMP merges a "
-                              "carrier whole or not at all, so another SMP-heavy mod is "
-                              "taking the actor's bone budget - CFW costumes hang static. "
-                              "Install Bone Limit Extender, or reduce what is worn/persisted.");
+                out.push_back("  ^ NONE of CFW's carrier bones were merged - FSMP takes a "
+                              "carrier whole or not at all, so something else on this actor "
+                              "won and CFW costumes hang static. Measured against a popular "
+                              "body-collision mod: disabling it took CFW from 0 merged bones "
+                              "to 3453. Try disabling other SMP-heavy mods one at a time.");
             } else if (bb.staticBones > bb.boundBones) {
                 out.push_back("  ^ most bones fell back to static (no SMP sway). Check "
                               "CEF_sync.log for 'skipped for the carrier' - content with no "

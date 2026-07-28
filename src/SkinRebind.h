@@ -217,10 +217,21 @@ namespace CostumeFW
     void HeadDiag();
 
     // --- bone budget (Diagnostics page) -------------------------------------
-    // Everything here is MEASURED. No absolute ceiling is reported: Bone Limit
-    // Extender ships no constant we can read, and the limit that actually bites
-    // is FSMP's per-actor merge budget, which depends on the whole load order.
-    // "asked vs bound" is the self-calibrating signal instead.
+    // TWO INDEPENDENT AXES - do not conflate them:
+    //
+    //  (1) worstShapeBones vs 80. SSE skins on the GPU and passes a shape's
+    //      bones in a ~3840-byte DX11 constant buffer = 80 bones PER DRAW.
+    //      A shape over that crashed the game when it was copied into the
+    //      buffer; Bone Limit Extender (Nexus 177636) is what lifts it. This
+    //      is per SHAPE, and 80 is a real, citable constant.
+    //
+    //  (2) the FSMP merge totals. How many physics bones FSMP actually built
+    //      on the actor, and how many of them are CEF's. There is no citable
+    //      ceiling here - FSMP's per-actor merge budget depends on the whole
+    //      load order - so this axis reports asked-vs-granted instead, which
+    //      is self-calibrating.
+    inline constexpr std::uint32_t kVanillaShapeBoneLimit = 80;
+
     struct BoneBudgetInfo
     {
         std::uint32_t askedBones{ 0 };   // custom bones CEF's shown content needs
@@ -230,6 +241,8 @@ namespace CostumeFW
         std::uint32_t mergedCef{ 0 };    // of those, carrying nifcarrier's C<8hex>_
         std::uint32_t mergeGroups{ 0 };      // distinct FSMP merge groups
         std::uint32_t cefMergeGroups{ 0 };   // groups holding at least one CEF bone
+        std::uint32_t worstShapeBones{ 0 };  // axis (1): highest per-shape bone count
+        std::string   worstShapeContent;     // which content that shape belongs to
     };
     BoneBudgetInfo BoneBudget();
 
