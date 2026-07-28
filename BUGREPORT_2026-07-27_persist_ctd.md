@@ -470,6 +470,45 @@ Unhandled exception "EXCEPTION_ACCESS_VIOLATION"
 **`test CEF bug` プロファイルで MARA を無効化すること。**
 有効なままだと再現テストが何度でもこれに殺される。
 
+### ③ 再走(MARA 無効, 2026-07-28 17:18-17:33)— 最も広いカバレッジ、それでも非再現
+
+| | |
+|---|---|
+| MARA 検出行 | **0**(無効化済み)|
+| FSMP | 4.0.1 |
+| Reconcile | 48 |
+| **head-carrier 再構築(`DoReset3D`)** | **3 回**(前回 0 回) |
+| FSMP バインド | 50(nifcarrier プレフィックス付き = 自前キャリア経由で成立) |
+| dead merge 世代の再注入 | 4(`Head_00000004 → 00000005` の退役を sweep が処理) |
+| carrier diagnostic | **0**(前回 13)|
+| parked | 0(必要なし) |
+| retry ラウンド | 4 |
+| `cef nodediag`(最終) | **40 ノード / unwalkable 0**、全て `size == cap` |
+| unwalkable ガード / `[error]` | **0 / 0** |
+| CTD | **なし** |
+
+今回ようやく **head-part 9 個の一括解除 → `DoReset3D` → 再登録 → `DoReset3D` →
+model repoint → `DoReset3D`** という最も危険な系列を通した。FSMP が head merge
+世代を退役させ、CEF の dead-bind sweep が再バインドする流れも実際に走った。
+**それでも壊れない。**
+
+→ **疑っていたサブシステムはローカルで全部通し、全部クリーン。**
+`children._data == 1` の署名はローカルでは一度も出ていない。
+
+### ローカルに無い変数(報告者だけが持っているもの)
+
+3 回の再現試行が全て失敗した以上、差分は環境側にある。報告者固有:
+
+1. **SOFTBODY**(Nexus 152103)— **報告者自身が疑っていた**:
+   「CEF と SoftBody は同じようにスケルトンを触るので競合しないか」。
+   **これは未検証のまま残っている。**スケルトンを操作する第三者 mod であり、
+   壊れているのが CEF のホルダーノードであることと筋が通る。**次の最優先候補。**
+2. **BD Ungulates**(カスタム種族)
+3. **zEdit マージ**(Clothing Loot1/2)— 壊れた 2 ノードは**どちらも
+   `Clothing Loot2.esp`** 由来
+4. Bone Limit Extender / CBBE 3BA + SOFTBODY のボディ構成
+5. persist 15-20 件、1 アイテムで最大 152 カスタムボーン
+
 ### まだ分かっていないこと / 次の一手
 
 - **配列が壊れる原因は未特定**(`Create(0)` は否認された)。ガードのログ
