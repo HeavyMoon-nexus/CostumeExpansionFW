@@ -54,3 +54,6 @@ NEXUS_CHANGELOG_v*.txt
 dist/
 NIFCARRIER_INPROC.md
 tools/nifcarrier/sync_carriers.local.cmd
+
+# Nexus store-page description draft (local working copy)
+2GAME_DESCRIPTION_ja.txt

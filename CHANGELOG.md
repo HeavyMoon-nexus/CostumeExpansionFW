@@ -13,22 +13,28 @@
   off the end and returned a value that is not a node at all, which CEF then
   used as one.
 
-  Two changes harden it: any node whose child array is inconsistent is skipped
-  with a log line naming it, rather than walked into; and the detach paths no
-  longer read `NiAVObject::parent`, which is what turned the second case into a
-  crash inside a code address. **What actually corrupts the array is still
-  unknown** — the leading suspect (holder nodes being created with an empty
-  child array and grown by the engine) was measured in-game and cleared, so the
-  hunt continues.
+  **CEF no longer searches your skeleton for its own nodes at all.** Everything
+  it attaches, it now remembers: a reference to the node it created and to the
+  node it hung it on, and detaching goes through that pair. Nothing walks the
+  scene graph, nothing looks a node up by name, and nothing reads a node's
+  parent pointer — so none of it can be handed something that is not what it
+  expects.
 
-  This is why it looked random and why it happened through **both** the MCM and
-  the SMF UI, on **every** version people tried back to v1.2.1: that sweep runs
-  for every persist operation — adding an item, removing one, or just toggling
-  "Active on this save".
+  This took two attempts, and the first one made things worse for the reporter,
+  so the history is worth recording. Replacing the by-name lookup with a
+  hand-written walk of the child lists moved the crash instead of removing it,
+  and spread it to **New Game**: the walk died on the children of
+  `NPC Root [Root]`. That node is a `BSFlattenedBoneTree`, and Skyrim gives it
+  its **own** `GetObjectByName`, different from the one every other node uses —
+  the engine does not find bones there by walking children, so what those
+  entries hold is nobody's contract. Walking it was never valid; it was merely
+  survivable on some skeletons, which is why it never reproduced in testing
+  here. Not searching at all removes the entire class.
 
-  The array-sanity log line is deliberate: if it appears in a future report it
-  names the node and the moment, which is the one thing the crash logs could not
-  give us.
+  This is also why it looked random and why it happened through **both** the MCM
+  and the SMF UI, on **every** version people tried back to v1.2.1: that step
+  ran for every persist operation — adding an item, removing one, or just
+  toggling "Active on this save".
 
 - **Long lists in the SMF UI are reachable again.** Every unbounded list —
   the **Persist** catalog, the **Boxes** list, **Presets**, **Blocked** and

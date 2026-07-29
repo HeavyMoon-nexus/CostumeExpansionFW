@@ -88,6 +88,11 @@ namespace CostumeFW
             std::uint32_t fsmpBones{ 0 };    // bound to an FSMP physics node
             std::uint32_t staticBones{ 0 };  // fell back to the static ancestor remap
             std::uint32_t maxShapeBones{ 0 };  // worst single shape, vs the 80 ceiling
+            // Attachment record per skeleton: the holder CEF created and the node
+            // it hung it on. Detach goes through these - CEF never searches the
+            // scene graph for its own nodes (see DetachRecorded).
+            RE::NiPointer<RE::NiNode> holder3p, parent3p;
+            RE::NiPointer<RE::NiNode> holder1p, parent1p;
         };
         std::vector<ActiveItem> g_active;
 
@@ -124,30 +129,43 @@ namespace CostumeFW
         std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> g_boundBoneRefs;
         std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
 
-        // --- unwalkable children array (the persist CTD, root cause) -----------
-        // SIX of the reporter's thirteen 2026-07-27 crash logs are CEF, and all six
-        // are the SAME operation - DetachRealBody's GetObjectByName("CEF_RealBody")
-        // sweep. They are two faces of one defect: a CEF holder node whose children
-        // array cannot be walked.
+        // --- CEF never searches the skeleton for its own nodes -----------------
+        // Two crash generations taught this, both in DetachRealBody:
         //
-        //   3x  fault INSIDE the engine at SkyrimSE.exe+0xD1D9D7 =
-        //       NiNode::GetObjectByName+0x37, "mov rcx,[rax+rbx*8]", with
-        //       rax (children._data) = 0x1 and rbx (index) = 0. RCX names the node
-        //       and it is one of OURS: "CostumeFW_0017E9_Clothing_Loot2_esp".
-        //   3x  fault AFTER it returned. The walk fell off the same kind of array
-        //       and returned *(node + 0x110) - the value every NiNode carries
-        //       there, the vtable pointer of its own children array. (Checked
-        //       against SkyrimSE.exe's .rdata: the returned pointer is exactly
-        //       NiNode's vtable - 0x10, i.e. the NiTObjectArray vtable.) The old
-        //       code then read ->parent off that non-object and called DetachChild
-        //       through a code address.
+        //  1. The original code did GetObjectByName then read the result's
+        //     ->parent and called DetachChild through it. That parent could be a
+        //     non-object; the fault was reading its vtable.
+        //  2. Replacing that with a hand-rolled children walk moved the crash
+        //     rather than removing it - and made it WORSE, reaching New Game.
+        //     The walk died on the children of "NPC Root [Root]", reading a slot
+        //     that held a pointer to some node's children array (the faulting
+        //     value unpacked to NiTArray's four uint16 fields: capacity, freeIdx,
+        //     size, growthSize). Proven from SkyrimSE.exe's RTTI afterwards:
+        //     that node is a BSFlattenedBoneTree, whose vtable slot +0x150
+        //     (GetObjectByName) is SkyrimSE.exe+0xD30380 - a DIFFERENT function
+        //     from NiNode's +0xD1D9A0. The engine does not find bones there by
+        //     walking children, so what those slots hold is nobody's contract.
+        //     A hand walk of that node was never valid; it just happened to be
+        //     survivable on some skeletons, which is why it never reproduced
+        //     locally.
         //
-        // So it is NOT a dangling ->parent (the first reading of these logs) and
-        // NOT a thread race: the bad values are deterministic - identical across
-        // two game sessions, two EXE base addresses and two CEF builds.
-        //
-        // Walking such a node is fatal for whoever does it, engine or us. Refuse,
-        // and leave a line naming the node instead of taking the game down.
+        // So: no searching at all. CEF records a NiPointer to the holder it
+        // created and to the node it hung it on, and detaches through the pair.
+        // Neither end can dangle - NiPointer keeps both alive - and neither
+        // ->parent nor any children array is ever touched.
+        void DetachRecorded(RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder)
+        {
+            if (a_parent && a_holder) {
+                a_parent->DetachChild(a_holder.get());
+            }
+            a_parent.reset();
+            a_holder.reset();
+        }
+
+        // Still used by the diagnostics walks (nodediag / headdiag / the dead-bind
+        // sweep), which enumerate FSMP's merged bones and have no record to go on.
+        // Those are user-initiated or already scoped to our own holder; the hot
+        // paths no longer walk anything.
         bool ChildrenWalkable(RE::NiNode* a_node)
         {
             const auto& kids = a_node->GetChildren();
@@ -162,62 +180,6 @@ namespace CostumeFW
             return reinterpret_cast<std::uintptr_t>(kids.begin()) >= 0x10000;
         }
 
-        // Detach every match under a_root. We descend ourselves and detach through
-        // the parent we ARRIVED THROUGH - a node just walked successfully - so
-        // NiAVObject::parent is never dereferenced. That is the rule
-        // HasDeadPhysicsBind already states ("liveness is membership, never a
-        // parent-chain walk"); every live-tree detach follows it now.
-        template <class Pred>
-        int DetachMatchingFrom(RE::NiAVObject* a_root, Pred a_match)
-        {
-            auto* rootNode = a_root ? a_root->AsNode() : nullptr;
-            if (!rootNode) {
-                return 0;
-            }
-            int removed = 0;
-            std::vector<RE::NiNode*> stack{ rootNode };
-            while (!stack.empty()) {
-                auto* parent = stack.back();
-                stack.pop_back();
-                if (!ChildrenWalkable(parent)) {
-                    SKSE::log::error(
-                        "scene: node '{}' has an unwalkable children array (size={} cap={} "
-                        "data={}) - skipping it; this is the persist-CTD signature",
-                        parent->name.c_str(), parent->GetChildren().size(),
-                        parent->GetChildren().capacity(),
-                        static_cast<const void*>(parent->GetChildren().begin()));
-                    continue;
-                }
-                // Collect first: DetachChild mutates the child array we iterate.
-                // NiPointer keeps each match alive across its own detach.
-                std::vector<RE::NiPointer<RE::NiAVObject>> hits;
-                for (auto& child : parent->GetChildren()) {
-                    auto* obj = child.get();
-                    if (!obj) {
-                        continue;
-                    }
-                    if (a_match(obj)) {
-                        hits.push_back(child);  // do NOT descend into a match
-                    } else if (auto* node = obj->AsNode()) {
-                        // Safe to hold raw: only matches are detached, and we never
-                        // descend into one, so no ancestor of a queued node is removed.
-                        stack.push_back(node);
-                    }
-                }
-                for (auto& hit : hits) {
-                    parent->DetachChild(hit.get());
-                    ++removed;
-                }
-            }
-            return removed;
-        }
-
-        int DetachNamedFrom(RE::NiAVObject* a_root, const RE::BSFixedString& a_name)
-        {
-            return DetachMatchingFrom(
-                a_root, [&](RE::NiAVObject* a_obj) { return a_obj->name == a_name; });
-        }
-
         void DetachNodes(const std::string& a_id)
         {
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -225,13 +187,17 @@ namespace CostumeFW
                 return;
             }
             g_boundBoneRefs.erase(a_id);  // release the bone pins with the attach
-            const RE::BSFixedString nodeName{ NodeName(a_id).c_str() };
-            auto detachFrom = [&](RE::NiAVObject* a_root, const char* a_tag) {
-                const int removed = DetachNamedFrom(a_root, nodeName);
-                SKSE::log::debug("  DetachNodes[{}] '{}' removed {}", a_tag, nodeName.c_str(), removed);
-            };
-            detachFrom(player->Get3D(false), "3p");
-            detachFrom(player->Get3D(true), "1p");
+            for (auto& it : g_active) {
+                if (it.id != a_id) {
+                    continue;
+                }
+                const bool had3p = static_cast<bool>(it.holder3p);
+                const bool had1p = static_cast<bool>(it.holder1p);
+                DetachRecorded(it.parent3p, it.holder3p);
+                DetachRecorded(it.parent1p, it.holder1p);
+                SKSE::log::debug("  DetachNodes '{}' 3p={} 1p={}", a_id, had3p, had1p);
+                return;
+            }
         }
 
         void Unregister(const std::string& a_id)
@@ -892,16 +858,34 @@ namespace CostumeFW
         // names to DROP (per-content pick). a_cacheShapes: record this NIF's shapes
         // into the MCM cache (true only for the primary/3p pass so 1p doesn't
         // overwrite the full list with its partial one).
+        // a_holder / a_parent: the attachment RECORD for this root. CEF keeps a
+        // NiPointer to the node it created and to the node it hung it on, and
+        // detaches through those - it never searches the skeleton for its own
+        // work. See DetachRecorded for why.
         bool InjectOnRoot(RE::NiAVObject* a_root3D, const std::string& a_relPath,
             const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap,
             bool a_applyMorph, const std::unordered_set<std::string>& a_hideShapes,
-            const std::string& a_id, bool a_cacheShapes)
+            const std::string& a_id, bool a_cacheShapes,
+            RE::NiPointer<RE::NiNode>& a_holder, RE::NiPointer<RE::NiNode>& a_parent)
         {
             if (!a_root3D) {
                 return false;
             }
-            // Idempotency: already present on this skeleton?
-            if (a_root3D->GetObjectByName(a_nodeName)) {
+            // Resolve the attach point FIRST - it is also the idempotency key.
+            // GetObjectByName here is the ENGINE's own lookup, which dispatches
+            // per node type (BSFlattenedBoneTree overrides it); that is exactly
+            // why CEF must not hand-roll a children walk of its own.
+            RE::NiAVObject* skelRootObj = a_root3D->GetObjectByName(kSkeletonRootName);
+            RE::NiNode* attachRoot = skelRootObj ? skelRootObj->AsNode() : a_root3D->AsNode();
+            if (!attachRoot) {
+                SKSE::log::error("  no attach root node");
+                return false;
+            }
+            // Idempotency without searching: our own record says whether this
+            // holder is already hanging on THIS attach root. After a 3D rebuild
+            // attachRoot is a different node, so the record no longer matches and
+            // we re-inject, which is the old behaviour minus the search.
+            if (a_holder && a_parent.get() == attachRoot) {
                 SKSE::log::debug("  already attached: {}", a_nodeName);
                 return true;
             }
@@ -918,13 +902,6 @@ namespace CostumeFW
             }
             if (!clone) {
                 SKSE::log::error("  Clone() failed");
-                return false;
-            }
-
-            RE::NiAVObject* skelRootObj = a_root3D->GetObjectByName(kSkeletonRootName);
-            RE::NiNode* attachRoot = skelRootObj ? skelRootObj->AsNode() : a_root3D->AsNode();
-            if (!attachRoot) {
-                SKSE::log::error("  no attach root node");
                 return false;
             }
             SKSE::log::debug("  root3D='{}' attachRoot='{}'",
@@ -1036,6 +1013,10 @@ namespace CostumeFW
             }
 
             attachRoot->AttachChild(holder, true);
+            // Record the attachment. Both ends are held by NiPointer, so neither
+            // can be freed while we still intend to detach through them.
+            a_holder.reset(holder);
+            a_parent.reset(attachRoot);
 
             RE::NiUpdateData updateData{};
             updateData.flags.set(RE::NiUpdateData::Flag::kDirty);
@@ -1089,8 +1070,29 @@ namespace CostumeFW
             // skeleton must not drop the pins the other skeleton still uses).
             std::vector<RE::NiPointer<RE::NiAVObject>> collected;
             g_boneRefSink = &collected;
+            // The attachment record lives on the registry entry; hand the right
+            // slot to each root so InjectOnRoot can both skip an existing attach
+            // and record a new one without searching the skeleton.
+            ActiveItem* slot = nullptr;
+            for (auto& it : g_active) {
+                if (it.id == a_id) {
+                    slot = &it;
+                    break;
+                }
+            }
+            // Separate scratch pairs per skeleton: an id that reaches here without
+            // a registry entry should not exist (every caller registers first),
+            // but sharing one pair would make the 1p pass see the 3p record and
+            // skip itself.
+            static RE::NiPointer<RE::NiNode> s_scratchHolder3p, s_scratchParent3p;
+            static RE::NiPointer<RE::NiNode> s_scratchHolder1p, s_scratchParent1p;
+            auto& holder3p = slot ? slot->holder3p : s_scratchHolder3p;
+            auto& parent3p = slot ? slot->parent3p : s_scratchParent3p;
+            auto& holder1p = slot ? slot->holder1p : s_scratchHolder1p;
+            auto& parent1p = slot ? slot->parent1p : s_scratchParent1p;
             if (auto* root3p = player->Get3D(false); root3p && !a_m3p.nifPath.empty()) {
-                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap, applyMorph, hideShapes, a_id, true);
+                any |= InjectOnRoot(root3p, StripMeshesPrefix(a_m3p.nifPath), nodeName, a_m3p.swap,
+                    applyMorph, hideShapes, a_id, true, holder3p, parent3p);
             }
             if (g_rebind3pFsmp) {
                 // Bound to physics again - re-arm the X-DIAG report so a later
@@ -1114,7 +1116,8 @@ namespace CostumeFW
                 RequestRebindRetry(a_id);
             }
             if (auto* root1p = player->Get3D(true); root1p && !a_m1p.nifPath.empty()) {
-                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap, applyMorph, hideShapes, a_id, false);
+                any |= InjectOnRoot(root1p, StripMeshesPrefix(a_m1p.nifPath), nodeName, a_m1p.swap,
+                    applyMorph, hideShapes, a_id, false, holder1p, parent1p);
             }
             g_boneRefSink = nullptr;
             if (!collected.empty()) {
@@ -1134,19 +1137,16 @@ namespace CostumeFW
 
         constexpr const char* kRealBodyNode = "CEF_RealBody";
 
+        // The real body is not a registry item, so its attachment record lives
+        // here. Both crash generations happened in DetachRealBody - see
+        // DetachRecorded for why neither searching nor walking is allowed.
+        RE::NiPointer<RE::NiNode> g_realBodyHolder3p, g_realBodyParent3p;
+        RE::NiPointer<RE::NiNode> g_realBodyHolder1p, g_realBodyParent1p;
+
         void DetachRealBody()
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player) {
-                return;
-            }
-            // The confirmed 2026-07-27 CTD site. This used to read n->parent and
-            // call through it; that pointer can be freed memory (see
-            // DetachNamedFrom). Membership-based detach only.
-            static const RE::BSFixedString kRealBodyName{ kRealBodyNode };
-            for (int fp = 0; fp <= 1; ++fp) {
-                DetachNamedFrom(player->Get3D(fp != 0), kRealBodyName);
-            }
+            DetachRecorded(g_realBodyParent3p, g_realBodyHolder3p);
+            DetachRecorded(g_realBodyParent1p, g_realBodyHolder1p);
         }
 
         // Pick the BODY (slot-32) addon from a skin ARMO's armature for the player's
@@ -1327,12 +1327,14 @@ namespace CostumeFW
             bool any = false;
             if (auto* root3p = player->Get3D(false); root3p && !m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
-                    m3p.swap, true, kNoHide, "realbody", false);
+                    m3p.swap, true, kNoHide, "realbody", false, g_realBodyHolder3p,
+                    g_realBodyParent3p);
                 ApplySkinTextures(root3p, kRealBodyNode, skinTx);
             }
             if (auto* root1p = player->Get3D(true); root1p && !m1p.nifPath.empty()) {
                 any |= InjectOnRoot(root1p, StripMeshesPrefix(m1p.nifPath), kRealBodyNode,
-                    m1p.swap, true, kNoHide, "realbody", false);
+                    m1p.swap, true, kNoHide, "realbody", false, g_realBodyHolder1p,
+                    g_realBodyParent1p);
                 ApplySkinTextures(root1p, kRealBodyNode, skinTx);
             }
             if (any) {
@@ -1993,18 +1995,24 @@ namespace CostumeFW
         if (!player) {
             return 0;
         }
+        // Record-driven, not a sweep. This used to walk both skeletons looking
+        // for CostumeFW_* nodes; walking the actor's skeleton is what the second
+        // crash generation proved unsafe (see DetachRecorded). Everything CEF
+        // attached is in the registry with a NiPointer to it and to its parent,
+        // so there is nothing a sweep could find that this misses.
         int total = 0;
-        auto sweep = [&](RE::NiAVObject* a_root, const char* a_tag) {
-            // Membership-based, like every other live-tree detach: never read
-            // ->parent (see DetachNamedFrom - that is the confirmed CTD).
-            const int removed = DetachMatchingFrom(a_root, [](RE::NiAVObject* a_obj) {
-                return std::string_view(a_obj->name.c_str()).starts_with(kNodePrefix);
-            });
-            total += removed;
-            SKSE::log::info("DetachAllInjected[{}]: removed {} CostumeFW_* node(s)", a_tag, removed);
-        };
-        sweep(player->Get3D(false), "3p");
-        sweep(player->Get3D(true), "1p");
+        for (auto& it : g_active) {
+            if (it.holder3p) {
+                ++total;
+            }
+            if (it.holder1p) {
+                ++total;
+            }
+            DetachRecorded(it.parent3p, it.holder3p);
+            DetachRecorded(it.parent1p, it.holder1p);
+        }
+        DetachRealBody();
+        SKSE::log::info("DetachAllInjected: removed {} recorded CostumeFW node(s)", total);
         return total;
     }
 
@@ -2862,6 +2870,17 @@ namespace CostumeFW
     void ClearRegistry()
     {
         StoreLock lk;
+        // Detach before dropping the entries. The attachment record IS the only
+        // handle CEF has on its nodes now that nothing searches the scene graph,
+        // so clearing the registry without detaching would strand whatever is
+        // currently on the player and let the next injection add a duplicate
+        // beside it. (Reachable from the co-save revert, where the 3D is not
+        // always rebuilt underneath us.)
+        for (auto& it : g_active) {
+            DetachRecorded(it.parent3p, it.holder3p);
+            DetachRecorded(it.parent1p, it.holder1p);
+        }
+        DetachRealBody();
         g_active.clear();
     }
 
