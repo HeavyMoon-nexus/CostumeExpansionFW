@@ -1736,6 +1736,44 @@ namespace CostumeFW
         }).detach();
     }
 
+    // Attachment census, straight from the registry - no scene-graph walk, so it
+    // is safe to run automatically and costs nothing.
+    //
+    // It exists because the console cannot be used for this. The crash lands
+    // during a persist operation with the menu open, and you can neither type a
+    // command while a menu is up nor react to a CTD that has already happened
+    // (reporter, 2026-07-29: "the game crashes without the ability to load the
+    // console"). Anything a bug report needs has to reach the log by itself.
+    //
+    // Logged only when the numbers CHANGE, so a busy session leaves a short
+    // legible trail instead of one line per Reconcile.
+    void LogAttachmentCensus(const char* a_tag)
+    {
+        std::size_t contents = 0, on3p = 0, on1p = 0;
+        for (const auto& it : g_active) {
+            ++contents;
+            if (it.holder3p) {
+                ++on3p;
+            }
+            if (it.holder1p) {
+                ++on1p;
+            }
+        }
+        const bool realBody = static_cast<bool>(g_realBodyHolder3p);
+        static std::size_t s_lastContents = SIZE_MAX, s_last3p = 0, s_last1p = 0;
+        static bool s_lastRealBody = false;
+        if (contents == s_lastContents && on3p == s_last3p && on1p == s_last1p &&
+            realBody == s_lastRealBody) {
+            return;
+        }
+        s_lastContents = contents;
+        s_last3p = on3p;
+        s_last1p = on1p;
+        s_lastRealBody = realBody;
+        SKSE::log::info("attached: {} content(s) registered, {} on 3p, {} on 1p, real body {} ({})",
+            contents, on3p, on1p, realBody ? "ON" : "off", a_tag);
+    }
+
     void Reconcile()
     {
         StoreLock lk;
@@ -1830,6 +1868,7 @@ namespace CostumeFW
         } else {
             DetachRealBody();
         }
+        LogAttachmentCensus("reconcile");
     }
 
     std::uint32_t ResolveFormId(const std::string& a_colonId)
