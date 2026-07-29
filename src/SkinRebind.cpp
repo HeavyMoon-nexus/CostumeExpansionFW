@@ -198,6 +198,15 @@ namespace CostumeFW
                 SKSE::log::debug("  DetachNodes '{}' 3p={} 1p={}", a_id, had3p, had1p);
                 return;
             }
+            // No registry entry means no attachment record, which means anything
+            // this id has on the player can no longer be reached - it is orphaned
+            // until the next 3D rebuild, and a re-injection will sit beside it.
+            // Say so loudly: the only way here is detaching in the wrong order
+            // (see DetachSkinned), and that bug is invisible otherwise.
+            SKSE::log::warn(
+                "DetachNodes '{}': no registry entry - nothing to detach through. If this "
+                "id was attached, its holder is now orphaned (detach BEFORE unregistering)",
+                a_id);
         }
 
         void Unregister(const std::string& a_id)
@@ -2887,8 +2896,15 @@ namespace CostumeFW
     void DetachSkinned(const std::string& a_id)
     {
         StoreLock lk;
-        Unregister(a_id);
+        // ORDER IS LOAD-BEARING. DetachNodes reads the attachment record, and the
+        // record lives ON the registry entry, so unregistering first destroys the
+        // only handle CEF has and leaves the holder orphaned on the skeleton.
+        // It did not matter while DetachNodes searched the scene graph by name;
+        // it does now. Caught in-game 2026-07-29: toggling a persist entry
+        // off -> on -> off left TWO holders per skeleton (nodediag went 40 -> 42,
+        // with 000D6F:Aether Outfit.esp appearing twice on each root).
         DetachNodes(a_id);
+        Unregister(a_id);
         SKSE::log::debug("  detached {}", a_id);
     }
 
