@@ -45,6 +45,8 @@ NEXUS_DESCRIPTION.txt
 CEF_REVIEW_2026-07-05.md
 CEF_STATE_SCOPE.md
 BORDER_AUDIT_2026-07-09.md
+# Outbound-message working copies (PM drafts; kept locally, never published)
+PM_DRAFT_*.md
 
 # ETW traces (memory investigation)
 *.etl
