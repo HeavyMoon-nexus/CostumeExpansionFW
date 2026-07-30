@@ -107,9 +107,14 @@
   [GLBoa 19 / GLDressH 56 / GLDressI 60 他] に収束)。census 遷移で
   box 出し入れ 17→0→17・persist add/remove 44→45→44 の実施を確認。
   nodediag: 3p/1p 全 18 holder+RealBody が健全(unwalkable 0)。
+  **headdiag(05:29:24)も緑**(初回集計で grep パターン違いにより見落とし →
+  オーナー指摘で確認): 3p = 1121 Armor + 38 Head、3 merge groups
+  (Armor_00000071 8 / **Armor_00000073 1113** / Head_00000005 38)、1p = 0(正常)、
+  異常座標 0 件、ref 'NPC Head [Head]' 実位置あり。**1159 本をスロット検証込みの
+  walk で列挙してエラーゼロ = 実地の大量スロット通過でも偽陽性ゼロの追加裏付け**。
   末尾 05:31 セーブロード → `registry roll call (post-load): 44 active, 0 problem(s)`。
   watchdog 起因の不要 re-inject なし。
-- ログから判別できず未チェックのまま: headdiag、SMF Diagnostics ページ
+- ログから判別できず未チェックのまま: SMF Diagnostics ページ
   (bone census)、1p の視覚確認(census/nodediag 上の 1p は健全)
 - 副産物の実測: arraytest で cap が 1→2→3→4 と **AttachChild 毎に成長(毎回 realloc)**
   — 「FSMP 大量マージ = realloc 頻発」推定の傍証(growthSize 既定値の挙動)
