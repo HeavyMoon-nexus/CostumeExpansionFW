@@ -1065,3 +1065,74 @@ BSDismemberSkinInstance の同席とも整合する。
 4. RIP=0(今回の新顔)も「オブジェクト内部が別データで上書きされた」族と
    矛盾しない(ただし 0 は null としか読めないので、この 1 本单独では
    パターンの証拠にはならない)。
+
+---
+
+## ローカル静的調査(2026-07-30 深夜、実機なし)
+
+### A. Address Library bin の直読 — クラッシュ地点の座標確定
+
+`tools/addrlib/parse_versionlib.py`(新規、このために作成)で
+versionlib-1-6-1170-0.bin を直読。**6 アンカー全部がクラッシュログの
+戻りアドレス算術と一致**(40447=PlayerCharacter::Update 0x732660 /
+69162 / 70299=GetObjectByName 0xD1D9A0 / 71212 / 106350=0x14A2990 /
+106353=0x14A31F0)。106353 は ~0x1F0 バイトの小さい自己再帰関数。
+106351/106352(0x14A2E30/0x14A2FC0)が間に居る = 4 連の関数ファミリー。
+名前は AE 帯のため未確定のまま(CommonLib/CS/GitHub 全域で命名使用例なし)。
+挙動プロファイル「Update 中に actor サブツリーを ShadowSceneNode の
+ライトリストへ登録する再帰」は 3 独立情報源(スタック構造・レジスタ・
+下記 LightPlacer の同族フック)で裏取り済み。
+
+### B. FSMP v4.0.1 ソース監査(報告者と同版、daa0796)
+
+1. **doSkeletonMerge が flat tree へ AttachChild で大量マージ**
+   (ActorManager.cpp:758-792): dst=npc(NPC Root [Root])に、armor/head の
+   骨をクローンして 1 本ずつ AttachChild。CEF キャリア級(数百〜数千)なら
+   **children 配列 realloc の頻発源**。= 解放された旧バッファ(NiPointer×N)が
+   uint16 バッファに再利用される素地(§uint16 パターン仮説と接続)。
+2. **doSkeletonClean 系が prefix マッチの手書き全ツリー走査**(:845-870):
+   AutoRename prefix の子を toDetach に集めて DetachChild。走査は CEF ホルダー
+   の中も歩く = **FSMP 自身が破損 children 配列の被害者候補**
+   (SMPFixes.dll 4 本のクラッシュと整合する構図)。
+3. **castNiNode に invalid-vtable ガードが既存**(NetImmerseUtils.h:14-53):
+   `isValidNiObject` = ptr カノニカル + vtable カノニカル + **vtable slot 3
+   (AsNode)の null 検証**。warn 文言 "invalid vtable (VR NiStream stub or
+   unresolved bone ref)"。**「vtable スロットが部分 null の半初期化オブジェクトが
+   scene graph に乗る」現象を FSMP は既知として防御している** — 今回の
+   RIP=0(null 関数ポインタ実行)と同型の現象クラス。isVRNiStreamStub は
+   GetObjectByName スロットの null/非カノニカルまで検査している。
+4. facegen 子の引き抜き移植(:1611-1627: npcFaceGeomNode から DetachChildAt2 →
+   NPC Head [Head] へ AttachChild)+ **facegen skinning への Xbyak 直接パッチ**
+   (Hooks.cpp ApplyBoneLimitFix、24330/24836+0x58/0x75、boneCount を 8 に
+   clamp)。BLE(skyrimbonelimitfix)との二重パッチ疑いは**未確定**(BLE の
+   フック先未調査。skinning パイプラインに FSMP/BLE/skee が同時に手を
+   入れている絵だけ確定)。
+5. Validator(uint16 三角形 / vertexMap を大量に扱う 4.x 新機能)は
+   `smp report` コンソールコマンド専用 = **常時容疑から除外**。
+   常時系 uint16 生産者の本命は**エンジン自身の NiSkinPartition**
+   (装備 3D ロードのたび bones/triangles/vertexMap を確保)。
+
+### C. CS 1.7.3 / LightPlacer ソース照合
+
+- **Community Shaders 1.7.3**: ShadowSceneNode は accumulator 経由の読みのみ。
+  フックはレンダラ層(BSLightingShader_SetupGeometry 等)
+  → **106350/106353(シーングラフ層)の直接容疑から除外**。
+- **po3_LightPlacer**: `Actor::ReAddCasterLights`(37826/**38780**、
+  Actor×ShadowSceneNode)/ `BipedAnim::AddAddonNodes`(15527/15704)/
+  `TESObjectREFR::AttachLight`(19252/19678)を**プロローグ書き換え**で
+  フック。装備ツリーへライトノードを AttachChild(TaskQueue 経由 or 直接)。
+  = **装備/actor サブツリーの第三者同居人がまた 1 種確定**
+  (skee overlay・CEF holder・FSMP AutoRename 骨・LP ライトノード)。
+  プロローグフックは同一関数の多重フックで衝突する型
+  (Relight / intellightent-ng はソース非公開で未照合)。
+
+### D. 実装に直結する知見
+
+- **アラインメント検証で uint16 列パターンは 100% 弾ける**:
+  0x0001000500050005 & 7 = 5、0x1 & 7 = 1 — NiAVObject* は 8B アライン必須
+  なので、children スロット/記録ポインタの `ptr & 7` チェックは
+  「bone-index 状破損」の完全な検出器。FSMP 式 vtable 検証(マップ済み junk
+  にしか効かない)より安全で速い第一段として test.3 次増分の
+  スロット検証・FSMP 上流提案の両方に使える。
+- 106350-106353 の 4 連ファミリーという座標は、報告者の次のクラッシュが
+  「同じ場所か」を 1 秒で判定する物差しになる(--near モード)。
