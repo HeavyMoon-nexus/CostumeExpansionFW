@@ -1009,3 +1009,59 @@ shader property 系関数ポインタが null だった。
    quarantine は今回の経路には無関係(CEF ホルダーは無傷)
 5. SteamStub 暗号化のためローカル EXE から 106353 の逆アセンブルは不可
    (.text 暗号化を実測)。実行時ダンプを取るほどの価値は現状なし
+
+---
+
+## 追補(2026-07-30 夜): 未解析だった非 CEF 2 本の解析 — uint16 パターン仮説
+
+オーナーの反問「テクスチャ欠損が原因なら RaceMenu 終了時などでも落ちるはず」を
+検証する過程で、17 本中未解析だった SkyrimSE.exe の 2 本を読んだ。
+
+### crash-2026-07-25-22-57-47(69162+0xB)
+
+- **セーブ書き込み処理中**(BGSSaveGameBuffer / SaveFileHandleReaderWriter /
+  SkyrimVM がスタック)。CEF はスタック不在。
+- faulting: `mov eax,[r8-0x10]`、**R8 = 0x0001000200020002**
+- RSP+38 に `NiTObjectArray<NiPointer<NiAVObject>>*`
+
+### crash-2026-07-26-15-35-17(71212+0xD2)
+
+- スタックに **CostumeExpansionFW.dll が 3 フレーム**+70251/70301(GetObjectByName
+  一族)→ 実際は旧走査コード発の **7 本目の CEF 起因**だった(当時の 6 本分類から漏れ)。
+- faulting: `movss xmm4,[rcx+0x30]`(NiAVObject::local を読む形)、
+  **RCX = 0x0001000500050005**
+- RELEVANT: `CostumeFW_000DDD_Grievous_Rose_Multicolor_esp`(ホルダー)、
+  **BSDismemberSkinInstance**、`RAX = NiTObjectArray<NiPointer<NiAVObject>>*`、
+  1p 側(skeleton.nif / Scene Root ×2)
+
+### 統一観察 — 壊れた値は全部同じパターン族
+
+| 事象 | 壊れた値 | LE uint16 列として |
+|---|---|---|
+| ホルダー children._data(3 本) | `0x1` | `[1,0,0,0]` |
+| セーブ中(非 CEF) | `0x0001000200020002` | `[2,2,2,1]` |
+| 旧走査中(1p) | `0x0001000500050005` | `[5,5,5,1]` |
+
+**「ポインタがあるべき場所に uint16 の小整数列が入っている」**。skin 系
+(bone index / partition)は uint16 インデックス列の最大の生産者で、
+BSDismemberSkinInstance の同席とも整合する。
+
+### 含意
+
+1. **「決定論的だから dangling ではない」(§真の原因)は成立しない可能性が高い**。
+   小さな確保(ホルダーの children バッファ等)が解放され、**同サイズクラスの
+   skin/bone インデックスバッファとしてヒープ再利用される**なら、値は毎回
+   「それらしい uint16 列」になり決定論的に見える。INVESTIGATION_RESULT の
+   「修正すべき認識 §1」の指摘が実証的に強化された。
+2. **破損は persist add 選択的ではない**: セーブ中の 1 本は CEF 不在の場面で
+   同族の値を踏んでいる。報告者の「persist add のたび」という選択性は
+   (a) 旧走査バグ(毎回確実に踏む・test.2 で closed)と
+   (b) 3D 変化を集中的に起こす操作ほど既存破損を発見しやすい、の合成。
+3. 攻め手の主力は via test.3 の**健全性遷移検知**(いつ・どの holder の配列が
+   壊れたかの時刻特定)で変わらないが、仮説の具体化として
+   **「小確保の UAF + skin バッファ再利用」**を最上位に置く。
+   FSMP(キャリアの大量ボーン)と skee(morph/overlay)が uint16 バッファの
+   二大生産者。cbp.dll 同居も生産者候補。
+4. RIP=0(今回の新顔)も「オブジェクト内部が別データで上書きされた」族と
+   矛盾しない(ただし 0 は null としか読めないので、この 1 本单独では
+   パターンの証拠にはならない)。
