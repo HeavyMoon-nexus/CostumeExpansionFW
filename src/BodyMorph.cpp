@@ -58,8 +58,15 @@ namespace CostumeFW::BodyMorph
         }
         auto* refr = reinterpret_cast<::TESObjectREFR*>(a_refr);
         if (!g_bodyMorph->HasMorphs(refr)) {
+            SKSE::log::debug("  body morph: actor has no morphs - '{}' untouched by skee",
+                a_node->name.c_str());
             return;  // actor carries no body morphs - nothing to match
         }
+        // Debug detail: this is the ONE place CEF hands a holder pointer to
+        // external code (skee walks the subtree), so the corruption timeline
+        // needs the exact handoff moments on record.
+        SKSE::log::debug("  body morph: handing '{}' to skee ApplyVertexDiff",
+            a_node->name.c_str());
         // RaceMenu's ApplyVertexDiff searches a_node's subtree for a "BODYTRI"
         // NiStringExtraData and applies nothing if it's absent. The caller must have
         // carried BODYTRI onto the holder; log which so the outcome is verifiable

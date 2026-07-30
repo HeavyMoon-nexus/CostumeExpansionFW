@@ -9,6 +9,7 @@
 #include "Commands.h"
 #include "Config.h"
 #include "Cosave.h"
+#include "Diag.h"
 #include "LoreBox.h"
 #include "Papyrus.h"
 #include "SkinRebind.h"
@@ -20,6 +21,7 @@
 #include "RE/T/TESEquipEvent.h"
 
 #include <Windows.h>  // GetModuleHandleW (MARA co-presence triage line)
+#include <Psapi.h>    // K32GetProcessMemoryInfo (debug-mode memory line)
 
 namespace
 {
@@ -74,6 +76,10 @@ namespace
         {
             if (a_event && a_event->actor &&
                 a_event->actor.get() == RE::PlayerCharacter::GetSingleton()) {
+                if (CostumeFW::Diag::Debug()) {
+                    SKSE::log::debug("equip: {:08X} {}", a_event->baseObject,
+                        a_event->equipped ? "on" : "off");
+                }
                 SKSE::GetTaskInterface()->AddTask([] {
                     CostumeFW::Reconcile();
                     CostumeFW::ApplyBoxAbilities();
@@ -118,6 +124,101 @@ namespace
         ContainerSink() = default;
     };
 
+    // Environment census: the co-plugins that shaped past incidents, with the
+    // facts a support diff needs (path identity via size + mtime; the crash log
+    // carries versions, the CEF log now carries WHICH files were in play). Runs
+    // at kDataLoaded - every SKSE plugin is loaded by then; probing at
+    // SKSEPluginLoad would miss later-loading DLLs.
+    void LogEnvironmentCensus()
+    {
+        static constexpr const wchar_t* kModules[] = {
+            L"hdtSMP64.dll",            // FSMP: merge budget + generation churn
+            L"skee64.dll",              // RaceMenu: BodyMorph interface
+            L"skyrimbonelimitfix.dll",  // Bone Limit Extender (>80-bone shapes)
+            L"SMPFixes.dll",            // ABI-sensitive FSMP companion
+            L"MARA.dll",                // capture-blacklist co-presence
+            L"EngineFixes.dll",         // allocator/arena behavior
+        };
+        for (const auto* wname : kModules) {
+            const std::string name = std::filesystem::path(wname).string();
+            const HMODULE h = ::GetModuleHandleW(wname);
+            if (!h) {
+                SKSE::log::info("env: {} not loaded", name);
+                continue;
+            }
+            std::string detail = "present";
+            wchar_t buf[MAX_PATH]{};
+            if (::GetModuleFileNameW(h, buf, MAX_PATH)) {
+                try {
+                    const std::filesystem::path p{ buf };
+                    const auto sz = std::filesystem::file_size(p);
+                    const auto ft = std::filesystem::last_write_time(p);
+                    const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(ft);
+                    const std::time_t tt = std::chrono::system_clock::to_time_t(sys);
+                    std::tm tm{};
+                    char ts[32]{ "?" };
+                    if (localtime_s(&tm, &tt) == 0) {
+                        std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+                    }
+                    detail = std::format("{} bytes, {}", sz, ts);
+                } catch (...) {
+                }
+            }
+            SKSE::log::info("env: {} present ({})", name, detail);
+        }
+    }
+
+    // Registry roll call: resolve every persisted id once per load and name the
+    // failures OUT LOUD. Key drift (a rebuilt / ESL-compacted merge changing its
+    // FormIDs) reached the reporter as "my newest entry disappears"; the log now
+    // says which entry became an orphan and why that happens.
+    void LogRegistryRollCall(const char* a_tag)
+    {
+        std::size_t ok = 0;
+        std::vector<std::string> bad;
+        for (const auto& it : CostumeFW::ActiveSnapshot()) {
+            if (CostumeFW::CanResolveContent(it.id)) {
+                ++ok;
+            } else {
+                bad.push_back(it.id);
+            }
+        }
+        for (const auto& id : CostumeFW::PersistContents()) {
+            if (!CostumeFW::CanResolveContent(id)) {
+                bad.push_back("catalog:" + id);
+            }
+        }
+        SKSE::log::info("registry roll call ({}): {} active resolve, {} problem(s)",
+            a_tag, ok, bad.size());
+        std::size_t shown = 0;
+        for (const auto& id : bad) {
+            if (++shown > 10) {
+                SKSE::log::warn("  ... and {} more", bad.size() - 10);
+                break;
+            }
+            SKSE::log::warn("  UNRESOLVED '{}' - its plugin is missing or its FormIDs "
+                            "changed (rebuilt/compacted merge?)", id);
+        }
+    }
+
+    // Support mirror: copy CEF_settings.json next to the log, so every artifact
+    // a report needs lives in ONE real folder (Documents\...\SKSE\) instead of
+    // needing "find it in MO2's overwrite" instructions.
+    void MirrorSettingsForSupport()
+    {
+        const auto dir = SKSE::log::log_directory();
+        if (!dir) {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::copy_file("Data\\SKSE\\Plugins\\CEF_settings.json",
+            *dir / "CEF_settings.mirror.json",
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            SKSE::log::debug("settings mirror skipped: {}", ec.message());
+        }
+    }
+
     void OnMessage(SKSE::MessagingInterface::Message* a_msg)
     {
         // Defense-in-depth: SKSEPluginLoad already returns before registering this
@@ -147,6 +248,7 @@ namespace
                     "from the capture pickers (capture blacklist), and capturing "
                     "WORN jewelry is refused (stripping it crashes MARA - M4-J)");
             }
+            LogEnvironmentCensus();
             Load3DHook::Install();
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration
             CostumeFW::InstallConsoleHook();
@@ -160,6 +262,8 @@ namespace
                 CostumeFW::LoadBoxes();
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
+                LogRegistryRollCall("data-loaded");
+                MirrorSettingsForSupport();
             });
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
@@ -181,6 +285,13 @@ namespace
                 CostumeFW::ApplyCarrierOverrides(false);
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
+                // Which character this session's lines belong to: M2 states
+                // differ per save, and support logs used to leave it implicit.
+                if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
+                    SKSE::log::info("save loaded: player '{}'", pc->GetName());
+                }
+                LogRegistryRollCall("post-load");
+                MirrorSettingsForSupport();
             });
             // Teeth-drop watchdog: the engine's load-time facegen build can drop the
             // mouth from the assembled head when a persist head-carrier (Misc HDPT)
@@ -190,6 +301,23 @@ namespace
             break;
         default:
             break;
+        }
+    }
+}
+
+namespace CostumeFW::Diag
+{
+    // Debug-mode memory line (declared in Diag.h; lives here with the Windows
+    // includes). Attributes memory balloons (FSMP 3.1.1's 27GB, ForgetSpell
+    // 1.2.5) in minutes instead of an evening of bisection.
+    void LogMemoryUsageDebugLine()
+    {
+        PROCESS_MEMORY_COUNTERS_EX pmc{};
+        pmc.cb = sizeof(pmc);
+        if (::GetProcessMemoryInfo(::GetCurrentProcess(),
+                reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc))) {
+            SKSE::log::debug("mem: working set {} MB, private {} MB",
+                pmc.WorkingSetSize >> 20, pmc.PrivateUsage >> 20);
         }
     }
 }
@@ -243,6 +371,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
         SKSE::log::warn("CostumeExpansionFW is DISABLED via external config - doing nothing");
         return true;
     }
+
+    CostumeFW::Diag::InitFromIni();  // two-tier logging: ini form of the debug switch
 
     SKSE::AllocTrampoline(64);  // for the console CompileAndRun hook
     CostumeFW::InstallSerialization();

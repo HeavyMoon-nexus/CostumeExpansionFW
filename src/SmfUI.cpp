@@ -2,6 +2,7 @@
 
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "Diag.h"
 #include "Preset.h"
 #include "SkinRebind.h"
 #include "UiOps.h"
@@ -860,6 +861,22 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderDiagnostics()
         {
+            // Two-tier logging switch (persist-CTD instrumentation). Session-only
+            // here; [Diagnostics] bDebugMode=1 in CostumeExpansionFW.ini is the
+            // persistent form. SetDebugMode is atomics + spdlog (thread-safe), so
+            // no AddTask hop is needed - this toggles LOGGING ONLY, never behavior.
+            bool dbg = Diag::Debug();
+            if (ImGui::Checkbox("Verbose diagnostic logging (debug mode)##cfwdbg", &dbg)) {
+                Diag::SetDebugMode(dbg, "SMF Diagnostics toggle");
+            }
+            if (dbg) {
+                ImGui::TextWrapped(
+                    "Debug logging is ON: larger log file, small overhead. Play normally; "
+                    "after the next crash send CostumeExpansionFW.log + the crash log. "
+                    "Session-only - restarts revert to the ini setting.");
+            }
+            ImGui::Separator();
+
             // Snapshot once per open/click, not per frame - DiagLines() walks the
             // whole store and the render callback fires every frame.
             static std::vector<std::string> s_lines;

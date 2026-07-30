@@ -3,6 +3,7 @@
 #include "BoxStore.h"
 #include "StoreLock.h"
 #include "Config.h"  // PersistHeadRebuildEnabled (F2 diagnostic lever)
+#include "Diag.h"    // two-tier logging + thread-contract guard
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
@@ -169,15 +170,123 @@ namespace CostumeFW
         bool ChildrenWalkable(RE::NiNode* a_node)
         {
             const auto& kids = a_node->GetChildren();
-            if (kids.size() == 0) {
-                return true;  // nothing to iterate (end() == begin())
-            }
             if (kids.size() > kids.capacity()) {
                 return false;  // more elements than storage
+            }
+            // Emptiness is CAPACITY, not size: NiTArray::end() is _data + _capacity,
+            // so a range-for iterates every capacity slot. The old size()==0 early
+            // true let "size=0, cap>0, data=0x1" through the guard straight into
+            // the iteration it was supposed to prevent (INVESTIGATION 2026-07-30).
+            if (kids.capacity() == 0) {
+                return true;  // nothing will be iterated
             }
             // A non-empty array must point at a real allocation. The observed 0x1
             // and a null buffer both land here; any plausible heap pointer passes.
             return reinterpret_cast<std::uintptr_t>(kids.begin()) >= 0x10000;
+        }
+
+        // --- holder-array health + quarantine (persist-CTD primary corruption) --
+        // The observed corruption (children._data == 0x1 with the size fields
+        // intact, INVESTIGATION 2026-07-29/30) is detected from the attachment
+        // RECORDS: metadata reads only - no dereference, no walking - so the
+        // check is safe at any moment, on any state.
+        struct HolderArrayState
+        {
+            std::uint64_t data{ 0 };
+            std::uint16_t cap{ 0 }, freeIdx{ 0 }, size{ 0 }, growth{ 0 };
+        };
+
+        HolderArrayState ReadHolderArray(RE::NiNode* a_node)
+        {
+            HolderArrayState s{};
+            const auto* raw = reinterpret_cast<const unsigned char*>(&a_node->GetChildren());
+            std::memcpy(&s.data, raw + 0x08, sizeof(s.data));
+            std::memcpy(&s.cap, raw + 0x10, sizeof(s.cap));
+            std::memcpy(&s.freeIdx, raw + 0x12, sizeof(s.freeIdx));
+            std::memcpy(&s.size, raw + 0x14, sizeof(s.size));
+            std::memcpy(&s.growth, raw + 0x16, sizeof(s.growth));
+            return s;
+        }
+
+        bool HolderArrayBroken(const HolderArrayState& s)
+        {
+            if (s.size > s.cap) {
+                return true;
+            }
+            if (s.cap == 0) {
+                return false;  // empty array - nothing iterates, dtor frees nothing
+            }
+            return s.data < 0x10000;  // non-empty must point at a real allocation
+        }
+
+        // The writer's fingerprint: dump the whole node (NiNode is 0x128 bytes)
+        // the moment corruption is detected. Whether +0x110 (the embedded array's
+        // vtable) survived and what exactly sits at +0x118 is question-A evidence
+        // no crash log has been able to give. Safe: the NiPointer record keeps
+        // the node's memory alive.
+        void HexDumpNode(RE::NiNode* a_node)
+        {
+            const auto* raw = reinterpret_cast<const unsigned char*>(a_node);
+            for (std::size_t off = 0; off < 0x128; off += 16) {
+                std::string line;
+                for (std::size_t i = 0; i < 16 && off + i < 0x128; ++i) {
+                    line += std::format("{:02X} ", raw[off + i]);
+                }
+                SKSE::log::error("  +{:03X}: {}", off, line);
+            }
+        }
+
+        // A broken holder cannot be released as-is: ~NiNode's array destructor
+        // walks _data (slot release + deallocate) and dies on 0x1 - "Active OFF
+        // on the broken item still crashes" was a residual path of the record
+        // redesign. Rewrite the embedded array to a valid EMPTY state first; the
+        // children leak on purpose (a few geometries vs a CTD).
+        void RepairHolderArray(RE::NiNode* a_node)
+        {
+            auto* raw = reinterpret_cast<unsigned char*>(&a_node->GetChildren());
+            static constexpr unsigned char zeros[8]{};
+            std::memcpy(raw + 0x08, zeros, 8);  // _data = nullptr
+            std::memcpy(raw + 0x10, zeros, 6);  // capacity / freeIdx / size = 0
+        }
+
+        // True (and the record is cleared) when the recorded holder's child array
+        // is corrupted: log loudly, dump the node, repair, detach through the
+        // record. The item then re-injects like any detached item. This is the
+        // containment that turns the primary corruption from a CTD into a log
+        // line, whoever the writer turns out to be.
+        bool QuarantineIfBroken(const char* a_what,
+            RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder)
+        {
+            if (!a_holder) {
+                return false;
+            }
+            const auto st = ReadHolderArray(a_holder.get());
+            if (!HolderArrayBroken(st)) {
+                return false;
+            }
+            SKSE::log::error(
+                "SCENE CORRUPTION on holder '{}' ({}): children size={} cap={} freeIdx={} "
+                "data={:#x} - dumping node, then quarantining",
+                a_holder->name.c_str(), a_what, st.size, st.cap, st.freeIdx, st.data);
+            HexDumpNode(a_holder.get());
+            RepairHolderArray(a_holder.get());
+            DetachRecorded(a_parent, a_holder);
+            SKSE::log::error(
+                "quarantined '{}': array repaired to empty, holder detached (its geometry "
+                "leaks by design), the item will re-inject", a_what);
+            return true;
+        }
+
+        // Registry-wide containment pass (the real-body pair is file-scope state
+        // declared further down; its callers add it explicitly).
+        int QuarantineSweep()
+        {
+            int hit = 0;
+            for (auto& it : g_active) {
+                hit += QuarantineIfBroken(it.id.c_str(), it.parent3p, it.holder3p) ? 1 : 0;
+                hit += QuarantineIfBroken(it.id.c_str(), it.parent1p, it.holder1p) ? 1 : 0;
+            }
+            return hit;
         }
 
         void DetachNodes(const std::string& a_id)
@@ -186,7 +295,6 @@ namespace CostumeFW
             if (!player) {
                 return;
             }
-            g_boundBoneRefs.erase(a_id);  // release the bone pins with the attach
             for (auto& it : g_active) {
                 if (it.id != a_id) {
                     continue;
@@ -195,9 +303,15 @@ namespace CostumeFW
                 const bool had1p = static_cast<bool>(it.holder1p);
                 DetachRecorded(it.parent3p, it.holder3p);
                 DetachRecorded(it.parent1p, it.holder1p);
+                // Pins go AFTER the detach: skin->bones[] are raw pointers, so
+                // releasing the pins first opens a window where a retired FSMP
+                // bone is freed while its geometry is still attached and
+                // renderable (the 2026-07-04 freed-bone CTD class).
+                g_boundBoneRefs.erase(a_id);
                 SKSE::log::debug("  DetachNodes '{}' 3p={} 1p={}", a_id, had3p, had1p);
                 return;
             }
+            g_boundBoneRefs.erase(a_id);  // no registry entry: nothing attached to protect
             // No registry entry means no attachment record, which means anything
             // this id has on the player can no longer be reached - it is orphaned
             // until the next 3D rebuild, and a re-injection will sit beside it.
@@ -335,7 +449,10 @@ namespace CostumeFW
                         bestArmorId = id;
                     }
                 }
-                if (auto* node = obj->AsNode()) {
+                // Walkability guard (2026-07-30): this walk had NONE while the
+                // guarded sweeps did - it was the widest-open residual path of
+                // the §7 B-2 audit (every unresolved bone, up to twice).
+                if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
                     for (auto& child : node->GetChildren()) {
                         stack.push_back(child.get());
                     }
@@ -534,10 +651,15 @@ namespace CostumeFW
         // generation. Only FSMP-renamed bones can die this way; plain skeleton
         // bones live until the full 3D rebuild, which re-triggers injection
         // anyway (Load3D hook).
-        bool HasDeadPhysicsBind(const std::string& a_id, RE::NiAVObject* a_root3p)
+        bool HasDeadPhysicsBind(const std::string& a_id, RE::NiAVObject* a_root3p,
+            RE::NiNode* a_holder)
         {
-            auto* holder = a_root3p ? a_root3p->GetObjectByName(NodeName(a_id)) : nullptr;
-            if (!holder) {
+            // The holder comes from the attachment RECORD, never from a name
+            // search: a not-found GetObjectByName descends into EVERY holder's
+            // children (§7 B-2 residual path), and the watchdog used to run
+            // exactly that every 2.5s for every not-injected item.
+            (void)a_id;
+            if (!a_holder || !a_root3p) {
                 return false;  // not injected on the 3p skeleton - nothing to sweep
             }
 
@@ -578,7 +700,7 @@ namespace CostumeFW
             }
 
             bool dead = false;
-            RE::BSVisit::TraverseScenegraphGeometries(holder,
+            RE::BSVisit::TraverseScenegraphGeometries(a_holder,
                 [&](RE::BSGeometry* a_geom) {
                     auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
                     if (!skin || !skin->bones || !skin->skinData) {
@@ -889,6 +1011,20 @@ namespace CostumeFW
             if (!attachRoot) {
                 SKSE::log::error("  no attach root node");
                 return false;
+            }
+            // One line per session per distinct runtime type: whether the attach
+            // root is a BSFlattenedBoneTree (whose child slots are nobody's
+            // contract, see DetachRecorded) is load-bearing - and UNKNOWN for
+            // custom-race skeletons (the reporter runs BD Ungulates).
+            {
+                const char* rt = (skelRootObj && skelRootObj->GetRTTI())
+                                   ? skelRootObj->GetRTTI()->name
+                                   : "<no NPC Root - using root3D>";
+                static std::unordered_set<std::string> s_seenRootTypes;
+                if (s_seenRootTypes.insert(rt).second) {
+                    SKSE::log::info("attach root '{}' runtime type: {}",
+                        attachRoot->name.c_str(), rt);
+                }
             }
             // Idempotency without searching: our own record says whether this
             // holder is already hanging on THIS attach root. After a 3D rebuild
@@ -1685,6 +1821,12 @@ namespace CostumeFW
     void BindWatchdogTick()
     {
         StoreLock lk;
+        if (Diag::Debug()) {
+            static int s_tick = 0;
+            if (++s_tick % 12 == 0) {  // ~every 30s at the 2.5s cadence
+                Diag::LogMemoryUsageDebugLine();
+            }
+        }
         // Grace after a head rebuild: FSMP's old/new generations overlap for a few
         // seconds, and judging that as "dead" here would pile on re-injects that
         // each can trigger another FSMP rebuild (Engine Fixes arena per rebuild).
@@ -1696,8 +1838,29 @@ namespace CostumeFW
         if (!r3) {
             return;
         }
+        // Containment between Reconciles: this tick is the always-on detector
+        // that timestamps WHEN a holder went bad - the corruption predates the
+        // crash it used to cause (§7 B-1's corollary), and only a periodic
+        // record-based check turns that from inference into a measurement.
+        {
+            int q = QuarantineSweep();
+            q += QuarantineIfBroken("realbody-3p", g_realBodyParent3p, g_realBodyHolder3p) ? 1 : 0;
+            q += QuarantineIfBroken("realbody-1p", g_realBodyParent1p, g_realBodyHolder1p) ? 1 : 0;
+            if (q > 0) {
+                Reconcile();  // re-inject what was contained
+                return;
+            }
+        }
         for (const auto& it : g_active) {
-            if (HasDeadPhysicsBind(it.id, r3)) {
+            if (Diag::Debug() && it.holder3p) {
+                const auto st = ReadHolderArray(it.holder3p.get());
+                SKSE::log::debug("healthpoll '{}': size={} cap={} freeIdx={} data={:#x}",
+                    it.id, st.size, st.cap, st.freeIdx, st.data);
+            }
+            if (!it.holder3p) {
+                continue;  // not injected: record-based skip (no name search)
+            }
+            if (HasDeadPhysicsBind(it.id, r3, it.holder3p.get())) {
                 ++g_persistDiag.watchdogReconciles;
                 SKSE::log::info("bind watchdog: '{}' holds a dead merge generation - reconciling", it.id);
                 Reconcile();  // the sweep inside detaches + re-injects
@@ -1777,10 +1940,22 @@ namespace CostumeFW
     void Reconcile()
     {
         StoreLock lk;
+        Diag::NoteExecutionThread("Reconcile");
         StartBindWatchdogOnce();
         ++g_persistDiag.reconcileCalls;
         if (g_active.empty()) {
             return;
+        }
+        // Containment first: a corrupted holder must not be reused through the
+        // idempotency record, walked by the engine searches below, or released
+        // raw by a detach (its destructor dies on the broken array).
+        {
+            int q = QuarantineSweep();
+            q += QuarantineIfBroken("realbody-3p", g_realBodyParent3p, g_realBodyHolder3p) ? 1 : 0;
+            q += QuarantineIfBroken("realbody-1p", g_realBodyParent1p, g_realBodyHolder1p) ? 1 : 0;
+            if (q > 0) {
+                SKSE::log::error("quarantine: {} holder(s) contained this pass", q);
+            }
         }
         // Every externally-triggered pass re-arms the rebind-retry budget; the
         // retry passes themselves must not, or persistently-static contents
@@ -1845,7 +2020,8 @@ namespace CostumeFW
                 // dead merge generation (armor unequipped / head rebuilt), detach it
                 // first so the injection below rebinds to the CURRENT generation.
                 if (player) {
-                    if (auto* r3 = player->Get3D(false); r3 && HasDeadPhysicsBind(it.id, r3)) {
+                    if (auto* r3 = player->Get3D(false);
+                    r3 && HasDeadPhysicsBind(it.id, r3, it.holder3p.get())) {
                         ++g_persistDiag.deadBindReinjects;
                         SKSE::log::info("  '{}': bound FSMP bones are DETACHED (dead merge "
                                         "generation) - re-injecting", it.id);
@@ -2935,6 +3111,7 @@ namespace CostumeFW
     void DetachSkinned(const std::string& a_id)
     {
         StoreLock lk;
+        Diag::NoteExecutionThread("DetachSkinned");
         // ORDER IS LOAD-BEARING. DetachNodes reads the attachment record, and the
         // record lives ON the registry entry, so unregistering first destroys the
         // only handle CEF has and leaves the holder orphaned on the skeleton.
