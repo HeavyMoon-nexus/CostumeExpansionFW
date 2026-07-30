@@ -906,3 +906,106 @@ CTD に直結する証拠は無いが、F1 の競合窓を広げる方向に効�
   「更新で直りました」とは書かないこと(根拠が無い)。
 - 報告者は既に v1.2.1 まで戻す・キャッシュ削除・手動掃除まで自力でやっており、
   **手順の出し直しではなく情報の依頼**が筋。
+
+---
+
+## 返答ログ解析(2026-07-30 着、crash-2026-07-30-07-58-16 + CostumeExpansionlog.txt)
+
+**結論から: test.2 は「元のクラッシュ」を止めていた。落ちたのは 18 本目の
+まったく新しい顔で、CEF はスタックに不在。**
+
+### test.2 の成果(実データ)
+
+- ロード確認: `file 2026-07-29 07:54:30 / compile Jul 28 2026 18:29:00` = test.2 本物
+- **persist 追加が報告者環境で初めて `persist-add[done]` まで完走**
+  (`000827:MHW_Vaal HazakRe.esl`、カタログ 7 件目)
+- 自動 census も動作: `attached: 1 content(s) registered, 1 on 3p, 1 on 1p, real body off`
+- 46 ボーン未解決 → static remap(キャリア未装着の正常縮退)、rebind retry +1000ms 予約
+- 過去 17 本のうち CEF 起因 6 本+`GetObjectByName+0x37` 3 本の**旧経路は今回発生せず**
+
+### 新クラッシュの機序
+
+```
+Unhandled exception at 0x0 — RIP = 0(null 関数ポインタの実行)
+faulting thread = メイン(PlayerCharacter::Update フックチェーン)
+RDX = BSTriShape "Hands [SOvl0]"(skee のオーバーレイ。CEF の物ではない)
+R12 = BSFlattenedBoneTree "NPC Root [Root]"
+親子: Hands [SOvl0] は NPC Root [Root] の直接の子(表示 index 13)
+      = skee overlay も CEF ホルダーと同じ flat-tree children に同居している
+スタック: PlayerCharacter::Update(40447)
+  → SkyrimSE.exe id 106350+0x429 → 106353(+0x121 / +0x195 で再帰 2 段)
+  → RIP=0
+  ※ 106350/106353 は CommonLib に名前なし。スタック上に ShadowSceneNode(全段)、
+    BSLight、BSLightingShaderProperty、被害 geometry。NPC → skeletonbeast_female.nif と
+    降下する再帰 = 「アクター 3D サブツリーを降りて各 geometry の
+    ライト/シェーダー処理をする関数」。戻り先が test rax,rax = 戻り値を持つ
+    関数ポインタ呼び出し。
+```
+
+### 時系列の確定(flush_on(info) による証明)
+
+CEF ログ最終行 = `persist-add[done]` 07:58:16.610。クラッシュは同秒(最大 +390ms)。
+このとき **まだ走っていない** もの(いずれも info を出すはずで、出ていない):
+
+- `persist head: rebuild requested` → **DoReset3D は未実行**(bPersistHeadRebuild 以前の段階)
+- `auto-sync: rebuilding carriers` → キャリア NIF 再生成も未実行(実測 ~2s 後のため)
+- rebind retry(+1000ms)も未実行
+
+→ **「carrier-sync / head-rebuild の尾部」ではない。** done 行の但し書きは今回のログでは
+不正確(尾部はまだ始まってすらいない)。クラッシュ窓での 3D 変化は
+**capture の unequip(着用中 MHW を hidden store へ)+ ホルダー attach(3p/1p)**のみ。
+その直後の最初の Update フレームのライト登録パスで、skee overlay の
+shader property 系関数ポインタが null だった。
+
+**bPersistHeadRebuild=0 A/B の価値は格下げ**: この経路は rebuild 前に落ちており、
+抑止しても防げない可能性が高い(他の顔への保険としては残る)。
+
+### 環境の新事実(crash log 全文から)
+
+- **プレイヤーは BD Ungulates 系カスタム種族**(skeletonbeast_female.nif、
+  SexLab Beastess / BDUngulates.esp [78])
+- **被害 overlay のテクスチャ 3 枚が MISSING**:
+  `actors\character\BDDeerTextures\Female\Hands\FemaleHands_msn.dds` / `_sk.dds` / `_s.dds`
+  (Diffuse は overlays\default.dds に解決済み)= 报告者環境の既存欠陥。
+  overlay の shader/material 初期化が常に不完全な状態で走っている疑い
+- ライト/シェーダー系 mod が濃い: Community Shaders 1.7.3・Relight(スタック在)・
+  intellightent-ng・po3_LightPlacer・Placed Light・DynamicWetness・SoakingWet・
+  MaterialSwapperFramework・L3sShaderControl
+- **cbp.dll と hdtsmp64.dll 4.0.1 が同居**
+- PlayerCharacter::Update に 10 個の DLL がフックチェーン
+  (AutoPhysicsReset/PAR/Relight/auto-heels/TDM/DeviousDevices/OIF/WaterInertia/
+  Subtitles/UnreadBooksGlow)
+- Elevated: Yes(管理者権限)。usvfs 不在 = MO2 ではない(Vortex か手動)
+- Win11 / i7-12700F / RTX 3060 Ti / RAM 16.25/31.85GB / WS 5.7GB / Private 12.4GB
+- MHW_Vaal HazakRe.esl は [FE:80] の ESL。addon pick は
+  `by slot (armo slots 00020000, addon slots 00020000, 7 candidate(s))` = 5541a77 の
+  スロット修正が機能している
+
+### 過去 17 本との照合(全 log の frame-0 を一括抽出)
+
+| faulting | 本数 | 状態 |
+|---|---|---|
+| CostumeExpansionFW.dll(旧走査) | 6 | test.2 で修正済み・今回不発 |
+| SkyrimSE.exe+0xD1D9D7(GetObjectByName+0x37) | 3 | 同上(CEF 発) |
+| SMPFixes.dll | 4 | 報告者が既に削除 |
+| SkyrimSE.exe+0xCEC68B / +0xD452D2 | 各 1 | 未解析(非 CEF) |
+| VCRUNTIME140 / SmartTalk.dll | 各 1 | 非 CEF |
+| **0x0(RIP=0、今回)** | **1** | **新顔。過去に一度も無い** |
+
+過去は全部データ読みの AV(mov 系)、今回は**初の命令実行 AV**。
+「children._data=0x1(CEF ホルダー)」と「shader 関数ポインタ null(skee overlay)」は
+別物だが、**どちらも NPC Root [Root](flat tree)直下オブジェクトの内部フィールド破損/
+不整合**という共通項を持つ。
+
+### 含意と次の一手
+
+1. CEF の add は完走しており、書き手の証拠はゼロ。CEF の役割は
+   「unequip+attach で 3D 変化を起こすトリガー」まで
+2. 最有力の新アクション = **報告者に BDDeer の手テクスチャ欠落を伝えて修復してもらう**
+   (BD Ungulates 再インストール等)。無害・環境の実欠陥・機序に触る可能性、の三拍子
+3. skee overlay 初期化レース(unequip → RevertOverlay → 再構築中にライトパス)が
+   最有力機序。CEF 側での確実な防御は無い(unequip は機能の本体)
+4. test.3 のテレメトリ(census・健全性遷移・env census)は方針変わらず有効。
+   quarantine は今回の経路には無関係(CEF ホルダーは無傷)
+5. SteamStub 暗号化のためローカル EXE から 106353 の逆アセンブルは不可
+   (.text 暗号化を実測)。実行時ダンプを取るほどの価値は現状なし
