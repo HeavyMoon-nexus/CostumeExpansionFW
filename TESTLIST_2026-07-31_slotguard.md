@@ -94,6 +94,27 @@
       (**どの結果でも BUGREPORT に記録**)
 - [ ] 終了後テクスチャを**必ず**元に戻す(リネーム復帰)
 
+## 実施記録(2026-07-31 朝、オーナー実行・ログ精読で確認)
+
+**§0-§2 判定: 緑**(セッション 05:14-05:31、`CostumeExpansionFW.log` 2328 行)
+
+- §0: M0 一致(`file 2026-07-30 23:49:24` を 1 行目で確認)
+- §1 **全緑**: slottest ×2(境界マトリクス 6/6 ok・guarded walk 3visited/1skipped・
+  restored・hit #1/#2 が error で発報)、arraytest 全行 walkable=yes
+- §2 **緑**: error はセッション全体で slottest の意図的 2 件のみ =
+  **実環境の SCENE CORRUPTION 偽陽性ゼロ**。SMP sway 回帰 OK(remapped 427 warn は
+  キャリア装着前の初期パスの正常縮退で、05:23:51 に bound 群
+  [GLBoa 19 / GLDressH 56 / GLDressI 60 他] に収束)。census 遷移で
+  box 出し入れ 17→0→17・persist add/remove 44→45→44 の実施を確認。
+  nodediag: 3p/1p 全 18 holder+RealBody が健全(unwalkable 0)。
+  末尾 05:31 セーブロード → `registry roll call (post-load): 44 active, 0 problem(s)`。
+  watchdog 起因の不要 re-inject なし。
+- ログから判別できず未チェックのまま: headdiag、SMF Diagnostics ページ
+  (bone census)、1p の視覚確認(census/nodediag 上の 1p は健全)
+- 副産物の実測: arraytest で cap が 1→2→3→4 と **AttachChild 毎に成長(毎回 realloc)**
+  — 「FSMP 大量マージ = realloc 頻発」推定の傍証(growthSize 既定値の挙動)
+- 残: §3(bDebugMode 実機経路)、§4(BDDeer 模擬)
+
 ## 撤退基準
 
 - §1 の slottest が FAIL → 実装バグ。§2 以降は中止してコード修正へ
