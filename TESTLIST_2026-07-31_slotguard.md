@@ -17,11 +17,11 @@
 
 ## §0. ビルド確認(M0)
 
-> ビルド済み(2026-07-30 23:39、ゲーム/MO2 非起動中)。
-> **今回の M0 スタンプ = DLL 2,679,296 bytes / mtime 2026-07-30 23:39**
-> (build/release と MO2 配備先の一致は確認済み)
+> ビルド済み(2026-07-30 23:49、ゲーム/MO2 非起動中)。
+> **今回の M0 スタンプ = DLL 2,680,320 bytes / mtime 2026-07-30 23:49:24**
+> (境界マトリクス入り。build/release と MO2 配備先の一致を確認すること)
 
-- [ ] 起動ログ 1 行目 `CostumeExpansionFW loaded (file 2026-07-30 23:39:xx)` が一致
+- [ ] 起動ログ 1 行目 `CostumeExpansionFW loaded (file 2026-07-30 23:49:24)` が一致
       (不一致 = 旧 DLL を踏んでいる。以降のテストは全部無効。
       再ビルドした場合はこの節のスタンプを書き直すこと —
       [[dll-deploy-lock-build-banner]] の静かな失敗に注意)
@@ -29,6 +29,10 @@
 ## §1. 合成テスト(セーブ不要、メインメニューから可)
 
 - [ ] `cef slottest` 実行。**全行 ok/rejected であること**:
+      - **境界マトリクス 6 行すべて ok → `boundary matrix: ok`**
+        (観測 3 値 reject / 0x8000 reject / 非カノニカル reject /
+        **0x10000 は pass** — これは検出器の設計上の限界の明示。
+        アライン済みカノニカルの偽アドレスは値検証では区別できない、が仕様)
       - `PlausibleObjectPtr -> rejected (ok)`
       - `ChildrenWalkable(holder) -> yes (ok - buffer itself is fine)`
       - `guarded walk: 3 visited, 1 skipped -> ok`
@@ -41,9 +45,22 @@
 
 ## §2. 通常系回帰(既存セーブで 10 分)
 
+> 偽陽性はエラーとしてだけでなく「**正常スロットの誤 skip = 機能の静かな劣化**」
+> としても出る。エラー 0 件の確認と、下の 4 つの機能側回帰は別物として全部見る。
+
 - [ ] ロード → `settings: loaded ...` → 注入完走、`[error]` 0 件
-      (**特に `SCENE CORRUPTION` が正常環境で 1 件も出ないこと** = 偽陽性ゼロの確認。
-      これがこの増分の最重要回帰)
+      (**特に `SCENE CORRUPTION` が正常環境で 1 件も出ないこと** = 偽陽性ゼロの確認)
+- [ ] **SMP sway 回帰(誤 skip の最重要検出器)**: SMP costume を表示して
+      `bound N bone(s) to FSMP physics-driven node(s)` の **N が従来と同じ**こと。
+      FindFsmpRenamedBone が正常スロットを skip すると、エラーではなく
+      「揺れていた服が static に落ちる」(`remapped N unresolved` の増加)として出る
+- [ ] **watchdog の静粛(dead-bind 誤判定の検出器)**: 注入済みのまま 1-2 分放置して
+      不要な re-inject・detach が起きないこと(スイープの誤 skip は FSMP 世代集合を
+      欠けさせ、誤 dead 判定→再注入連発として出る)
+- [ ] **1p 確認**: 一人称視点で costume 表示が従来通り(walk は 3p flat tree と
+      1p NiNode の両方を踏む)
+- [ ] **SMF Diagnostics ページを開く**: Physics bones(bone census = walk 変更箇所)が
+      従来通りの数字を出すこと
 - [ ] census 行(`attached: N content(s) ...`)従来通り
 - [ ] box 再装備 19→2→19 / マスタースイッチ OFF→ON / `cef nuke` → 復帰、二重化なし
 - [ ] persist ON→OFF→ON(1 アイテムで可)完走
@@ -58,6 +75,8 @@
 - [ ] debug 行(`equip: ...` / healthpoll / mem 行 30s)が流れる
 - [ ] SMF Diagnostics のチェックボックスが ON 状態を反映している
 - [ ] チェックを外す → `diagnostic mode off` warn、debug 行が止まる
+- [ ] **bDebugMode=1 のまま §2 を 1 周**: healthpoll が全ホルダー健全と言い続け、
+      SCENE CORRUPTION も出ないこと(周期検査系との組み合わせ回帰)
 - [ ] ini を 0 に戻して起動 → バナー無し(平常)
 
 ## §4. BDDeer 模擬実験(時間があれば。報告者機序の再現試行)

@@ -2715,6 +2715,36 @@ namespace CostumeFW
         std::vector<std::string> out;
         constexpr std::uint64_t kPoison = 0x0001000500050005ull;
 
+        // Boundary matrix first - pure value calls, nothing is planted anywhere.
+        // The PASS row is deliberate: an aligned, canonical junk address is the
+        // guard's DESIGNED limit (it must not be planted into a live slot - the
+        // walk would pass it and the dereference behind it would fault).
+        struct BoundaryCase
+        {
+            std::uint64_t v;
+            bool expectPlausible;
+            const char* why;
+        };
+        static constexpr BoundaryCase kCases[] = {
+            { 0x1, false, "observed poison (holder _data)" },
+            { 0x0001000200020002ull, false, "observed poison (mid-save hit)" },
+            { 0x0001000500050005ull, false, "observed poison (old-walk hit)" },
+            { 0x8000, false, "aligned but below the null-page floor" },
+            { 0xFFFF800000000000ull, false, "aligned but non-canonical" },
+            { 0x10000, true, "aligned canonical floor - the guard's PASS limit" },
+        };
+        bool matrixOk = true;
+        for (const auto& c : kCases) {
+            const bool got = PlausibleObjectPtr(reinterpret_cast<const void*>(c.v));
+            if (got != c.expectPlausible) {
+                matrixOk = false;
+            }
+            out.push_back(std::format("  {:#018x} -> {} (expect {}) {} [{}]", c.v,
+                got ? "pass" : "reject", c.expectPlausible ? "pass" : "reject",
+                got == c.expectPlausible ? "ok" : "<-- FAIL", c.why));
+        }
+        out.push_back(std::format("boundary matrix: {}", matrixOk ? "ok" : "FAILED"));
+
         RE::NiPointer<RE::NiNode> holder{ RE::NiNode::Create(0) };
         if (!holder) {
             out.push_back("Create(0) returned null");
