@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <string>
 #include <vector>
 
@@ -114,7 +115,7 @@ namespace CostumeFW
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
             Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | "
-                  "hideshape | recover | headdiag | hair | nodediag | arraytest");
+                  "hideshape | recover | headdiag | hair | nodediag | arraytest | slottest");
             return;
         }
 
@@ -385,18 +386,21 @@ namespace CostumeFW
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
-        } else if (sub == "arraytest" || sub == "nodediag") {
-            // persist-CTD harness (BUGREPORT_2026-07-27). Both run on the main
-            // thread and print to console AND log, so a tester can paste either.
-            const bool synthetic = (sub == "arraytest");
-            SKSE::GetTaskInterface()->AddTask([synthetic] {
-                const auto lines = synthetic ? ChildArrayProbe() : ChildArrayScan();
-                SKSE::log::info("--- cef {} ---", synthetic ? "arraytest" : "nodediag");
+        } else if (sub == "arraytest" || sub == "nodediag" || sub == "slottest") {
+            // persist-CTD harness (BUGREPORT_2026-07-27 / uint16-pattern
+            // 2026-07-30). All run on the task pump and print to console AND
+            // log, so a tester can paste either.
+            const std::string which = sub;
+            SKSE::GetTaskInterface()->AddTask([which] {
+                const auto lines = which == "arraytest" ? ChildArrayProbe()
+                                 : which == "slottest"  ? SlotCorruptionProbe()
+                                                        : ChildArrayScan();
+                SKSE::log::info("--- cef {} ---", which);
                 for (const auto& l : lines) {
                     SKSE::log::info("  {}", l);
                 }
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print(synthetic ? "[CEF] arraytest:" : "[CEF] nodediag:");
+                    c->Print(std::format("[CEF] {}:", which).c_str());
                     for (const auto& l : lines) {
                         c->Print(("  " + l).c_str());
                     }
@@ -419,7 +423,7 @@ namespace CostumeFW
             });
         } else {
             Print("[CEF] inject | box | detach | clear | list | repair | persist | morph | shapes | "
-                  "hideshape | recover | headdiag | hair | nodediag | arraytest");
+                  "hideshape | recover | headdiag | hair | nodediag | arraytest | slottest");
         }
     }
 }

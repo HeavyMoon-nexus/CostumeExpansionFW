@@ -258,4 +258,11 @@ namespace CostumeFW
     // every CEF node, plus any node that fails the walkability guard. Run it
     // right after the operation that used to crash.
     std::vector<std::string> ChildArrayScan();
+
+    // `cef slottest`: synthetic probe of the child-SLOT corruption family (the
+    // bone-index-shaped poison values, BUGREPORT 2026-07-30). Plants the
+    // observed value into a synthetic holder's slot, verifies the alignment
+    // guard rejects it and the guarded walk skips it, then restores the slot
+    // before teardown. No mods needed; safe to run any time.
+    std::vector<std::string> SlotCorruptionProbe();
 }

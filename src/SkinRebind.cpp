@@ -163,6 +163,43 @@ namespace CostumeFW
             a_holder.reset();
         }
 
+        // Pointer-VALUE plausibility for anything that claims to be an object
+        // pointer (a child slot, an array buffer). Value checks only - never
+        // dereferences - so it is safe on arbitrary bits. The alignment test is
+        // the load-bearing one: every corruption value observed in this hunt
+        // (0x1, 0x0001000200020002, 0x0001000500050005 - little-endian uint16
+        // runs, bone-index-shaped; BUGREPORT 2026-07-30) is misaligned, while a
+        // real NiAVObject* is always 8-aligned. FSMP guards the same phenomenon
+        // by reading vtables (castNiNode), but that faults on unmapped junk;
+        // a value check cannot.
+        bool PlausibleObjectPtr(const void* a_p)
+        {
+            const auto v = reinterpret_cast<std::uintptr_t>(a_p);
+            return v >= 0x10000 && (v & 7) == 0 && v <= 0x00007FFF'FFFFFFFFull;
+        }
+
+        // A child SLOT holding an implausible pointer is the same corruption
+        // family as a broken _data, caught one dereference earlier. The value
+        // itself is writer evidence, so the first few go to the log loudly;
+        // after that keep counting quietly (a watchdog revisits every 2.5s and
+        // must not flood).
+        void NoteBadSlot(const char* a_where, RE::NiNode* a_parent, const void* a_val)
+        {
+            static std::atomic<std::uint32_t> s_seen{ 0 };
+            const auto n = ++s_seen;
+            if (n <= 8) {
+                SKSE::log::error(
+                    "SCENE CORRUPTION: child slot of '{}' holds implausible pointer "
+                    "{:#x} ({}, hit #{}) - slot skipped",
+                    a_parent->name.c_str(), reinterpret_cast<std::uintptr_t>(a_val),
+                    a_where, n);
+            } else {
+                SKSE::log::debug("bad child slot {:#x} under '{}' ({}, hit #{})",
+                    reinterpret_cast<std::uintptr_t>(a_val), a_parent->name.c_str(),
+                    a_where, n);
+            }
+        }
+
         // Still used by the diagnostics walks (nodediag / headdiag / the dead-bind
         // sweep), which enumerate FSMP's merged bones and have no record to go on.
         // Those are user-initiated or already scoped to our own holder; the hot
@@ -180,9 +217,10 @@ namespace CostumeFW
             if (kids.capacity() == 0) {
                 return true;  // nothing will be iterated
             }
-            // A non-empty array must point at a real allocation. The observed 0x1
-            // and a null buffer both land here; any plausible heap pointer passes.
-            return reinterpret_cast<std::uintptr_t>(kids.begin()) >= 0x10000;
+            // A non-empty array must point at a real, aligned allocation. The
+            // observed 0x1 fails the floor; the uint16-run values (0x0001000500050005)
+            // pass a bare floor check and are caught by the alignment test.
+            return PlausibleObjectPtr(kids.begin());
         }
 
         // --- holder-array health + quarantine (persist-CTD primary corruption) --
@@ -216,7 +254,12 @@ namespace CostumeFW
             if (s.cap == 0) {
                 return false;  // empty array - nothing iterates, dtor frees nothing
             }
-            return s.data < 0x10000;  // non-empty must point at a real allocation
+            // Non-empty must point at a real, aligned allocation. The bare
+            // < 0x10000 floor caught the observed 0x1 but would wave through the
+            // uint16-run family (0x0001000500050005 is far above the floor and
+            // still poison); the alignment test in PlausibleObjectPtr rejects
+            // every member of that family (BUGREPORT 2026-07-30).
+            return !PlausibleObjectPtr(reinterpret_cast<const void*>(s.data));
         }
 
         // The writer's fingerprint: dump the whole node (NiNode is 0x128 bytes)
@@ -454,7 +497,12 @@ namespace CostumeFW
                 // the §7 B-2 audit (every unresolved bone, up to twice).
                 if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
                     for (auto& child : node->GetChildren()) {
-                        stack.push_back(child.get());
+                        auto* c = child.get();
+                        if (c && !PlausibleObjectPtr(c)) {
+                            NoteBadSlot("FindFsmpRenamedBone", node, c);
+                            continue;
+                        }
+                        stack.push_back(c);
                     }
                 }
             }
@@ -693,7 +741,12 @@ namespace CostumeFW
                     }
                     if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
                         for (auto& child : node->GetChildren()) {
-                            stack.push_back(child.get());
+                            auto* c = child.get();
+                            if (c && !PlausibleObjectPtr(c)) {
+                                NoteBadSlot("dead-bind sweep", node, c);
+                                continue;
+                            }
+                            stack.push_back(c);
                         }
                     }
                 }
@@ -2646,6 +2699,78 @@ namespace CostumeFW
         return out;
     }
 
+    // `cef slottest` - synthetic probe for the SLOT corruption family (the
+    // bone-index-shaped values; BUGREPORT 2026-07-30, uint16-pattern section).
+    // Builds a holder + children the way InjectOnRoot does, plants the observed
+    // poison value 0x0001000500050005 into one child slot by raw write (the
+    // real child's refcount is held externally the whole time), and verifies:
+    // (a) PlausibleObjectPtr rejects the value, (b) the guarded walk skips the
+    // slot without dereferencing it, (c) ChildrenWalkable still accepts the
+    // array itself (only a slot is poisoned, the buffer is fine), then
+    // (d) restores the real pointer BEFORE teardown so no destructor ever sees
+    // the poison (deliberate-corruption rules, INVESTIGATION 2026-07-29 §A-5).
+    std::vector<std::string> SlotCorruptionProbe()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        constexpr std::uint64_t kPoison = 0x0001000500050005ull;
+
+        RE::NiPointer<RE::NiNode> holder{ RE::NiNode::Create(0) };
+        if (!holder) {
+            out.push_back("Create(0) returned null");
+            return out;
+        }
+        holder->name = "CEF_SlotProbe";
+        std::vector<RE::NiPointer<RE::NiNode>> kids;  // external refs: teardown safety
+        for (int i = 0; i < 4; ++i) {
+            RE::NiPointer<RE::NiNode> child{ RE::NiNode::Create(0) };
+            if (!child) {
+                out.push_back(std::format("child Create #{} returned null", i));
+                return out;
+            }
+            child->name = std::format("slotprobe_child_{}", i).c_str();
+            holder->AttachChild(child.get(), true);
+            kids.push_back(child);
+        }
+        auto& arr = holder->GetChildren();
+        out.push_back(std::format("built: size={} cap={} data={}", arr.size(),
+            arr.capacity(), static_cast<const void*>(arr.begin())));
+        if (arr.size() < 3 || !ChildrenWalkable(holder.get())) {
+            out.push_back("unexpected build state - aborting before any poison");
+            return out;
+        }
+
+        auto** slots = reinterpret_cast<RE::NiAVObject**>(arr.begin());
+        RE::NiAVObject* real = slots[2];
+        slots[2] = reinterpret_cast<RE::NiAVObject*>(kPoison);
+        out.push_back(std::format("slot[2] poisoned with {:#x}", kPoison));
+
+        out.push_back(std::format("  PlausibleObjectPtr -> {}",
+            PlausibleObjectPtr(slots[2]) ? "ACCEPTED  <-- FAIL" : "rejected (ok)"));
+        out.push_back(std::format("  ChildrenWalkable(holder) -> {}",
+            ChildrenWalkable(holder.get()) ? "yes (ok - buffer itself is fine)"
+                                           : "NO  <-- unexpected"));
+
+        int visited = 0, skipped = 0;
+        for (auto& child : holder->GetChildren()) {
+            auto* c = child.get();
+            if (c && !PlausibleObjectPtr(c)) {
+                NoteBadSlot("slottest", holder.get(), c);
+                ++skipped;
+                continue;
+            }
+            if (c) {
+                ++visited;
+            }
+        }
+        out.push_back(std::format("  guarded walk: {} visited, {} skipped -> {}",
+            visited, skipped, (skipped == 1 && visited == 3) ? "ok" : "UNEXPECTED"));
+
+        slots[2] = real;  // restore BEFORE any release path can run
+        out.push_back("slot[2] restored - teardown is safe");
+        return out;
+    }
+
     // `cef nodediag` - live side. Reports the child array of every CEF node on
     // the player, plus ANY node that fails the walkability guard. Run it right
     // after the operation that crashes: if a holder is already bad here, we have
@@ -2691,6 +2816,11 @@ namespace CostumeFW
                 }
                 for (auto& child : node->GetChildren()) {
                     if (auto* c = child.get(); c) {
+                        if (!PlausibleObjectPtr(c)) {
+                            NoteBadSlot("nodediag", node, c);
+                            ++bad;
+                            continue;
+                        }
                         if (auto* cn = c->AsNode()) {
                             stack.push_back(cn);
                         }
@@ -2770,6 +2900,10 @@ namespace CostumeFW
             }
             for (auto& child : node->GetChildren()) {
                 if (auto* c = child.get(); c) {
+                    if (!PlausibleObjectPtr(c)) {
+                        NoteBadSlot("bone census", node, c);
+                        continue;
+                    }
                     if (auto* cn = c->AsNode()) {
                         stack.push_back(cn);
                     }
@@ -2963,7 +3097,12 @@ namespace CostumeFW
                 if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
                     const std::string myName{ node->name.c_str() };
                     for (auto& child : node->GetChildren()) {
-                        stack.emplace_back(child.get(), myName);
+                        auto* c = child.get();
+                        if (c && !PlausibleObjectPtr(c)) {
+                            NoteBadSlot("headdiag", node, c);
+                            continue;
+                        }
+                        stack.emplace_back(c, myName);
                     }
                 }
             }
