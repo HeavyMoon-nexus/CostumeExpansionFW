@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <unordered_set>
 
 #include <windows.h>
 
@@ -300,6 +301,69 @@ namespace nifcarrier {
             return s.size() == std::strlen(other) && CiStartsWith(s, other);
         }
 
+        // Live-skeleton name SET, loaded once per process from the actual
+        // skeleton NIFs (male/female/beast, resolved through the data roots
+        // like the engine would). The prefix lists above only know VANILLA-ish
+        // naming; XPMSE/3BA-era extension bones ("Belly", "Anal", "Ankle
+        // Dagger Main", "Bone001"...) carry no "NPC " prefix, so an outfit NIF
+        // exported with its reference skeleton dragged 407 of them into the
+        // persist carrier PER CONTENT (measured 2026-07-31: two earrings = 814
+        // phantom bones; full-rebuild sync time 130-140s, and every phantom
+        // widens the FSMP merge-race window). A bone that already lives on the
+        // actor skeleton must never be baked into a carrier - FSMP resolves it
+        // live.
+        std::unordered_set<std::string> g_liveSkeletonNames;
+        bool g_liveSkeletonLoaded = false;
+
+        std::string LowerCopy(std::string s)
+        {
+            std::transform(s.begin(), s.end(), s.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return s;
+        }
+
+        void LoadLiveSkeletonNames(const std::vector<std::filesystem::path>& dataRoots,
+            std::string& log)
+        {
+            if (g_liveSkeletonLoaded) {
+                return;
+            }
+            g_liveSkeletonLoaded = true;
+            static constexpr const char* kSkeletons[] = {
+                "meshes\\actors\\character\\character assets\\skeleton.nif",
+                "meshes\\actors\\character\\character assets\\skeletonbeast.nif",
+                "meshes\\actors\\character\\character assets female\\skeleton_female.nif",
+                "meshes\\actors\\character\\character assets female\\skeletonbeast_female.nif",
+            };
+            int files = 0;
+            for (const char* rel : kSkeletons) {
+                for (const auto& root : dataRoots) {
+                    const auto p = root / rel;
+                    if (!std::filesystem::exists(p)) {
+                        continue;
+                    }
+                    nifly::NifFile nif;
+                    if (nif.Load(p) != 0 || !nif.IsValid()) {
+                        break;  // first data root wins, like the engine's VFS
+                    }
+                    const auto& hdr = nif.GetHeader();
+                    for (uint32_t i = 0; i < hdr.GetNumBlocks(); ++i) {
+                        if (auto* node = hdr.GetBlock<nifly::NiNode>(i)) {
+                            const std::string nm = node->name.get();
+                            if (!nm.empty()) {
+                                g_liveSkeletonNames.insert(LowerCopy(nm));
+                            }
+                        }
+                    }
+                    ++files;
+                    break;  // first data root wins
+                }
+            }
+            Log(log, "[sync] live-skeleton set: %zu bone name(s) from %d skeleton file(s)%s",
+                g_liveSkeletonNames.size(), files,
+                files == 0 ? " - prefix heuristics only (skeleton NIFs not found)" : "");
+        }
+
         bool LooksLiveSkeletonBone(const std::string& name)
         {
             if (name.empty()) {
@@ -314,6 +378,12 @@ namespace nifcarrier {
                 if (CiEquals(name, e)) {
                     return true;
                 }
+            }
+            // The measured set from the real skeletons - catches every
+            // extension bone the prefix heuristics cannot know about.
+            if (!g_liveSkeletonNames.empty() &&
+                g_liveSkeletonNames.count(LowerCopy(name)) != 0) {
+                return true;
             }
             return false;
         }
@@ -1845,7 +1915,7 @@ namespace nifcarrier {
             }
 
             // p2: salt bump for the per-content namespace isolation.
-            const std::string hash = HashContents("p2|", smp);
+            const std::string hash = HashContents("p3|", smp);
             if (std::filesystem::exists(hashPath) && std::filesystem::exists(basePath) &&
                 ReadTextFile(hashPath) == hash && oldFragment) {
                 ensurePool();
@@ -2254,6 +2324,10 @@ namespace nifcarrier {
             const auto doc = nlohmann::json::parse(ReadTextFile(opts.manifestPath));
             const auto carrierDir = opts.outRoot / "meshes" / "CostumeFW";
             const auto xmlDir = carrierDir / "XML";
+            // Once per process: the measured live-skeleton name set (see
+            // LoadLiveSkeletonNames). Loaded before any content scan so every
+            // carrier build classifies bones against the real skeletons.
+            LoadLiveSkeletonNames(opts.dataRoots, res.log);
             const auto tmpDir = opts.outRoot / ".cef_tmp";
             std::filesystem::create_directories(carrierDir);
             std::filesystem::create_directories(xmlDir);
@@ -2330,7 +2404,7 @@ namespace nifcarrier {
 
                 // v2: salt bump for the per-content namespace isolation - every
                 // existing multi-content carrier must rebuild with prefixes.
-                const std::string hash = HashContents("v2|", smp);
+                const std::string hash = HashContents("v3|", smp);
                 if (std::filesystem::exists(hashPath) && std::filesystem::exists(carrierPath) &&
                     ReadTextFile(hashPath) == hash) {
                     ensurePool();
