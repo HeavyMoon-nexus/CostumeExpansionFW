@@ -154,6 +154,33 @@
         needs/Heaviest に実数が入っていること(10:18:26 版の修正確認)
 - 残: §4(BDDeer 模擬)
 
+## §4 実施記録+マージレース発見(07-31 昼、第 4 セッション 10:59-11:40)
+
+- **§4 主観察: テクスチャ欠落状態で persist add 6 回+off/on 多数+DoReset3D 複数
+  → CTD ゼロ・SCENE CORRUPTION ゼロ**(error 3 件 = slottest×2 + auto-sync 誤ウェッジ 1)。
+  「欠落単独では(この環境・6 回では)null-call は再現しない」という結果。
+  ※ RaceMenu hand overlay を適用したかは未確認(ログに写らない)— オーナーに要確認
+- **副産物で本命級の発見**: 「newest persist entry に物理が付かない」の機序を
+  実地確定(詳細 = BUGREPORT §4 セッションの節)。マージレース+救済経路欠如。
+  **RearmStaticBinds 実装済み(f58fe79)**
+- **対照実験がログに自然発生**: Aether 2 アイテム(過去に bound 経験あり)は
+  11:34:07 に dead-bind watchdog が世代交代(→Head_0000000F)へ再 bind できた。
+  **never-bound の 000DEF/000E7D だけが取り残された** = 機序の完璧な傍証
+- テクスチャは**まだ欠落状態のまま**(復元していない。§4 を締めるときに
+  上記ワンライナーで復元)
+
+## §5(次セッション): マージレース救済の検証(M0 = 2,683,904 / 07-31 11:48:03)
+
+- [ ] 起動ログ 1 行目 `file 2026-07-31 11:48:03` 一致
+- [ ] ロード ~8 秒後: `re-arming N static item(s) for rebind (post-load settle)` が出る
+      (000DEF/000E7D が static なら N≥2)
+- [ ] その後の retry で `bound N bone(s) ... CACF1333C_...` / `C8B0C9ECB_...` が出て
+      **Gala ドレスが実際に揺れる**(= レース敗者の救済成立)
+- [ ] persist add を 1 回 → done 後 4-12 秒の `re-arming ...(head-rebuild settle)` →
+      最新アイテムが自動で bound になる(**報告者症状の根治確認**)
+- [ ] budget 表示保持の宿題: Diagnostics ページの needs/Heaviest が Reconcile 後も実数
+- [ ] 誤発動がないこと: 全 bound 状態で `re-arming` が**出ない**(silent no-op)
+
 ## 撤退基準
 
 - §1 の slottest が FAIL → 実装バグ。§2 以降は中止してコード修正へ
