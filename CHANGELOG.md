@@ -94,7 +94,66 @@
   `CEF_sync.log` states plainly (`skipped for the carrier`), and which
   re-equipping cannot fix. The message now points there first.
 
+- **The newest persist item could stay without physics forever.** Reported as
+  "the newest entry disappears", and reproduced here to the letter: the item is
+  there, it just hangs dead still, and toggling *Active on this save*, flipping
+  the master switch, even save-and-reload never wakes it — while adding *yet
+  another* SMP item sometimes does. The record-level verification found every
+  stage healthy — manifest entry present, bones baked into the carrier, head
+  part repointed, FSMP merge completed — and still `0 of 237 bound`. The cause
+  is a race: injection binds bones a fraction of a second **before** FSMP
+  finishes merging the freshly rebuilt carrier, every bone falls back to
+  static, the four automatic retries burn out in ~4 seconds, and then nothing
+  ever tries again — the dead-bind watchdog only watches bonds that *existed*,
+  and re-injection skips an intact attachment. Every toggle re-ran the same
+  losing race; adding another item rebuilt the carrier and sometimes won it.
+  That is the whole "roulette".
+
+  CFW now **re-arms the retries by itself** at the moments new carrier bones
+  can actually appear — a few seconds after a head rebuild, and after a load
+  settles. A lost race heals in seconds instead of never; an item whose carrier
+  genuinely has no bones just re-parks after its retries, so this cannot loop.
+  The `carrier diagnostic` message now explains the race first, since it is the
+  common, self-healing case.
+
+- **Costume carriers carried hundreds of phantom bones.** An outfit NIF built
+  with BodySlide can ship its whole reference skeleton and sibling-outfit bone
+  tree; one persist **earring** was carrying **619** nodes that neither its
+  physics XML nor its skins ever referenced, and the carrier build unioned all
+  of them. The persist carrier weighed 1330 bones; FSMP had to merge every one
+  of them onto the actor, which is real per-frame and rebuild-time cost — and
+  the longer merge widened the very race above. Carriers now bake **only what
+  the physics XML and the skins actually reference, plus ancestors** —
+  everything else is dropped, and the drop is logged per content. The same
+  persist set went from 1330 bones to 207, and its rebuild from **355 seconds
+  to 11**. Live-skeleton classification also stopped guessing from name
+  prefixes: the builder reads the real skeleton NIFs (male/female, normal/
+  beast) once and matches against what is actually there.
+
+- **A damaged costume node is contained instead of crashing the game.** The
+  crash logs that drove this release showed CFW's holder nodes with child
+  arrays whose buffer pointer held values like `0x0001000500050005` — not an
+  address at all, but a run of 16-bit integers, bone-index-shaped, written over
+  a pointer by something still unidentified. Every value observed fails an
+  8-byte alignment test, so CFW now validates **pointer values** (alignment,
+  canonical range, null-page floor) everywhere it reads its own attachments:
+  before detaching, before walking, and on every child slot it touches. A node
+  that fails is logged loudly with the raw value (writer evidence), repaired to
+  a safe empty state, quarantined out of the scene, and its item re-injects —
+  a log line instead of a CTD, whoever the writer turns out to be. A synthetic
+  probe (`cef slottest`) plants the observed poison value and verifies the
+  whole containment path in seconds, no mods needed.
+
+- **The Diagnostics bind counters no longer zero out.** "CFW content needs /
+  Heaviest shape" reset to zeros on every routine re-apply pass that had
+  nothing new to bind; the page now keeps the last real numbers.
+
 ### Changed
+
+- **On the first launch of this version, every carrier is rebuilt once.** The
+  carrier content fingerprint changed (the phantom-bone shed above), so the
+  first sync rebuilds the whole set — expect the rebuild notification and, on
+  a large setup, a minute or two, exactly once. Unchanged syncs stay instant.
 
 - **Injected costumes allocate their node once instead of once per shape.** The
   holder node's child array was created empty and grown by the engine, which
@@ -103,6 +162,29 @@
   the new `cef arraytest`, which was built to test something else entirely.)
 
 ### Added
+
+- **Carrier rebuilds show a heartbeat.** A rebuild that takes a while was
+  indistinguishable from a hang — the watchdog even used to declare a healthy
+  2-minute run "wedged". Now: nothing at all for the common instant pass, a
+  screen notification at 2 seconds — deliberately *before* the "is it stuck?"
+  doubt sets in — then at 7, 17 and 47 seconds and every 30 after, each with
+  the stage, step and elapsed time ("Costume carriers: rebuilding (box 57,
+  step 8/9, 17s)..."). The Diagnostics page shows the same live
+  (`carrier auto-sync: RUNNING (persist, step 9/9, 45s)`), and a rebuild that
+  actually rewrote something announces `rebuilt N item(s)` once, on screen and
+  in the log.
+
+- **An always-on flight recorder, sized for the one log that matters.** A
+  roulette crash cannot be asked to reproduce, so the evidence minimum is
+  always on and logs on change only: an environment census at startup (which
+  physics/skeleton DLLs are present, with size and timestamp), a registry roll
+  call after loading (resolve failures named instead of silent), a settings
+  mirror written next to the log (`CEF_settings.mirror.json` — one folder now
+  holds everything a report needs), a save-identity line, and the corruption
+  transitions above. The verbose tier — per-tick health polls, memory lines,
+  equip traces — stays behind `bDebugMode=1` (`CostumeExpansionFW.ini`,
+  `[Diagnostics]`, or the session-only checkbox on the SMF Diagnostics page)
+  and changes logging only, never behavior.
 
 - **A "Physics bones" section on the Diagnostics page** (both the MCM and the
   SMF UI), because "my costume lost its physics" turned out to be a race nothing
@@ -135,11 +217,14 @@
   rebuild tail that follows `[done]`. `capture[enchant]` marks the inventory read,
   and `persist head: rebuild requested (...)` (was debug-only) marks the entry to
   the head-rebuild chain. Documented in `LOG_REFERENCE_EN/JA.md`.
-- **`cef arraytest` / `cef nodediag` console commands.** `arraytest` builds
-  holder nodes the way injection does and reports the child array after every
-  attach — it needs no mods and no costume, and it is what cleared the
-  empty-array suspect above. `nodediag` scans both player skeletons and reports
-  the child array of every CEF node, plus any node that fails the sanity guard.
+- **`cef arraytest` / `cef nodediag` / `cef slottest` console commands.**
+  `arraytest` builds holder nodes the way injection does and reports the child
+  array after every attach — it needs no mods and no costume, and it is what
+  cleared the empty-array suspect above. `nodediag` scans both player skeletons
+  and reports the child array of every CEF node, plus any node that fails the
+  sanity guard. `slottest` sweeps the pointer-validator's boundary cases and
+  plants the actually-observed corruption value into a synthetic node to prove
+  the guard rejects it, the walk skips it, and teardown stays safe.
 - **`bPersistHeadRebuild` troubleshooting switch** (`CostumeExpansionFW.ini`,
   `[Diagnostics]`, default `1`). Set to `0` to skip the facegen head rebuild CEF
   fires a few seconds after a persist change. Not a fix and not a supported mode

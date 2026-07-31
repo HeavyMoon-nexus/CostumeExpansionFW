@@ -616,15 +616,21 @@ namespace CostumeFW
             }
             const std::string carrier = CarrierModelForContent(a_id);
             const std::uint32_t expected = g_rebind3pFsmp + g_rebind3pRemap;
+            // Ordered by measured frequency (2026-07-31): the MERGE RACE is the
+            // common case now and heals itself - say so first, or this line
+            // sends every reader off to CEF_sync.log for a non-problem.
             SKSE::log::warn(
                 "  carrier diagnostic '{}': {} of {} custom bone(s) bound to an FSMP "
-                "physics node after {} retries - carrier = '{}'. FIRST thing to check "
-                "is CEF_sync.log: a content with no inline HDT xml is SKIPPED when the "
-                "carrier is built (\"skipped for the carrier\"), and then it can never "
-                "bind - that is by far the most common cause of 0 bound, and it is not "
-                "something re-equipping fixes. Otherwise: the wrong FILE (another mod "
-                "overriding meshes\\CostumeFW, or a pristine stub from a release "
-                "archive) - check that file, then re-equip the token.",
+                "physics node after {} retries - carrier = '{}'. MOST COMMON and "
+                "self-healing: the carrier was just (re)built and FSMP had not finished "
+                "merging its bones when the retries ran - CEF re-arms automatically "
+                "(watch for \"re-arming ... for rebind\" within ~15s; if the item binds "
+                "then, this message was the race, not a fault). If it stays static: "
+                "check CEF_sync.log - a content with no inline HDT xml is SKIPPED when "
+                "the carrier is built (\"skipped for the carrier\") and can never bind. "
+                "Otherwise: the wrong FILE (another mod overriding meshes\\CostumeFW, "
+                "or a pristine stub from a release archive) - check it, then re-equip "
+                "the token.",
                 a_id, g_rebind3pFsmp, expected, kRebindRetryBudget,
                 carrier.empty() ? "<none: persist head-carrier or unheld>" : carrier);
             SKSE::log::info("  '{}': parked - no more rebind retries until it binds "
