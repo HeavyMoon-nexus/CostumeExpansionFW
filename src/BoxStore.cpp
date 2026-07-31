@@ -1028,13 +1028,18 @@ namespace CostumeFW
                 // was perfectly healthy, and the old single 120s sleep then
                 // declared it "wedged; blocked until restart" - wrong on both
                 // counts (nothing blocks, and the run finishes). Poll instead
-                // and keep the player informed: silence up to 10s (the common
-                // unchanged pass is ~1s), then a screen notification, then one
-                // every 30s with stage + elapsed. The 120s mark logs a warning
-                // that says SLOW, not stuck.
+                // and keep the player informed. Beat ladder (owner-tuned): the
+                // "is it stuck?" doubt sets in around 5s, so the FIRST beat
+                // lands before it at 2s; once a notice has shown the player
+                // will wait, so +5s, then +10s (anti-spam), then +30s repeating
+                // (2, 7, 17, 47, 77... from start). The common ~1s unchanged
+                // pass still shows nothing. The 120s mark logs a warning that
+                // says SLOW, not stuck.
                 using namespace std::chrono;
+                static constexpr int kBeatGaps[] = { 2, 5, 10, 30 };  // then 30 repeating
                 const auto start = steady_clock::now();
-                auto nextNotice = start + seconds(10);
+                std::size_t beat = 0;
+                auto nextNotice = start + seconds(kBeatGaps[0]);
                 bool loggedSlow = false;
                 while (g_syncRunning.load() && g_syncGen.load() == gen) {
                     std::this_thread::sleep_for(milliseconds(500));
@@ -1042,7 +1047,9 @@ namespace CostumeFW
                     if (now < nextNotice) {
                         continue;
                     }
-                    nextNotice = now + seconds(30);
+                    ++beat;
+                    nextNotice = now + seconds(kBeatGaps[std::min<std::size_t>(
+                        beat, std::size(kBeatGaps) - 1)]);
                     const auto brief = SyncProgressBrief();
                     SKSE::log::info("auto-sync: heartbeat - rebuilding ({})", brief);
                     const std::string msg =
