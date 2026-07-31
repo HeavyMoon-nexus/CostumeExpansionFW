@@ -181,6 +181,28 @@
 - [ ] budget 表示保持の宿題: Diagnostics ページの needs/Heaviest が Reconcile 後も実数
 - [ ] 誤発動がないこと: 全 bound 状態で `re-arming` が**出ない**(silent no-op)
 
+## §6(次セッション): 痩身キャリア+sync 心拍の検証
+
+> **現行 M0 = DLL 2,693,120 bytes / mtime 2026-07-31 12:42:31**(MO2 一致確認済み)。
+> 内容 = スケルトン集合判定(c1cb9a2)+ハッシュ bump(p3/v3)+sync 心拍
+> (3265256+ビート階段 2/7/17/47…秒)+レース救済(f58fe79、§5 で実証済み)。
+
+- [ ] 起動ログ 1 行目 `file 2026-07-31 12:42:31` 一致
+- [ ] 初回 sync の CEF_sync.log 冒頭に
+      `live-skeleton set: N bone name(s) from 4 skeleton file(s)`(N は数百〜千級)
+- [ ] ハッシュ bump により全キャリアが 1 回だけフル再生成される —
+      **このとき心拍通知が 2s→7s→17s→47s… で画面に出る**(体感確認の本番)
+- [ ] 完了時「Costume carriers: rebuilt N item(s)」通知
+- [ ] SMF Diagnostics を sync 中に開くと `carrier auto-sync: RUNNING (box NN, step
+      i/M, Xs)` がライブで見える
+- [ ] 再生成後のキャリア痩身を実測(Claude が NIF の CEF 骨数を数える —
+      旧 1330 → 数百見込み。Aether の 407 幽霊 ×2 が消えていること)
+- [ ] 2 回目以降のフル再生成時間が短縮(旧実測 130-140s → 大幅減の見込み)
+- [ ] `carrier diagnostic`(0 of N)の発生頻度が §5 セッション(7 回)より減る
+      (マージ高速化でレース自体が減る)
+- [ ] 旧「wedged; blocked until restart」error が出ない(新文言は 120s 時の
+      warn「slow, not stuck」のみ)
+
 ## 撤退基準
 
 - §1 の slottest が FAIL → 実装バグ。§2 以降は中止してコード修正へ
