@@ -917,6 +917,103 @@ namespace nifcarrier {
                 return r;
             }
             auto* root = nif.GetRootNode();
+            // --- bake-only-referenced slimming (2026-07-31) ------------------
+            // The physics XML and the shapes' skins define exactly which bones
+            // this carrier must provide. Everything else in the content NIF -
+            // reference skeletons, sibling-outfit trees from BodySlide builds
+            // (measured: 333 phantom bones PER EARRING, three contents sharing
+            // them = the 355s persist rebuild) - is dead weight: MergeBones
+            // unions EVERY named node, so it all rode into the carrier, bloated
+            // the FSMP merge and widened the merge-race window. Keep every name
+            // the xml mentions, every skin-referenced bone, every shape, plus
+            // all their ancestors; then leaf-delete the rest. CanDeleteNode
+            // only ever removes childless nodes, so anything still referenced
+            // keeps its node alive - fail-safe by construction.
+            pugi::xml_document doc;
+            const auto xmlRes = doc.load_file(xmlIn.c_str(),
+                pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
+            if (!xmlRes || !doc.document_element()) {
+                Log(r.log, "[isolate] FAILED xml load '%s'", xmlIn.string().c_str());
+                return r;
+            }
+            std::set<std::string> referenced;
+            {
+                const std::function<void(pugi::xml_node)> collect = [&](pugi::xml_node node) {
+                    for (auto attr : node.attributes()) {
+                        if (attr.value()[0]) {
+                            referenced.insert(attr.value());
+                        }
+                    }
+                    for (auto child : node.children()) {
+                        if (child.type() == pugi::node_pcdata) {
+                            if (child.value()[0]) {
+                                referenced.insert(child.value());
+                            }
+                            continue;
+                        }
+                        collect(child);
+                    }
+                };
+                collect(doc.document_element());
+            }
+            for (auto* s : nif.GetShapes()) {
+                for (const auto& b : ShapeBoneNames(nif, s)) {
+                    referenced.insert(b);
+                }
+            }
+            std::set<std::string> keep;
+            const auto keepWithAncestors = [&](nifly::NiObject* block) {
+                for (auto* n = nif.GetParentNode(block); n; n = nif.GetParentNode(n)) {
+                    if (!keep.insert(n->name.get()).second) {
+                        break;  // ancestors above are already kept
+                    }
+                }
+            };
+            {
+                const auto& hdr0 = nif.GetHeader();
+                for (uint32_t i = 0; i < hdr0.GetNumBlocks(); ++i) {
+                    if (auto* node = hdr0.GetBlock<nifly::NiNode>(i)) {
+                        const std::string nm = node->name.get();
+                        if (!nm.empty() && referenced.count(nm) != 0) {
+                            keep.insert(nm);
+                            keepWithAncestors(node);
+                        }
+                    }
+                }
+                for (auto* s : nif.GetShapes()) {
+                    keep.insert(s->name.get());
+                    keepWithAncestors(s);
+                }
+            }
+            int dropped = 0;
+            for (bool removed = true; removed;) {
+                removed = false;
+                std::vector<std::string> victims;
+                const auto& hdr0 = nif.GetHeader();
+                for (uint32_t i = 0; i < hdr0.GetNumBlocks(); ++i) {
+                    auto* node = hdr0.GetBlock<nifly::NiNode>(i);
+                    if (!node || node == root || !IsExactNiNode(node)) {
+                        continue;
+                    }
+                    const std::string nm = node->name.get();
+                    if (nm.empty() || keep.count(nm) != 0) {
+                        continue;
+                    }
+                    if (nifly::NifFile::CanDeleteNode(node)) {
+                        victims.push_back(nm);
+                    }
+                }
+                for (const auto& nm : victims) {
+                    nif.DeleteNode(nm);
+                    ++dropped;
+                    removed = true;
+                }
+            }
+            if (dropped > 0) {
+                Log(r.log, "[isolate] %s: dropped %d unreferenced node(s) (in neither xml nor skins)",
+                    nifIn.filename().string().c_str(), dropped);
+            }
+
             // Rename map: every custom bone (live-skeleton bones stay shared -
             // that union IS the point of the merge) and every shape (collision
             // meshes; also de-duplicates VirtualGround across contents).
@@ -960,14 +1057,7 @@ namespace nifcarrier {
             // Rewrite the physics XML: bone names ride in name=/bodyA=/bodyB=
             // attributes, mesh names in per-*-shape name= - cover them all by
             // replacing any attribute value / element text that EXACTLY equals
-            // a renamed name.
-            pugi::xml_document doc;
-            const auto res = doc.load_file(xmlIn.c_str(),
-                pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
-            if (!res || !doc.document_element()) {
-                Log(r.log, "[isolate] FAILED xml load '%s'", xmlIn.string().c_str());
-                return r;
-            }
+            // a renamed name. (doc was loaded up front by the slimming pass.)
             int refs = 0;
             const std::function<void(pugi::xml_node)> walk = [&](pugi::xml_node node) {
                 for (auto attr : node.attributes()) {
@@ -1915,7 +2005,7 @@ namespace nifcarrier {
             }
 
             // p2: salt bump for the per-content namespace isolation.
-            const std::string hash = HashContents("p3|", smp);
+            const std::string hash = HashContents("p4|", smp);
             if (std::filesystem::exists(hashPath) && std::filesystem::exists(basePath) &&
                 ReadTextFile(hashPath) == hash && oldFragment) {
                 ensurePool();
@@ -2410,7 +2500,7 @@ namespace nifcarrier {
 
                 // v2: salt bump for the per-content namespace isolation - every
                 // existing multi-content carrier must rebuild with prefixes.
-                const std::string hash = HashContents("v3|", smp);
+                const std::string hash = HashContents("v4|", smp);
                 if (std::filesystem::exists(hashPath) && std::filesystem::exists(carrierPath) &&
                     ReadTextFile(hashPath) == hash) {
                     ensurePool();

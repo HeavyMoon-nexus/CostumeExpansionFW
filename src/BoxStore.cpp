@@ -1105,7 +1105,10 @@ namespace CostumeFW
                         ApplyCarrierOverridesImpl(true);
                         if (built > 0) {
                             // Close the heartbeat's loop on screen; an unchanged
-                            // pass (built == 0) stays silent like before.
+                            // pass (built == 0) stays silent like before. Log it
+                            // too - §6 review: the notice was screen-only, so a
+                            // user-supplied log could not show completion.
+                            SKSE::log::info("auto-sync: rebuilt {} item(s)", built);
                             RE::DebugNotification(
                                 std::format("Costume carriers: rebuilt {} item(s)", built)
                                     .c_str());
