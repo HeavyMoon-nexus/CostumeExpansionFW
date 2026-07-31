@@ -1,7 +1,7 @@
 [center][youtube]3rQ8DsjNZ14[/youtube][/center]
 
-1.3.0 Update!
-Support for the SKSE Menu Framework has been added. While the MCM remains available for use, there are plans to phase it out. Since both systems operate on the same settings table, no manual data migration is required.
+1.5.1 Update — stability release!
+The random CTD when adding to Persist is fixed at the root, and the "newest persist item never gets physics" problem is fixed too. CEF now ships a crash-defense net: if memory damage from any source reaches a CEF node, it is detected, repaired, quarantined and logged instead of crashing. Carrier rebuilds got dramatically faster and show progress notifications while they run. [b]First launch after updating rebuilds all carriers once[/b] — expected, one time only. If you ran a 1.5.1 test build, disable that test mod first. Full details in the changelog.
 
 
 [size=5][b]Costume Expansion FW[/b][/size]
@@ -41,7 +41,7 @@ Open the [b]Mod Control Panel[/b] (default [b]F1[/b]; gamepad: double-press LB, 
 [*][b]Persist[/b] — "+ Add worn item" / "+ Add from inventory" capture an accessory (no need to equip it first; the Inventory filter input narrows the list by name). Per row: active-on-this-save toggle, Body morph toggle, Body (forced-gender NIF) menu, hide-when-worn slots, remove from catalog.[/*]
 [*][b]Boxes[/b] — "+ New box" picks a free slot; per box: Distribute token, Wear (show/hide), capture items (same filter), Armor type, assign/export [b]Presets[/b], Stats, Delete; per item: remove / Body morph / Body (forced NIF) / hide-when-worn / [b]Hide shapes[/b] (drop a costume's bundled body shapes by name) / [b]Show real body[/b] (substitute your real morphed body under the garments — follows your active skin and its textures, so alternate-skin mods work).[/*]
 [*][b]Presets[/b] — installed CEFP_*.json presets; assign one to a box or to Persist.[/*]
-[*][b]Diagnostics[/b] — dependency status, last carrier sync result, carrier revisions, persist registration, churn counters.[/*]
+[*][b]Diagnostics[/b] — dependency status, live carrier-sync status (stage / step / elapsed while a rebuild runs), the physics-bone budget (heaviest shape vs the per-shape 80, FSMP merge asked-vs-granted), carrier revisions, persist registration, churn counters, and a verbose debug-log toggle.[/*]
 [/list]
 Presets (Data\SKSE\Plugins\CEF\Presets\CEFP_*.json) are the shareable unit — a named set of content you can hand out. Settings (Data\SKSE\Plugins\CEF_settings.json) are a catalog shared across saves; which persist entries actually show is stored per-save.
 
@@ -59,6 +59,14 @@ Known limitation: items are tracked by their base form — two individuals of th
 [*][b]Alternate-skin mods[/b] (RaceMenu Selector of Skins, Unique Player-style setups, transformation/custom-race skins): compatible. "Show real body" follows your active skin — mesh [i]and[/i] texture set — the same way the engine resolves it.[/*]
 [/list]
 
+[size=4][b]Reporting problems[/b][/size]
+CEF keeps an always-on flight recorder sized for bug reports: an environment census at startup, a roll call of every registration after loading (failures are named, not silent), and a mirror of your settings written right next to the log. If something goes wrong, attach these two files (plus your crash log, if any):
+[list]
+[*]Documents\My Games\Skyrim Special Edition\SKSE\[b]CostumeExpansionFW.log[/b][/*]
+[*]same folder, [b]CEF_settings.mirror.json[/b][/*]
+[/list]
+For a problem that keeps coming back, create Data\SKSE\Plugins\[b]CostumeExpansionFW.ini[/b] (if you don't have one) containing a [b][Diagnostics][/b] section with [b]bDebugMode=1[/b] — or tick the checkbox on the Diagnostics page for one session — then just play normally until it happens again and send the same files. The verbose log usually pins it down. Debug mode changes logging only, never behavior; set it back to 0 afterwards, the log grows large.
+
 [size=4][b]Uninstalling[/b][/size]
 Open [b]Main → Prepare for uninstall[/b] first (in the SKSE Menu Framework panel or the legacy MCM — returns captured items, removes the tokens, detaches the meshes, and disables CEF persistently), save, then remove the mod. Box definitions and the persist catalog are kept in CEF_settings.json, so re-enabling (or reinstalling) restores your setup.
 
@@ -70,6 +78,7 @@ Open [b]Main → Prepare for uninstall[/b] first (in the SKSE Menu Framework pan
 [*]SKSE Menu Framework — Thiago099 / QTR-Modding and contributors (CEF's in-game UI)[/*]
 [*]SkyUI team — MCM framework (legacy UI)[/*]
 [*]nifly — ousnius and contributors (the NIF library powering the built-in carrier builder)[/*]
+[*]The tester whose crash logs and razor-sharp observations drove the entire v1.5.1 stability release[/*]
 [/list]
 
 [size=4][b]Source / License[/b][/size]
