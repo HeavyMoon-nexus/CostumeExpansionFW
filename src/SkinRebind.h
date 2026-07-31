@@ -265,4 +265,12 @@ namespace CostumeFW
     // guard rejects it and the guarded walk skips it, then restores the slot
     // before teardown. No mods needed; safe to run any time.
     std::vector<std::string> SlotCorruptionProbe();
+
+    // Merge-race rescue (2026-07-31): re-arm rebind retries for shown items
+    // that ended fully static - the state a lost "FSMP merge vs bind" race
+    // leaves behind, which nothing else revisits (retries burned, parked,
+    // dead-bind watchdog blind to never-bound items). Called from the settle
+    // points where new carrier bones can appear (post head-rebuild, post-load).
+    // Silent no-op when nothing is static.
+    void RearmStaticBinds(const char* a_reason);
 }

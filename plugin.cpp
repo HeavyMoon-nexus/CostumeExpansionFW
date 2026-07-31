@@ -298,6 +298,11 @@ namespace
             // shares it. Once the build has settled, one clean rebuild restores it
             // (what racemenu / a persist re-toggle did manually). No-op otherwise.
             CostumeFW::RunAfterDelayMs(4000, [] { CostumeFW::RestoreMouthIfDropped("post-load"); });
+            // Merge-race rescue: the load-time injection can run before FSMP
+            // finishes merging the persist-carrier bones (slow load orders take
+            // tens of seconds), leaving items fully static with their retries
+            // burned. Re-arm once the load has settled; silent when converged.
+            CostumeFW::RunAfterDelayMs(8000, [] { CostumeFW::RearmStaticBinds("post-load settle"); });
             break;
         default:
             break;

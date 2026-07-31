@@ -1136,3 +1136,71 @@ versionlib-1-6-1170-0.bin を直読。**6 アンカー全部がクラッシュ�
   スロット検証・FSMP 上流提案の両方に使える。
 - 106350-106353 の 4 連ファミリーという座標は、報告者の次のクラッシュが
   「同じ場所か」を 1 秒で判定する物差しになる(--near モード)。
+
+---
+
+## §4 セッション中の大発見(2026-07-31 昼): 「最新 persist に物理が付かない」の機序確定
+
+オーナーが §4(テクスチャ欠落模擬)実施中に、報告者の「newest entry
+disappears」をローカルで**実地再現**し、記録層の全段照合で機序を確定した。
+
+### 症状(オーナー実測 = 報告者の記述と一致)
+
+persist に追加した最後の SMP 装備が static のまま。active トグル・
+マスタースイッチ・セーブ→ロードでも直らず、**別の SMP 装備を追加すると
+直ることがある**(ルーレット)。
+
+### 全段照合の結果(11 時台セッション)
+
+| 段 | 判定 | 証拠 |
+|---|---|---|
+| SyncPersistManifest(書き手) | ✓ | manifest JSON に 000DEF/000E7D 実在 |
+| nifcarrier sync(キャリア生成) | ✓ | Persist_carrier_r1.nif 内に CACF1333C_ 99 骨(7_dress/GLDressFRibbon)実在 |
+| prefix 整合(焼き手 vs bind 側) | ✓ | FNV-1a32 を Python 再現、全 7 コンテンツの prefix が完全一致 |
+| repoint + HDPT 登録 + DoReset3D | ✓ | 11:10:40 ログ |
+| FSMP マージ | ✓(遅延) | headdiag per-bone 集計で Head_0000000F に CACF1333C_ ×177 行・C8B0C9ECB_ ×209 行 |
+| **bind** | **✗ 0 of 237** | carrier diagnostic ×3 回(11:07/11:13/11:21) |
+
+### 機序: マージ完了 vs bind 試行のレース+敗者救済経路の欠如
+
+1. 操作(add / off→on / ロード)直後の注入はマージ**前**に走り全骨 static
+2. rebind retry が 4 回(~4 秒)で枯渇 → park(g_staticDiagReported)
+3. **その後**マージ完了(骨は揃う)
+4. しかし誰も再試行しない: dead-bind watchdog は「bound だった骨の死」しか
+   見ない(never-bound は対象外)/ Reconcile は idempotent skip /
+   RequestRebindRetry は parked を拒否
+5. → マージ済みなのに永遠に static。park のコメントは「a carrier rebuild or
+   a 3D rebuild re-arms it」と約束していたが、その re-arm は
+   「bind 成功時に解除」だけで**成功しない限り再試行が始まらない**半実装だった
+
+「新しい装備の追加で直る」= フルパイプライン再点火で retry 窓にマージが
+間に合うことがあるから。sync の遅延(下記)はレース窓を広げる悪化要因。
+
+### 修正(実装済み・ビルド待ち)
+
+`RearmStaticBinds(reason)`: 表示中かつ全 static(または parked)の item の
+park を解除し、retry バジェットをリセットして detach+再注入を予約。
+呼び出し= head-rebuild 後 4s/12s の 2 段・mouth-rebuild 後 4s・
+post-load 後 8s。hopeless な item は 4 回試して再 park するだけなので、
+2026-07-28 の無限 retry 事故は再発しない(トリガー毎 1 発の設計)。
+
+### 副産物 2 件(別修正候補)
+
+1. **auto-sync 146 秒+誤ウェッジ文言**: 2 回目 sync が 146 秒かかり(通常 1 秒。
+   debug モードの healthpoll による StoreLock 飢餓疑い)、120s ウォッチドッグが
+   「wedged; blocked until restart」を宣言。**実際にはブロックせず**(直後に完了し
+   rerun も走った)、実害は誤解を生む文言と一時的な Diagnostics -2 のみ。
+   修正候補: 文言を「slow (>120s), still waiting」に。タイムアウトも debug
+   モード時は延長。
+2. **Aether Earring 系 NIF がフルスケルトン 407 骨 ×2 をキャリアに焼き込む**
+   (接尾辞に Anal/Belly/Ankle Dagger = XPMSE 全身骨)。イヤリングは数骨で
+   済むはず。キャリア肥大 → マージ遅延・budget 圧迫 = レース悪化の増幅器。
+   nifcarrier のスキャン(xml 参照骨の抽出)がライブスケルトン骨を除外して
+   いない疑い。**次の調査項目**。
+
+### 報告者への含意
+
+「newest entry disappears」の最有力機序として本件を採用(マージ再構築による
+FormID 変化説 Q3 より説明力が高い; ただし Q3 は別症状として並存可能)。
+報告者の重い環境(mod 700+)はマージが遅く、レースに**構造的に負けやすい**。
+RearmStaticBinds は test.4 に同梱される。

@@ -2509,6 +2509,45 @@ namespace CostumeFW
     // the engine settled) brings it back. This does that automatically: if a CFW
     // head part is registered and the mouth's geometry is missing from the facegen
     // head, one clean DoReset3D restores it. Main thread only. (HANDOVER teeth bug.)
+    // The race loser's rescue (field-proven 2026-07-31 on the owner's rig,
+    // the "newest persist entry never gets physics" mechanism): an item
+    // injected BEFORE its carrier bones finish merging binds fully static,
+    // burns its 4 retries in ~4s, gets parked - and then the merge lands
+    // with nobody left to try again. The dead-bind watchdog only watches
+    // bonds that EXISTED, Reconcile idempotent-skips the intact holder, and
+    // RequestRebindRetry refuses parked ids; measured end state: bones
+    // merged as Head_0000000F, prefix verified inside the carrier NIF, item
+    // still 0-of-237 static forever. The park always promised "a carrier
+    // rebuild or a 3D rebuild re-arms it" - this IS that re-arm, called from
+    // the settle points where new bones can actually appear. One shot per
+    // trigger: a hopeless item (carrier truly boneless) re-parks after its 4
+    // tries, so this cannot recreate the 2026-07-28 endless-retry churn
+    // (35 rounds/2.5min) that the park exists to prevent.
+    void RearmStaticBinds(const char* a_reason)
+    {
+        StoreLock lk;
+        std::vector<std::string> ids;
+        for (const auto& it : g_active) {
+            if (!it.holder3p && !it.holder1p) {
+                continue;  // not shown - nothing to rebind
+            }
+            const bool parked = g_staticDiagReported.contains(it.id);
+            const bool allStatic = it.staticBones > 0 && it.fsmpBones == 0;
+            if (parked || allStatic) {
+                ids.push_back(it.id);
+            }
+        }
+        if (ids.empty()) {
+            return;
+        }
+        SKSE::log::info("re-arming {} static item(s) for rebind ({})", ids.size(), a_reason);
+        g_rebindRetryBudget = kRebindRetryBudget;
+        for (const auto& id : ids) {
+            g_staticDiagReported.erase(id);
+            RequestRebindRetry(id);
+        }
+    }
+
     void RestoreMouthIfDropped(const char* a_reason)
     {
         StoreLock lk;
@@ -2600,6 +2639,7 @@ namespace CostumeFW
         g_headRebuildGraceUntil = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         RunAfterDelayMs(1500, [] { Reconcile(); });
         RunAfterDelayMs(2600, [] { RestoreMouthIfDropped("recheck"); });
+        RunAfterDelayMs(4000, [] { RearmStaticBinds("mouth-rebuild settle"); });
     }
 
     bool PlayerHasHeadPart(RE::BGSHeadPart* a_part)
@@ -2976,6 +3016,13 @@ namespace CostumeFW
         // ...then check the mouth survived this rebuild (belt-and-suspenders; the
         // runtime re-toggle path is usually clean, but the load path is not).
         RunAfterDelayMs(2600, [] { RestoreMouthIfDropped("post-rebuild"); });
+        // ...then rescue the race losers: the 1500ms Reconcile above can still
+        // run BEFORE FSMP finishes merging the new carrier bones (measured
+        // 2026-07-31), leaving items fully static with their retries burned.
+        // Two settle points because merge latency scales with the load order -
+        // the second is silent when the first already converged.
+        RunAfterDelayMs(4000, [] { RearmStaticBinds("head-rebuild settle"); });
+        RunAfterDelayMs(12000, [] { RearmStaticBinds("head-rebuild late settle"); });
     }
 
     void RequestPersistHeadRebuild(const char* a_reason)
