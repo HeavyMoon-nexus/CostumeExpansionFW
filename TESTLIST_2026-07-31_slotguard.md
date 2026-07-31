@@ -130,7 +130,20 @@
         Diagnostics Refresh で needs/Heaviest が 0 にならず実数のままであること
 - 副産物の実測: arraytest で cap が 1→2→3→4 と **AttachChild 毎に成長(毎回 realloc)**
   — 「FSMP 大量マージ = realloc 頻発」推定の傍証(growthSize 既定値の挙動)
-- 残: §3(bDebugMode 実機経路)、§4(BDDeer 模擬)
+- **§3 実施(07-31 10:37-10:47 第 3 セッション、M0=10:18:26 版)— 全緑**:
+  ini バナー `DIAGNOSTIC MODE ON (CostumeExpansionFW.ini [Diagnostics]
+  bDebugMode=1)` がログ 3 行目に発報(**報告者に送った ini 経路の実機実証**)/
+  debug 行 7689 件・healthpoll 1380 行全健全・mem 行 30s 周期(WS 8.2-8.5GB 正常域)/
+  SMF チェックボックス ON 反映(オーナー目視)→ OFF で
+  `diagnostic mode off (SMF Diagnostics toggle)` 発報+debug 停止/
+  **debug モード中も error 0 = SCENE CORRUPTION 偽陽性ゼロの debug 版確認**/
+  thread census 5 スレッド観測(07-30 測定と整合)
+  - [ ] 残: ini を 0 に戻して起動 → バナー無し(平常)確認
+        ※ live mod の ini は現在 **bDebugMode=1 のまま**(§4 をやるなら 1 のままが
+        好都合 — 模擬実験は debug ログがあるほど情報量が多い)
+  - [ ] 残: budget 表示保持の宿題 — 次に Diagnostics ページを見たとき
+        needs/Heaviest に実数が入っていること(10:18:26 版の修正確認)
+- 残: §4(BDDeer 模擬)
 
 ## 撤退基準
 
