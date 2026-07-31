@@ -86,14 +86,23 @@
 > 単独で再現するか。**再現したら大収穫**(報告者環境不要で watchpoint まで
 > ローカルで追える)。再現しなくても「欠落単独では不十分」という絞り込み。
 
-- [ ] 使用ボディのフォールバック手テクスチャ(例: `textures\actors\character\
-      female\FemaleHands*.dds` 相当、実際に使われている 1 式)を**リネームで退避**
-      (msn/_sk/_s の 3 枚だけ。diffuse は残す = 報告者と同じ欠け方)
-- [ ] RaceMenu で hand overlay を 1 枚適用(SOvl を確実に生成させる)
+- [x] **リネーム実施済み(07-31、Claude 実行)**: プレイヤーは Succubus 種族
+      (実効相対パス `textures\actors\character\Succubus\Body\femalehands_1_*`)。
+      overlay の msn/sk/s 継承元は素体の race スキン(realbody 用 TXST ではない)
+      なのでこのパスで狙い通り。**全 22 ファイル**(msn/_s/_sk × 7 mod、
+      disabled 分も頑健性のため込み、`old/` は実効外なので除外)を
+      `.cef_s4_off` サフィックスでオフ。検証: 実効パスの 3 種 = 0 件、
+      diffuse 7 件残存 = **報告者と同一の欠け方**。
+      リネーム全リスト: scratchpad の `s4_renamed_files.txt`
+- [ ] RaceMenu で hand overlay を 1 枚適用(SOvl を確実に生成させる。
+      bDebugMode=1 のまま推奨 — 現状 ini は 1)
 - [ ] 着用中の SMP 服で persist add(capture の unequip を発生させる)を 5-10 回
 - [ ] 観察: CTD するか / `SCENE CORRUPTION` が出るか / 何も起きないか
-      (**どの結果でも BUGREPORT に記録**)
-- [ ] 終了後テクスチャを**必ず**元に戻す(リネーム復帰)
+      (**どの結果でも BUGREPORT に記録**。CTD したら crash log の被害者が
+      Hands [SOvl0] 相当+テクスチャ [MISSING] 3 枚か照合 = 報告者機序の再現判定)
+- [ ] 終了後テクスチャを**必ず**元に戻す。復元ワンライナー(Git Bash):
+      `find /k/Mo2_SkyrimSE1170/mods -name "*.cef_s4_off" | while IFS= read -r f; do mv "$f" "${f%.cef_s4_off}"; done`
+      復元後の確認: `find /k/Mo2_SkyrimSE1170/mods -name "*.cef_s4_off" | wc -l` が 0
 
 ## 実施記録(2026-07-31 朝、オーナー実行・ログ精読で確認)
 
