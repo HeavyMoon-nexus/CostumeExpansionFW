@@ -18,12 +18,14 @@
 #include "RE/B/BSTextureSet.h"
 #include "RE/B/BSVisit.h"
 #include "RE/B/BSDismemberSkinInstance.h"
+#include "RE/M/Misc.h"  // RE::DebugNotification (quarantine parking notice)
 #include "RE/N/NiNode.h"
 #include "RE/N/NiSkinData.h"
 #include "RE/N/NiSkinInstance.h"
 #include "RE/P/PlayerCharacter.h"
 
 #include <cstdio>  // std::snprintf (CanonicalizeColonId)
+#include <unordered_map>
 #include <unordered_set>
 #include "RE/S/Sexes.h"
 #include "RE/T/TESDataHandler.h"
@@ -130,6 +132,24 @@ namespace CostumeFW
         std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>> g_boundBoneRefs;
         std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
 
+        // Baseline: the children-buffer address each recorded holder is SUPPOSED
+        // to have, captured when CEF itself finished attaching (InjectOnRoot).
+        // Catches the stomp variants a value-plausibility check cannot: an
+        // 8-aligned uint16 run with a zero low word (e.g. 0x0002000000010000)
+        // passes PlausibleObjectPtr, but nothing legitimate moves the buffer
+        // while the record holds the node - CEF pre-sizes the array and never
+        // grows it afterwards. Keyed by node address; erased in DetachRecorded.
+        std::unordered_map<const void*, std::uint64_t> g_holderArrayBaseline;
+
+        // Repeat-offender parking: a holder the environment stomps once tends to
+        // be stomped again right after the re-inject (same allocator, same
+        // writer). Re-arming the CTD forever helps nobody; after
+        // kQuarantineParkThreshold strikes the id sits out until the next
+        // registry reset (save load), loudly.
+        constexpr int kQuarantineParkThreshold = 3;
+        std::unordered_map<std::string, int> g_quarantineStrikes;
+        std::unordered_set<std::string> g_poisonParked;
+
         // --- CEF never searches the skeleton for its own nodes -----------------
         // Two crash generations taught this, both in DetachRealBody:
         //
@@ -158,6 +178,9 @@ namespace CostumeFW
         {
             if (a_parent && a_holder) {
                 a_parent->DetachChild(a_holder.get());
+            }
+            if (a_holder) {
+                g_holderArrayBaseline.erase(a_holder.get());
             }
             a_parent.reset();
             a_holder.reset();
@@ -246,6 +269,13 @@ namespace CostumeFW
             return s;
         }
 
+        void RecordHolderBaseline(RE::NiNode* a_holder)
+        {
+            if (a_holder) {
+                g_holderArrayBaseline[a_holder] = ReadHolderArray(a_holder).data;
+            }
+        }
+
         bool HolderArrayBroken(const HolderArrayState& s)
         {
             if (s.size > s.cap) {
@@ -304,19 +334,40 @@ namespace CostumeFW
                 return false;
             }
             const auto st = ReadHolderArray(a_holder.get());
-            if (!HolderArrayBroken(st)) {
+            const char* how = nullptr;
+            if (HolderArrayBroken(st)) {
+                how = "implausible children array";
+            } else if (const auto itB = g_holderArrayBaseline.find(a_holder.get());
+                       itB != g_holderArrayBaseline.end() && itB->second != st.data) {
+                // Plausible-looking value, wrong buffer: either an aligned
+                // stomp (uint16 run with a zero low word) or something foreign
+                // grew OUR array. Neither is a state to keep rendering from.
+                how = "children buffer moved from its attach-time baseline";
+            }
+            if (!how) {
                 return false;
             }
             SKSE::log::error(
-                "SCENE CORRUPTION on holder '{}' ({}): children size={} cap={} freeIdx={} "
+                "SCENE CORRUPTION on holder '{}' ({}): {} - children size={} cap={} freeIdx={} "
                 "data={:#x} - dumping node, then quarantining",
-                a_holder->name.c_str(), a_what, st.size, st.cap, st.freeIdx, st.data);
+                a_holder->name.c_str(), a_what, how, st.size, st.cap, st.freeIdx, st.data);
             HexDumpNode(a_holder.get());
             RepairHolderArray(a_holder.get());
             DetachRecorded(a_parent, a_holder);
+            const int strikes = ++g_quarantineStrikes[a_what];
+            if (strikes == kQuarantineParkThreshold) {
+                g_poisonParked.insert(a_what);
+                SKSE::log::error(
+                    "'{}' has been quarantined {} times this session - PARKED (no more "
+                    "re-injects until the next save load). Something else is repeatedly "
+                    "overwriting live scene nodes on this actor", a_what, strikes);
+                RE::DebugNotification(
+                    "CostumeFW: a costume keeps getting damaged by another mod - "
+                    "parked it (see the CEF log)");
+            }
             SKSE::log::error(
                 "quarantined '{}': array repaired to empty, holder detached (its geometry "
-                "leaks by design), the item will re-inject", a_what);
+                "leaks by design), the item will re-inject (strike {})", a_what, strikes);
             return true;
         }
 
@@ -1239,6 +1290,11 @@ namespace CostumeFW
                 BodyMorph::ApplyToNode(RE::PlayerCharacter::GetSingleton(), holder);
             }
 
+            // Baseline AFTER every in-inject mutation (alt textures, body morph):
+            // from here on nothing legitimate touches this array, so any change
+            // the sweep sees is a stomp.
+            RecordHolderBaseline(holder);
+
             SKSE::log::debug("  attached {} ({} skinned shape(s))", a_nodeName, geoms.size());
             return true;
         }
@@ -2079,6 +2135,11 @@ namespace CostumeFW
                     it.resolvedSex = sex;  // mark resolved (raw-NIF items: nothing to redo)
                 }
             }
+            // Parked after repeated quarantines: injecting again just re-arms
+            // the CTD the containment defused. Sits out until the next save load.
+            if (show && g_poisonParked.contains(it.id)) {
+                show = false;
+            }
             SKSE::log::debug("  item '{}' tokenForm={:08X} show={}", it.id, it.tokenForm, show);
             if (show) {
                 // Dead-bind sweep: if this item's injected mesh holds FSMP bones of a
@@ -2104,12 +2165,40 @@ namespace CostumeFW
         // Substitute body (dual injection, HANDOVER §8.4 strategy 2): when a shown
         // content opted in, inject the player's real skin body (paired with
         // hideShapes dropping the costume's own body); else remove it.
-        if (anyRealBody) {
+        if (anyRealBody && !g_poisonParked.contains("realbody-3p") &&
+            !g_poisonParked.contains("realbody-1p")) {
             InjectRealBody();
         } else {
             DetachRealBody();
         }
         LogAttachmentCensus("reconcile");
+    }
+
+    // Frame containment: called from the PlayerCharacter::Update prologue
+    // (plugin.cpp, vfunc 0xAD) EVERY frame. The 2026-07-31 reporter crash
+    // measured the failure mode this closes: a holder was attached at
+    // 15:47:52.760 and the engine's light-registration walk (SkyrimSE ids
+    // 106350/106353, inside Update) read its stomped children array within the
+    // same second - the 2.5s watchdog cadence never got a turn. Prologue
+    // position matters: contain first, then let the engine walk. Residual
+    // window: a stomp landing mid-frame, between this sweep and the walk.
+    // Cost when healthy: a handful of field reads per attached holder, no
+    // allocation, no logging.
+    void ContainmentSweepFrame()
+    {
+        StoreLock lk;
+        if (g_active.empty() && !g_realBodyHolder3p && !g_realBodyHolder1p) {
+            return;
+        }
+        int q = QuarantineSweep();
+        q += QuarantineIfBroken("realbody-3p", g_realBodyParent3p, g_realBodyHolder3p) ? 1 : 0;
+        q += QuarantineIfBroken("realbody-1p", g_realBodyParent1p, g_realBodyHolder1p) ? 1 : 0;
+        if (q > 0) {
+            SKSE::log::error(
+                "frame containment: {} holder(s) contained before this frame's scene "
+                "pass - re-inject queued", q);
+            SKSE::GetTaskInterface()->AddTask([] { Reconcile(); });
+        }
     }
 
     std::uint32_t ResolveFormId(const std::string& a_colonId)
@@ -3334,6 +3423,11 @@ namespace CostumeFW
         }
         DetachRealBody();
         g_active.clear();
+        // Fresh scene, fresh slate: stale baselines can't match anything, and a
+        // poison-park is a per-scene verdict (the stomping neighbor may be gone).
+        g_holderArrayBaseline.clear();
+        g_quarantineStrikes.clear();
+        g_poisonParked.clear();
     }
 
     void DetachSkinned(const std::string& a_id)

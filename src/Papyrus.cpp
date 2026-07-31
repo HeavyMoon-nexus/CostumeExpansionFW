@@ -575,8 +575,14 @@ namespace CostumeFW
                 ApplyBoxAbilities();
                 SKSE::log::info("persist-add[manifest] '{}'", content);
                 SyncPersistManifest();  // persist manifest fragment tracks the ACTIVE set (M2)
-                SKSE::log::info("persist-add[done] '{}' - any crash after this line is the "
-                                "carrier-sync / head-rebuild tail, not the add itself", content);
+                // Wording matters for log forensics: both reporter crashes after a
+                // completed add (07-30, 07-31) landed BEFORE the tail even started
+                // - in the engine's first scene/light pass after the 3D change
+                // (no 'auto-sync'/'persist head' lines followed). Don't blame the
+                // tail for that window.
+                SKSE::log::info("persist-add[done] '{}' - add complete. A crash before the next "
+                                "'auto-sync' / 'persist head' line is the engine's first scene "
+                                "pass after the 3D change, not the add and not the tail", content);
             });
             return true;
         }

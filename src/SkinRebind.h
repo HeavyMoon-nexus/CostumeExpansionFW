@@ -126,6 +126,13 @@ namespace CostumeFW
     // load. Idempotent. Main thread only.
     void Reconcile();
 
+    // Frame containment: PlayerCharacter::Update-prologue sweep of every
+    // recorded holder (items + real body). Contains a stomped children array
+    // (repair + detach + queued re-inject) BEFORE the engine's same-frame scene
+    // walk can read it; parks an id after repeated strikes. Cheap when healthy.
+    // Main thread only (called from the Update hook, plugin.cpp).
+    void ContainmentSweepFrame();
+
     // Detach + unregister every active item. Main thread only.
     void DetachAll();
 

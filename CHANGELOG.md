@@ -1,6 +1,32 @@
 # Changelog
 
-## Unreleased (v1.5.1 candidate)
+## Unreleased (v1.5.2 candidate)
+
+### Fixed
+
+- **Frame containment: the crash right after a persist add is now defused the
+  moment it forms, not 2.5 seconds later.** A reporter's v1.5.1 crash log
+  (2026-07-31) finally measured the race: the costume node CEF attached was
+  intact when attached, another mod overwrote its child-array field within the
+  same second, and the engine's own per-frame scene pass read the poisoned
+  field before CEF's 2.5-second background check ever got a turn. CEF now
+  verifies every node it has attached at the START of every frame, just before
+  the engine processes the player: if one was overwritten, it is repaired,
+  detached, logged (with a full hex dump of the damage for the investigation)
+  and re-injected - instead of the game crashing. An item that keeps getting
+  damaged is parked for the session after 3 strikes, with an on-screen notice,
+  so a hostile neighbor can't turn the repair into a loop. SE/AE only (VR keeps
+  the background check); escape hatch: `[Diagnostics] bFrameContainment=0`.
+  The stomped values observed so far are all tiny bone-index-like integers
+  (0x1, 0x2, uint16 runs) - the new baseline comparison also catches aligned
+  variants a value check alone would pass.
+
+- **`persist-add[done]` log line no longer blames the wrong window.** Both
+  post-add crashes on record happened BEFORE the carrier-sync / head-rebuild
+  tail started (no `auto-sync` / `persist head` lines followed); the line now
+  names the actual window (the engine's first scene pass after the 3D change).
+
+## v1.5.1
 
 ### Fixed
 

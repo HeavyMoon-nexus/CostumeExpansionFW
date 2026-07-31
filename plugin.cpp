@@ -54,6 +54,31 @@ namespace
         }
     };
 
+    // Frame containment: PlayerCharacter::Update is vfunc 0xAD. The engine's
+    // light-registration walk over the actor subtree runs INSIDE Update, and the
+    // reporter's 2026-07-31 crash proved a stomped holder array gets read there
+    // within ~1s of the attach - faster than every existing check (bind watchdog
+    // 2.5s, Reconcile-entry). Prologue sweep: contain first, then let the engine
+    // walk. Same pure vtable-swap pattern as Load3DHook; ~10 other mods chain on
+    // this vfunc in the reporter's stack and compose fine.
+    // Escape hatch: [Diagnostics] bFrameContainment=0.
+    struct PlayerUpdateHook
+    {
+        static void thunk(RE::PlayerCharacter* a_this, float a_delta)
+        {
+            CostumeFW::ContainmentSweepFrame();
+            func(a_this, a_delta);
+        }
+        static inline REL::Relocation<decltype(thunk)> func;
+
+        static void Install()
+        {
+            REL::Relocation<std::uintptr_t> vtbl{ RE::PlayerCharacter::VTABLE[0] };
+            func = vtbl.write_vfunc(0xAD, thunk);
+            SKSE::log::info("PlayerCharacter::Update containment hook installed (0xAD)");
+        }
+    };
+
     // Box mechanism: when the player equips/unequips a tracked box token, the
     // box contents must show/hide. Reconcile re-evaluates the worn predicate.
     // §8.10 hide-when-worn also needs a reconcile when the player equips/unequips
@@ -250,6 +275,20 @@ namespace
             }
             LogEnvironmentCensus();
             Load3DHook::Install();
+            // VR: PlayerCharacter's vtable inserts virtuals before Update, so the
+            // SE/AE index 0xAD would land on the wrong function - VR keeps the
+            // 2.5s watchdog + Reconcile-entry sweeps as its containment cadence.
+            if (REL::Module::IsVR()) {
+                SKSE::log::info(
+                    "frame containment: skipped on VR (vfunc index differs) - watchdog "
+                    "cadence covers containment");
+            } else if (CostumeFW::IniFlag("bframecontainment", true)) {
+                PlayerUpdateHook::Install();
+            } else {
+                SKSE::log::warn(
+                    "frame containment DISABLED (CostumeExpansionFW.ini [Diagnostics] "
+                    "bFrameContainment=0) - corruption checks fall back to the 2.5s watchdog");
+            }
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration
             CostumeFW::InstallConsoleHook();
             CostumeFW::SmfUI::Register();  // SKSE Menu Framework section (soft; no-op without SMF)
