@@ -1204,3 +1204,110 @@ post-load 後 8s。hopeless な item は 4 回試して再 park するだけな�
 FormID 変化説 Q3 より説明力が高い; ただし Q3 は別症状として並存可能)。
 報告者の重い環境(mod 700+)はマージが遅く、レースに**構造的に負けやすい**。
 RearmStaticBinds は test.4 に同梱される。
+
+---
+
+## 返答ログ解析 3 回目(2026-08-01 着): v1.5.1 初回 persist add で 19 本目
+
+受領物: `crash-2026-07-31-15-47-52.log`(CEF ログが同ファイル先頭に貼付。
+v1.5.1 正規版 + bDebugMode=1)、`CEF_MergeAudit_output.txt`(14MB、
+ClothingLoot1+2)、Part 1 質問への全回答。
+解凍先: `K:\ダウンロード\新しいフォルダー (4)`。
+
+### 19 本目の解析 — 初代 children._data 破損の「エンジン側の顔」
+
+```
+PlayerCharacter::Update (40447+0x1119)
+  → 106350+0x429 → 106353+0x195(再帰 1 段)→ 106353+0x10B で AV
+mov rdi,[rax+rcx*8]   RAX=0x2  RCX=0  RBP=1
+RDI = (NiNode*) CostumeFW_000803__Witchy__LostArk_Horns_esp(3p、NPC Root 直下 index 21)
+```
+
+- **test.2 の 18 本目と同じ 106350/106353 ファミリー**(addrlib の --near
+  判定 2/2)。ただし 18 本目は RIP=0(命令実行 AV)、今回は同関数内の
+  データ読み AV。
+- **レジスタ構図は初代 GetObjectByName+0x37 の 3 本と同一**: ホルダーが
+  RDI、children data = 微小整数、index 0。data 値は 0x1(初代)→ **0x2**
+  (今回)。= test.2 で CEF 自身の走査に付けたガードの**外側**、エンジンの
+  ライト登録 walk が同じ毒配列を踏んだ。仮説一本化:
+  **「CEF ホルダー children への微小整数上書き」は続いており、読む側が
+  CEF(ガード済み)からエンジン(ガード不能)に移っただけ**。
+- タイムライン(flush 証明): add 完走 15:47:52.174→.815(attach
+  .760/.761)。クラッシュ同秒。post-add の auto-sync / persist head 行**なし**
+  = 尾部未開始(done 行の但し書きが 2 回連続で不正確 → 文言修正済み)。
+  attach 自体は成功(AttachChild×2)→ **stomp は attach 後 ≤~400ms の窓**。
+- **検出器(test.3 の quarantine)が沈黙した理由 = カデンツ**: 呼び出しは
+  watchdog 2500ms tick + Reconcile 入口のみ。~400ms の窓に tick が入る
+  確率は ~1/6。エンジンが先に読んだ。
+- 周辺オブジェクト: **Feet [SOvl0]**(NPC Root 直下 index 17)の BDDeer
+  Feet テクスチャ 3 枚 MISSING(`FemFeet_msn/_sk/_s.dds`、Diffuse は
+  overlays\default.dds)。**test.2 の Hands [SOvl0](FemaleHands 3 枚
+  MISSING)と完全同型 = 2/2 でクラッシュ隣接に「3 枚欠けの SOvl」**。
+  報告者はテクスチャ未修復(今回の返信で BodySlide 再実行と non-merged
+  armor 追加のみ言及)。
+- 環境: メモリ激圧。private 6.4GB→ピーク 21GB(15:42-15:44 の装備直後に
+  +7GB)、クラッシュ時 private 18.8GB / WS 15.6GB / **GPU 6.73/6.87GB フル**。
+  レース増幅器として記録(CEF の足跡ではない)。
+- スタックは Update フックチェーン 10 本(Relight/PAR/auto-heels/TDM/DD/
+  DynamicArmorPhysics/OIF/WaterInertia/Subtitles/UnreadBooksGlow)+
+  AutoPhysicsReset。**CEF フレームなし**。
+- 直前操作: 旧カタログ 7 件を全削除(DetachNodes no-registry warn ×7 =
+  この保存では未 attach なので無害)→ auto-sync → 4 秒後に
+  `000803:[Witchy] LostArk Horns.esp` を **inventory から** add(unequip
+  なし)→ 完走 → CTD。**unequip なしでも落ちる = capture の装備外しは
+  不要条件。3D 変化(attach)だけで発火に足りる。**
+
+### MergeAudit 結果(ClothingLoot1+2、ARMO 7970 / ARMA 8824)
+
+| 問題 | 件数 |
+|---|---|
+| モデルファイル欠損 | **1118** |
+| ARMA モデルパス無し | 146 |
+| 未解決 ARMA リンク | 2 |
+| VMAD 付き ARMO | 205 |
+| 空 armature | 0 |
+
+- 欠損はフォルダ単位で塊: Witchy Kawaii Accessories 210 / hyruledm
+  DemonServant 184 / **Witchy Wings Pack 176** / BDO Eclipse 90 / Aokili
+  SG 56 / Amsedillir 54 …= **マージ後に Vortex で無効化したソース mod の
+  アセットが未デプロイ**。報告者の消滅・hide-helmet 症状ファミリーの
+  機械的説明(XyyyWings 消滅 = Wings Pack 欠損と一致)。
+- 17E9 = "[COCO] Pandora Hairpin 2"(jewelry_clip02、slot 42、ARMA/モデル
+  とも [ok])→ **クラッシュに出たレコード自体は健全** = CTD はレコード
+  起因ではない(persist 対象だっただけ)。
+- 両ファイルとも non-ESL 通常 ESP(マスター 7/8 本)。
+
+### Part 1 回答の要点(タイムライン確定に効くもの)
+
+- CTD 化の時期 = 7/17 頃の版更新 + **FSMP 4.0.1 更新 + SMF 版 CEF 導入**が
+  同時。それ以前(〜報告者の言う "v2.0.1")は消滅・汎用化のみで CTD なし。
+- zMerge は新ゲーム毎 + ラン中に何度もリビルド。**FSMP 更新前後にも
+  リビルドした可能性を本人が認めた** → FormID ドリフトが 1.3.0 期の
+  「persist が汎用アーマー化/消える」に接続(Q3 は別症状として維持)。
+- ESL 原本を再有効化してマージと並走させる運用 = 同一アイテムの重複。
+- test.2 のクラッシュ位置: 2 個目選択の直後 or メニュー退出時 = 今回と
+  同じ「最初の scene pass」窓。
+- **SB = SoftBody**。更新されて BodySlide を再実行済み(= 体メッシュ一式
+  再生成)+ non-merged armor 1 個追加が今回セッションの変数。
+
+### 対応(test.4 実装・ビルド済み 2026-08-01)
+
+| 変更 | 内容 |
+|---|---|
+| **frame containment** | PlayerCharacter::Update(vfunc 0xAD)プロローグで全ホルダー sweep。エンジンの light walk より**必ず先**に走る(残余窓 = フレーム内 stomp のみ)。VR はスキップ(vtable index 差)。ini `[Diagnostics] bFrameContainment=1` |
+| **ベースライン照合** | attach 完了時に children._data を記録(InjectOnRoot 単一サイト、DetachRecorded で解除)。aligned な uint16 run(下位 word=0 型)も検出可能に |
+| **3-strike パーキング** | 同一 id 3 回検疫で当該セッション再注入停止 + 画面通知。ClearRegistry(セーブロード)でリセット |
+| done 行修正 | 「尾部」でなく「最初の scene pass」を名指し |
+
+パッケージ: `dist/CostumeExpansionFW-1.5.2-test.4-DLLONLY.7z`
+(DLL 2,706,432 bytes / **compile Aug 1 2026 06:07:44**)。
+返信ドラフト: `cef_documents/replies/PM_DRAFT_2026-08-01_test4.md`(gitignore 対象・ローカル保持)。
+
+### 次ラウンドの判定表
+
+| 観測 | 意味 |
+|---|---|
+| SCENE CORRUPTION ログ + 生存 | 変換成功 + **hexdump = 書き手の指紋**入手。値と隣接フィールドで targeted stomp か bulk uint16 stream かも割れる |
+| 同秒 CTD 継続(検出前に死亡) | stomp がフレーム内(プロローグ〜light walk 間)= 別スレッド書き込みが濃厚 → 次段はフレーム内多点検査 or 書き手側(skee/FSMP/cbp)特定 |
+| BDDeer テクスチャ修復後に消える | half-init overlay 機序が主因側で確定 |
+| parked 通知が出る | 書き手が反復的 = 環境の恒常的な heap 事故。id とタイミングで犯人絞り込み |
