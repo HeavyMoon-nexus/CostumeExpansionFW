@@ -1299,13 +1299,19 @@ namespace CostumeFW
             }
             // Record this injection's 3p bind outcome for the bone-budget readout
             // (Diagnostics page). Written before the retry so the numbers reflect
-            // the pass the user is looking at.
-            for (auto& it : g_active) {
-                if (it.id == a_id) {
-                    it.fsmpBones = g_rebind3pFsmp;
-                    it.staticBones = g_rebind3pRemap;
-                    it.maxShapeBones = g_maxShapeBones;
-                    break;
+            // the pass the user is looking at. An idempotent SKIP pass (already
+            // attached - nothing rebound, all three tallies still 0) keeps the
+            // previous REAL numbers instead: without the condition, any routine
+            // Reconcile wiped the whole readout to zeros ("CFW content needs: 0 /
+            // Heaviest shape: 0" with 1113 bones live - 2026-07-31 screenshot).
+            if (g_rebind3pFsmp || g_rebind3pRemap || g_maxShapeBones) {
+                for (auto& it : g_active) {
+                    if (it.id == a_id) {
+                        it.fsmpBones = g_rebind3pFsmp;
+                        it.staticBones = g_rebind3pRemap;
+                        it.maxShapeBones = g_maxShapeBones;
+                        break;
+                    }
                 }
             }
             if (g_injectStatic3p) {

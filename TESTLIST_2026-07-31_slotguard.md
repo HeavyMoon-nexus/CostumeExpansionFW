@@ -17,13 +17,14 @@
 
 ## §0. ビルド確認(M0)
 
-> ビルド済み(2026-07-30 23:49、ゲーム/MO2 非起動中)。
-> **今回の M0 スタンプ = DLL 2,680,320 bytes / mtime 2026-07-30 23:49:24**
-> (境界マトリクス入り。build/release と MO2 配備先の一致を確認すること)
+> **現行 M0 スタンプ = DLL 2,680,320 bytes / mtime 2026-07-31 10:18:26**
+> (budget 表示修正入り。**サイズは 23:49 版と同一 — mtime でのみ判別**。
+> MO2 配備先の一致は 10:18 に確認済み)
+> 履歴: 23:49:24 版(境界マトリクス入り)で §0-§2 実施 → 10:18:26 版は
+> Diagnostics 表示修正のみ(下記実施記録参照)
 
-- [ ] 起動ログ 1 行目 `CostumeExpansionFW loaded (file 2026-07-30 23:49:24)` が一致
-      (不一致 = 旧 DLL を踏んでいる。以降のテストは全部無効。
-      再ビルドした場合はこの節のスタンプを書き直すこと —
+- [x] 起動ログ 1 行目のスタンプ一致(05:14 / 10:08 の両セッションで
+      `file 2026-07-30 23:49:24` を確認済み。**次回起動は 10:18:26 のはず** —
       [[dll-deploy-lock-build-banner]] の静かな失敗に注意)
 
 ## §1. 合成テスト(セーブ不要、メインメニューから可)
@@ -114,8 +115,19 @@
   walk で列挙してエラーゼロ = 実地の大量スロット通過でも偽陽性ゼロの追加裏付け**。
   末尾 05:31 セーブロード → `registry roll call (post-load): 44 active, 0 problem(s)`。
   watchdog 起因の不要 re-inject なし。
-- ログから判別できず未チェックのまま: SMF Diagnostics ページ
-  (bone census)、1p の視覚確認(census/nodediag 上の 1p は健全)
+- **SMF Diagnostics ページ確認(07-31 10:46 スクショ、第 2 セッション)**:
+  census 行 `FSMP merged on player: 1159 bone(s) in 3 group(s); CFW's own 1113 in 1`
+  = headdiag と完全一致(census walk 緑)。BLE detected・box 一覧・
+  Churn(watchdog=0 deadbind=0 rebindRetry=0 = 静粛の追加裏付け)。
+- **1p 視覚確認(オーナー)**: 表示あり・SMP 揺れなし = **仕様通り**
+  (FSMP は 1p スケルトンにマージしない。headdiag 1p=0 が実測)
+- **発見→修正済み: Diagnostics の bind 集計が routine Reconcile でゼロ化**
+  (スクショの `CFW content needs: 0 / Heaviest shape: 0`)。機能は正常で表示のみの
+  既存グセ: idempotent skip パスがカウンタを 0 上書きしていた(ログ裏取り:
+  10:11:41 bound 記録 → 10:12:43/45 の skip Reconcile で消去)。
+  skip パスでは前回実数を保持するよう修正、**新 M0 = 10:18:26**。
+  - [ ] **次回起動での確認**: 表示 → equip 変更等で Reconcile を起こす →
+        Diagnostics Refresh で needs/Heaviest が 0 にならず実数のままであること
 - 副産物の実測: arraytest で cap が 1→2→3→4 と **AttachChild 毎に成長(毎回 realloc)**
   — 「FSMP 大量マージ = realloc 頻発」推定の傍証(growthSize 既定値の挙動)
 - 残: §3(bDebugMode 実機経路)、§4(BDDeer 模擬)
