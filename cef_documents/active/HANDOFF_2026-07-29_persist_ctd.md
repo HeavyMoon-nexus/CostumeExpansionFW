@@ -3,7 +3,7 @@
 > このファイルだけで次セッションが再開できるように書いてある。
 > **深い技術記録は [BUGREPORT_2026-07-27_persist_ctd.md](BUGREPORT_2026-07-27_persist_ctd.md)**
 > (全経緯・逆アセンブル結果・否認した仮説)。プロジェクト全体の
-> コールドスタートは [HANDOFF.md](HANDOFF.md)。
+> コールドスタートは [HANDOFF.md](../archive/HANDOFF.md)。
 
 ---
 
