@@ -33,11 +33,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <format>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -836,10 +839,36 @@ namespace CostumeFW
         std::atomic<bool> g_syncRunning{ false };
         std::atomic<bool> g_syncRerun{ false };  // manifest changed while a sync ran
         // Last auto-sync outcome for the MCM Diagnostics page: -999 = none this
-        // session, -2 = timed out (external: child terminated; in-proc: wedged,
-        // auto-sync blocked until restart), -3 = failed to start, otherwise the
-        // nifcarrier exit code (in-proc: 0 ok / 2 failed).
+        // session, -2 = timed out (external child terminated), -3 = failed to
+        // start, otherwise the nifcarrier exit code (in-proc: 0 ok / 2 failed).
         std::atomic<int> g_lastSyncExit{ -999 };
+        // Live sync progress (owner feedback 2026-07-31: a silent multi-minute
+        // rebuild is indistinguishable from a wedged one). Written by the sync
+        // worker via SyncOptions::progress, read by the heartbeat thread and
+        // the Diagnostics page.
+        std::mutex g_syncStageMutex;
+        std::string g_syncStage;
+        std::atomic<int> g_syncDone{ 0 };
+        std::atomic<int> g_syncTotal{ 0 };
+        std::atomic<std::int64_t> g_syncStartMs{ 0 };
+
+        std::string SyncProgressBrief()
+        {
+            const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const int secs = static_cast<int>((nowMs - g_syncStartMs.load()) / 1000);
+            std::string stage;
+            {
+                std::lock_guard lk(g_syncStageMutex);
+                stage = g_syncStage;
+            }
+            const int total = g_syncTotal.load();
+            if (total > 0) {
+                return std::format("{}, step {}/{}, {}s", stage,
+                    std::min(g_syncDone.load() + 1, total), total, secs);
+            }
+            return std::format("{}, {}s", stage.empty() ? "starting" : stage, secs);
+        }
 
         std::string ReadSyncCommand()
         {
@@ -985,13 +1014,49 @@ namespace CostumeFW
             }
             SKSE::log::info("auto-sync: rebuilding carriers (in-proc nifcarrier)");
             const std::uint64_t gen = ++g_syncGen;
+            {
+                std::lock_guard lk(g_syncStageMutex);
+                g_syncStage = "starting";
+            }
+            g_syncDone = 0;
+            g_syncTotal = 0;
+            g_syncStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
             std::thread([gen]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(kSyncTimeoutMs));
-                if (g_syncRunning.load() && g_syncGen.load() == gen) {
-                    SKSE::log::error(
-                        "auto-sync: in-proc sync still running after {}s - likely wedged; auto-sync is blocked until restart",
-                        kSyncTimeoutMs / 1000);
-                    g_lastSyncExit = -2;
+                // Heartbeat, not a tripwire (owner feedback 2026-07-31): a full
+                // rebuild of bloated carriers measured 130-140s while the worker
+                // was perfectly healthy, and the old single 120s sleep then
+                // declared it "wedged; blocked until restart" - wrong on both
+                // counts (nothing blocks, and the run finishes). Poll instead
+                // and keep the player informed: silence up to 10s (the common
+                // unchanged pass is ~1s), then a screen notification, then one
+                // every 30s with stage + elapsed. The 120s mark logs a warning
+                // that says SLOW, not stuck.
+                using namespace std::chrono;
+                const auto start = steady_clock::now();
+                auto nextNotice = start + seconds(10);
+                bool loggedSlow = false;
+                while (g_syncRunning.load() && g_syncGen.load() == gen) {
+                    std::this_thread::sleep_for(milliseconds(500));
+                    const auto now = steady_clock::now();
+                    if (now < nextNotice) {
+                        continue;
+                    }
+                    nextNotice = now + seconds(30);
+                    const auto brief = SyncProgressBrief();
+                    SKSE::log::info("auto-sync: heartbeat - rebuilding ({})", brief);
+                    const std::string msg =
+                        std::format("Costume carriers: rebuilding ({})...", brief);
+                    SKSE::GetTaskInterface()->AddTask(
+                        [msg]() { RE::DebugNotification(msg.c_str()); });
+                    if (!loggedSlow &&
+                        duration_cast<seconds>(now - start).count() >= 120) {
+                        loggedSlow = true;
+                        SKSE::log::warn(
+                            "auto-sync: still running after 120s - large carriers can take "
+                            "minutes; this is slow, not stuck (heartbeat above, live status "
+                            "in SMF Diagnostics)");
+                    }
                 }
             }).detach();
             std::thread([]() {
@@ -1002,6 +1067,14 @@ namespace CostumeFW
                     opts.dataRoots = { "Data" };  // usvfs resolves like the engine
                     opts.outRoot = "Data";
                     opts.emptyNif = "Data\\meshes\\CostumeFW\\boxtoken.nif";
+                    opts.progress = [](const char* a_stage, int a_done, int a_total) {
+                        {
+                            std::lock_guard lk(g_syncStageMutex);
+                            g_syncStage = a_stage;
+                        }
+                        g_syncDone = a_done;
+                        g_syncTotal = a_total;
+                    };
                     sr = nifcarrier::Sync(opts);
                 } catch (...) {
                     sr.ok = false;
@@ -1019,9 +1092,17 @@ namespace CostumeFW
                     return;
                 }
                 if (sr.ok) {
-                    SKSE::GetTaskInterface()->AddTask([]() {
+                    const int built = sr.built;
+                    SKSE::GetTaskInterface()->AddTask([built]() {
                         SKSE::log::info("auto-sync: done - applying carrier revisions");
                         ApplyCarrierOverridesImpl(true);
+                        if (built > 0) {
+                            // Close the heartbeat's loop on screen; an unchanged
+                            // pass (built == 0) stays silent like before.
+                            RE::DebugNotification(
+                                std::format("Costume carriers: rebuilt {} item(s)", built)
+                                    .c_str());
+                        }
                     });
                 } else {
                     SKSE::log::error("auto-sync: in-proc sync failed - carriers unchanged (see CEF_sync.log)");
@@ -1722,7 +1803,9 @@ namespace CostumeFW
         {
             const int sync = g_lastSyncExit.load();
             std::string s = "carrier auto-sync: ";
-            if (sync == -999) {
+            if (g_syncRunning.load()) {
+                s += "RUNNING (" + SyncProgressBrief() + ")";
+            } else if (sync == -999) {
                 s += "(none this session)";
             } else if (sync == -2) {
                 s += "TIMED OUT - see CEF_sync.log";

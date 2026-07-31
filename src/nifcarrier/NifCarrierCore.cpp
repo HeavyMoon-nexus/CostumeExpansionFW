@@ -2355,9 +2355,15 @@ namespace nifcarrier {
             }
 
             int poolCreated = 0;
+            const int totalSteps = static_cast<int>(doc.at("boxes").size()) + 1;  // + persist
+            int doneSteps = 0;
             for (const auto& box : doc.at("boxes")) {
                 const int slot = box.at("slot").get<int>();
                 const std::string slotStr = std::to_string(slot);
+                if (opts.progress) {
+                    opts.progress(("box " + slotStr).c_str(), doneSteps, totalSteps);
+                }
+                ++doneSteps;
                 const std::string tag = "[sync] box" + slotStr + ":";
                 const auto carrierPath = carrierDir / ("Box" + slotStr + "_carrier.nif");
                 const auto mergedXmlDisk = xmlDir / ("Box" + slotStr + "_physics.xml");
@@ -2533,6 +2539,9 @@ namespace nifcarrier {
 
             // approach-C persist pipeline (after boxes: shares tmp + pools)
             if (doc.contains("persist")) {
+                if (opts.progress) {
+                    opts.progress("persist", doneSteps, totalSteps);
+                }
                 persistFragment = SyncPersistBuild(doc["persist"], opts.dataRoots, carrierDir, xmlDir,
                     tmpDir, opts.emptyNif, persistFragment, res.built, res.skipped, res.failed,
                     poolCreated, res.log);

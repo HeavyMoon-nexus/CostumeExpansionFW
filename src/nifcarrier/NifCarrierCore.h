@@ -6,6 +6,7 @@
 // T0-T3 offline checks keep running outside the game (I-7).
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -128,6 +129,12 @@ namespace nifcarrier {
         std::vector<std::filesystem::path> dataRoots;     // in-game: { "Data" } (usvfs resolves)
         std::filesystem::path outRoot;                    // in-game: "Data"
         std::filesystem::path emptyNif;                   // empty-token template ("" = none)
+        // Coarse progress ("box 44" 3/9, "persist" 9/9): a full rebuild can
+        // take minutes on bloated carriers, and a silent worker is
+        // indistinguishable from a wedged one (owner feedback 2026-07-31).
+        // Called from the sync worker thread; keep the callback cheap and
+        // thread-safe. May be empty.
+        std::function<void(const char* stage, int done, int total)> progress;
     };
 
     struct SyncResult
