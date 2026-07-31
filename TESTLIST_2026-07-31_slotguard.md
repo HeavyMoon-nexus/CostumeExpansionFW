@@ -251,3 +251,20 @@
 - [ ] SMP 揺れ回帰: persist の DressF/K が従来通り bound(keep 集合の取りこぼしが
       あれば「bound N 減少/remapped 増加」として出る — 撤退基準)
 - [ ] レース再演頻度: 診断回数が §6(1 回)以下を維持
+
+## §7 実施記録(07-31 夜、第 8 セッション 20:24-20:29)— 全緑
+
+- [x] M0 一致(`file 2026-07-31 20:10:59`)
+- [x] **bump 全量再生成 21.6 秒(§6 実測 357 秒→1/16)、persist 単体 11.2 秒
+      (355 秒→約 1/32)**。心拍は 21 秒 run で 2/7/17s の 3 発、11 秒 run で
+      2/7s の 2 発 = 設計通り
+- [x] `[isolate] DEMv2_AetherEarring_1.nif: dropped 619 unreferenced node(s)` ×3
+      +DibellaAmulet 47(**イヤリング 1 本に幽霊 619 ノード**が実在した)
+- [x] `auto-sync: rebuilt 5 item(s)` / `rebuilt 1 item(s)` ログ行動作
+- [x] キャリア実効: **総 207 骨・379KB**(旧 1330 骨+素名幽霊・530KB)。
+      DressF 90 / DressK 108 / Aether 各 2 / amulet 3 — **keep 取りこぼしゼロ**
+      (xml refs 546/526 件が全部残存リネーム)
+- [x] SMP 揺れ回帰 ✓: 診断 2 回(DB1/DEF)はキャリア内容ではなく通常レース。
+      20:28:38 診断 → 20:28:58 rearm → **20:28:59 DressF bound 74+5+5+5**
+      (救済サイクルが ~20 秒で収束 — sync 高速化で全体が桁短縮)
+- [x] error 0
