@@ -1330,3 +1330,44 @@ Horse-Deer-Minotaur`)。静的調査で確定:
 §3 必須復元。陰性時の次変数 = **skee v5**[報告者 2026-04-18 版 vs ローカル
 v4/2024-01 — 最後の大きな版差]、cbp 同居、ライト系、メモリ圧)。
 PM 送付は再現と並行(単一障害点にしない方針のまま)。
+
+### 書き手候補マップ(2026-08-01、crash-19 の SKSE 全リスト精読で更新)
+
+犯人像の条件: ①uint16 小整数列を書く ②エンジンヒープの生きた NiNode に届く
+③3D 変化直後に集中(ただしセーブ中にも同族値)④報告者環境のみ ⑤2/2 で
+半初期化 SOvl が現場同席。
+
+**Tier 1(uint16 インデックス列を実際にコピーする主体):**
+1. **エンジン NiSkinPartition ロード経路 × 不正 NIF** — 正しいデータなら無害、
+   壊れた BodySlide 出力が入ると境界外コピー化。**crash 19 は SB(SoftBody)更新
+   → BodySlide 再実行の直後**で、2/2 の現場オーバーレイは体メッシュのクローン。
+   → 検証: 報告者の BodySlide 出力 feet/hands NIF の静的検査(次の返信で依頼候補)
+2. **FSMP 4.0.1 メッシュ構築(hdtSkinnedMesh)** — 時期相関(4.0.1 化=CTD 化)+
+   Validator の存在=作者自認 + SoftBody 29 XML で作業量膨張
+3. **skee v5 オーバーレイ構築(partition クローン)** — 2/2 現場同席・恒常的
+   半初期化・版差(v5/2026-04 vs ローカル v4/2024-01)
+
+**Tier 2(flat-tree 直下の能動的同居人 = realloc/解放の供給源。crash-19 リスト
+から新発見を含む):**
+- **SkeletonAutoPatch**(スケルトンロード時に不足ボーン自動追加 = ロード毎の
+  mass AttachChild)/ **MuSkeletonEditor v0.6.3**(ランタイム骨編集)/
+  **IED v1.7.4**・SimpleDualSheath(装備ノード attach)/ SOS(骨追加+スケール)/
+  LightPlacer / FSMP merge/clean / skee / CEF — **同居人密度がオーナー環境と別世界**
+- チャーン増幅器: **AutoPhysicsReset**(定期物理リセット=FSMP 再マージ定期発火)・
+  **DynamicArmorPhysics v1.0.2**(条件付き SMP 付け外し)・PhysicsEditor・
+  CollisionSentinel(詳細未調査)
+- cbp(CBPC)+FSMP の二重物理
+
+**Tier 3(マテリアル/シェーダ面 = RIP=0 の顔に効く系):**
+DynamicWetness / SoakingWet / MaterialSwapperFramework / L3sShaderControl —
+スキンのマテリアルをランタイムで触る。半初期化 overlay の shader property と
+相互作用する位置。
+
+**Tier 4(条件・増幅器):** メモリ圧 19-21GB+VRAM 満杯(alloc 失敗→半初期化)/
+EngineFixes v7.0.20 MemoryManager 置換(再利用パターン変更)/
+SaveGameMaxSizeExtender(セーブ中の 1 本の傍に居た。footnote)。
+
+**除外近い:** BLE(両環境同版)・CS(レンダラ層)・アニメ系(havok 側)。
+
+**bdrepro への含意**: §1-2 は素の構成(Tier 2 新顔を入れない)で開始し、
+陰性なら疑わしい順に 1 個ずつ足す**加算式**へ。skee v5 が最初の追加変数。
