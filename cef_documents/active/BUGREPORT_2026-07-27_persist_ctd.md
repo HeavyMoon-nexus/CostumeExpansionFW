@@ -1311,3 +1311,22 @@ RDI = (NiNode*) CostumeFW_000803__Witchy__LostArk_Horns_esp(3p、NPC Root 直下
 | 同秒 CTD 継続(検出前に死亡) | stomp がフレーム内(プロローグ〜light walk 間)= 別スレッド書き込みが濃厚 → 次段はフレーム内多点検査 or 書き手側(skee/FSMP/cbp)特定 |
 | BDDeer テクスチャ修復後に消える | half-init overlay 機序が主因側で確定 |
 | parked 通知が出る | 書き手が反復的 = 環境の恒常的な heap 事故。id とタイミングで犯人絞り込み |
+
+### 追記(2026-08-01 昼): BD Ungulates 現物調査 → ローカル再現トラック開設
+
+オーナーが BD Ungulates を入手(`K:\Mo2_SkyrimSE1170\mods\Ungulate Races -
+Horse-Deer-Minotaur`)。静的調査で確定:
+
+- **報告者の MISSING 6 枚は mod に全部同梱・ESP の TXST パスとも完全一致**
+  = 報告者側の部分破損(再インストールで直る)。PM の該当節を
+  「同梱を実物で確認済み+最適化ツールの食い残しパターン」に強化済み。
+- 鹿種族 = vanilla skeletonBeast_female.nif(crash 18 と一致)。crash 19 の
+  skeleton_female は controller の **proxyRaces**(NewNord 等)で正規に説明可。
+- **BDMinoOverlays.pex が RaceMenu ペイント枠に鹿オーバーレイを登録**
+  (SOvl 機構をこの mod が正面から使う)。DLL なし・ルーズファイルのみ。
+
+ローカル再現手順書: `TESTLIST_2026-08-01_bdrepro.md`(§1 健全ベースライン →
+§2 6 枚リネームで損傷模擬 → frame containment の現行犯逮捕を狙う →
+§3 必須復元。陰性時の次変数 = **skee v5**[報告者 2026-04-18 版 vs ローカル
+v4/2024-01 — 最後の大きな版差]、cbp 同居、ライト系、メモリ圧)。
+PM 送付は再現と並行(単一障害点にしない方針のまま)。
