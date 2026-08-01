@@ -65,9 +65,27 @@ Get-ChildItem $bd -Recurse -Filter "*.cef_bd_off" | Rename-Item -NewName { $_.Na
 
 復元後 `Get-ChildItem $bd -Recurse -Filter "*.cef_bd_off"` が 0 件を確認。
 
+## §2+ 加算式スケジュール(2026-08-01 静的偵察後に確定)
+
+§2 が陰性なら、疑わしい順に **1 個ずつ**足して §2 の手順を繰り返す
+(3 mod は DL 済み: `Auto Skeleton Patch - Universal Behaviour Runtime` /
+`Auto Physics Reset` / `Dynamic Armor Physics`)。
+
+| 順 | 追加 | 根拠(静的偵察の実測) | 観察ポイント |
+|---|---|---|---|
+| +1 | **SkeletonAutoPatch** | `InitHavok(Actor*)` フックで hkbCharacterSetup/Data を patch = **アクター 3D 初期化のたび int16 親インデックス配列を書き換え**。観測破損値 [5,5,5,1] 等は hkaSkeleton parentIndices として自然。BD 獣リグ(拡張ボーン大量)ほど patch 量が多い | 追加後に §2 再走。SCENE CORRUPTION の値が int16-run なら大当たり |
+| +2 | **AutoPhysicsReset** | `ExecuteForcefulReset` = **"Forceful 3D reset"(DoReset3D 級のアクター 3D 全リビルド)** を家具/騎乗/同期アニメ/セル移動等の **0.5 秒後**に発火(BSAnimationGraphEvent 監視)= free/alloc 嵐の定期供給 | **ini で bEnableLog=true にして**リセット時刻を採る。家具に座る→立つ→0.5 秒後の窓で persist add をぶつける |
+| +3 | **DynamicArmorPhysics** | 半径 1280 内アクターの**四肢 havok 形状に質量/マテリアルを書き込む**(ini [ArmorWeight]/[ArmorMaterial])。crash-19 スタックの bhkRagdollPenetrationUtil と領域が重なる | 追加後 §2 再走 |
+| +4 | skee v5(2026-04 版) | 報告者との最後の大きな版差。overlay 内部が別物の可能性 | 〃 |
+| +5 | SoftBody / cbp | ボーン予算枯渇+二重物理 | 〃 |
+
+APR の「0.5 秒後に強制 3D リセット」は**全クラッシュの背景ノイズ候補**でもある
+(persist 操作と独立に、日常イベントで 3D 破壊/再構築が走る)。報告者にも
+APR の bEnableLog=true を依頼する(PM に追記済み)。
+
 ## メモ
 
 - §4(07-31 の Succubus 模擬)が陰性だった差分: 種族が本物(skeletonBeast 系)/
-  スキン TXST が本物 / ペイント適用を明示 / FSMP 4.0.1。それでも陰性なら
-  skee v5 導入が次の一手(報告者との最後の大きな版差)。
+  スキン TXST が本物 / ペイント適用を明示 / FSMP 4.0.1 / **上記 Tier-2 同居人が
+  一切いなかった**。
 - PM 送付はこの再現と**並行**でよい(報告者を単一障害点にしない方針のまま)。

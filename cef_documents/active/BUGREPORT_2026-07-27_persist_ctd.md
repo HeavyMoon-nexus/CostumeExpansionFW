@@ -1349,14 +1349,32 @@ PM 送付は再現と並行(単一障害点にしない方針のまま)。
 
 **Tier 2(flat-tree 直下の能動的同居人 = realloc/解放の供給源。crash-19 リスト
 から新発見を含む):**
-- **SkeletonAutoPatch**(スケルトンロード時に不足ボーン自動追加 = ロード毎の
-  mass AttachChild)/ **MuSkeletonEditor v0.6.3**(ランタイム骨編集)/
+- **MuSkeletonEditor v0.6.3**(ランタイム骨編集)/
   **IED v1.7.4**・SimpleDualSheath(装備ノード attach)/ SOS(骨追加+スケール)/
   LightPlacer / FSMP merge/clean / skee / CEF — **同居人密度がオーナー環境と別世界**
-- チャーン増幅器: **AutoPhysicsReset**(定期物理リセット=FSMP 再マージ定期発火)・
-  **DynamicArmorPhysics v1.0.2**(条件付き SMP 付け外し)・PhysicsEditor・
-  CollisionSentinel(詳細未調査)
+- チャーン増幅器: **AutoPhysicsReset**・**DynamicArmorPhysics v1.0.2**(下記実測で
+  役割確定)・PhysicsEditor・CollisionSentinel(詳細未調査)
 - cbp(CBPC)+FSMP の二重物理
+
+**静的偵察の実測(2026-08-01、オーナーが 3 mod を DL・DLL 文字列/ini 解析):**
+- **SkeletonAutoPatch → Tier 1 昇格**: `InitHavokHook::InitHavok(Actor*)` +
+  `Patcher::PatchCharacter(hkbCharacterSetup*, hkbCharacterData*)` =
+  **アクター havok 初期化のたび behavior リグを書き換える**。hkaSkeleton の
+  parentIndices は **int16 列**で、観測破損値 [5,5,5,1]/[2,2,2,1]/[1,0,0,0] は
+  親インデックスデータとして自然(三角形インデックスより適合)。発火=3D 初期化
+  直後(attach 隣接窓)・**BD 獣リグほど patch 量大**・報告者環境のみ、と条件が
+  全部揃う。バッファサイズのバグ(拡張後ボーン数 vs 元サイズ)なら int16 スプレー
+  がそのまま説明可能。※ havok ヒープとエンジンヒープの同一性は要確認(仮定)。
+- **AutoPhysicsReset = "Forceful 3D reset"(DoReset3D 級)を家具/騎乗/同期アニメ/
+  セル移動等の 0.5 秒後に発火**(`ExecuteForcefulReset(Actor*,bool)`、
+  BSAnimationGraphEvent 監視)。= ノード全解放→全再構築の free/alloc 嵐を日常
+  イベントで定期供給する**最大級のチャーンドライバ**。ini bEnableLog=true で
+  自前ログにリセット時刻が出る(報告者にも依頼価値大)。
+- **DynamicArmorPhysics = 半径 1280 内アクターの四肢 havok 形状へ質量/マテリアル
+  を書き込む**(ini [ArmorWeight]/[ArmorMaterial]、装備種別で bhk 形状の mass を
+  毎回更新)。SMP 付け外しではなかった(当初推定を訂正)。crash-19 スタックの
+  bhkRagdollPenetrationUtil と作業領域が重なる。**PDB 39MB 同梱** = 必要なら
+  深掘り可能。
 
 **Tier 3(マテリアル/シェーダ面 = RIP=0 の顔に効く系):**
 DynamicWetness / SoakingWet / MaterialSwapperFramework / L3sShaderControl —
