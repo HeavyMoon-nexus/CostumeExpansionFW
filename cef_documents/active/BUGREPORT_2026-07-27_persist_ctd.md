@@ -1389,3 +1389,52 @@ SaveGameMaxSizeExtender(セーブ中の 1 本の傍に居た。footnote)。
 
 **bdrepro への含意**: §1-2 は素の構成(Tier 2 新顔を入れない)で開始し、
 陰性なら疑わしい順に 1 個ずつ足す**加算式**へ。skee v5 が最初の追加変数。
+
+---
+
+## 別件確定(2026-08-02、bdrepro R2 中の副産物): box は ArmorRace 系カスタム種族で無音故障していた
+
+**r2 聴取の未解決疑問「box が使えなかった理由(未聴取)」が解けた。**
+
+オーナーが R2 実行中、鹿キャラで box44(Magecore hat + Pharaoh veil)を装備
+→ **remap から永久に戻らない**。同アイテムを persist へ移すと揺れる。
+
+### 証拠チェーン(全段実測)
+
+| 段 | 結果 |
+|---|---|
+| carrier 保持 | held(`carrier = 'CostumeFW/Box44_carrier_r3.nif'`→r6)。再装備 3 回以上 |
+| carrier NIF 中身 | PhSVeil 骨+inline xml 参照あり(sync 除外説を棄却。単体コンテンツはプレフィックス無し) |
+| box46 | 同時刻に 3 コンテンツとも 0 bound = box 機構ごと死亡 |
+| **`cef headdiag`(オーナー実測)** | **Armor_ 系マージグループ = ゼロ**(Head_ 系のみ)= carrier メッシュが FSMP に届いていない |
+| 静的照合(housecarl) | **BDDeerRace の ArmorRace = ImperialRace(013744)**/ **CEF の全 ARMA 31 本 = Race=DefaultRace のみ・AdditionalRaces 0 件** |
+
+機序: エンジンの ARMA 適合判定は「actor の race か、その RACE.ArmorRace が
+ARMA の Race/AdditionalRaces に含まれるか」。鹿は Imperial として判定 →
+DefaultRace のみの CEF carrier は不適合 → **透明な carrier が描画されず**
+(誰も気づかない)→ FSMP にメッシュが届かない → Armor マージ不発 →
+box コンテンツ永久 static。一般の服 mod は 24 種族を明示列挙するので無事
+(MergeAudit の全 8824 ARMA がその形)。persist は HDPT(facegen)経路で別ゲート。
+
+### 報告者への含意(大)
+
+報告者のキャラ = BD Ungulates。**box は種族的に原理故障 → persist に 15-20 件
+積み上げ(ボーン予算 3450 要求・proxy pool 枯渇)は、この故障の症状だった**。
+box が直れば persist 過積載の圧力も下がる。
+
+### 修正(実装済み 2026-08-02)
+
+1. **データ**: `tools/esprace`(新規・Mutagen・冪等・自動バックアップ)で
+   全 ARMA 31 本に標準 23 種族リストを追加。実行済み
+   (713 リンク・ESL フラグ維持・housecarl で 23/23 検証済み・再実行 nothing to do)。
+2. **コード**: `WarnIfTokenRaceGap`(SkinRebind)— box トークン装着時に
+   ARMA が race/ArmorRace をカバーするか検査、不適合なら warn ログ+画面通知
+   (token×race 毎にセッション 1 回)。ESP 修正後は exotic 種族用トリップワイヤ。
+   ビルド・配備済み(DLL 2,709,504 / 08-02 10:01:33)。
+3. **パッケージング注意: v1.5.2 は ESP 同梱必須**(DLL-only 不可)。CHANGELOG 記載済み。
+
+検証残: 次セッション冒頭(R3 前)に鹿キャラで box トークン装備 → ヴェールが
+揺れる+headdiag に Armor_ グループ出現、の 1 分実証。
+留意(未検証の周辺): persist HDPT の ValidRaces = HeadPartsAllRacesMinusBeast
+(0A803F)だが実行時経路では効いていない模様(鹿で動作)。**バニラ獣種族
+(Khajiit/Argonian)での persist 動作は未確認** — 後日 1 回試す価値。

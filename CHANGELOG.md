@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **Boxes never got SMP physics on custom races whose ArmorRace points at a
+  vanilla race (BD Ungulates and similar) — fixed.** Every CEF token/carrier
+  armor addon shipped as Race=DefaultRace with an empty additional-race list,
+  so on such races the engine silently refused to render the invisible
+  carrier: the token equipped, nothing looked wrong, and every costume in the
+  box stayed permanently stiff while persist (a different, unaffected path)
+  worked. Confirmed live on a BD Ungulates deer character — carrier file held,
+  token re-equipped repeatedly, `cef headdiag` showed zero Armor merge groups.
+  All 31 armor addons now carry the community-standard 23-race list
+  (playables, their vampire variants, Elder, Manakin) — the same list every
+  outfit mod ships — applied by the new `tools/esprace` (idempotent, backs up
+  the esp). If a race still isn't covered (an exotic ArmorRace), CEF now says
+  so out loud — a log line naming the race and an on-screen notice — instead
+  of failing silently.
+  **Update note: this changes CostumeFW.esp — v1.5.2 must ship the esp, not
+  a DLL-only package.**
+
 - **Frame containment: the crash right after a persist add is now defused the
   moment it forms, not 2.5 seconds later.** A reporter's v1.5.1 crash log
   (2026-07-31) finally measured the race: the costume node CEF attached was

@@ -74,7 +74,7 @@ Get-ChildItem $bd -Recurse -Filter "*.cef_bd_off" | Rename-Item -NewName { $_.Na
 | 順 | 追加 | 根拠(静的偵察の実測) | 観察ポイント |
 |---|---|---|---|
 | +1 | **SkeletonAutoPatch** | `InitHavok(Actor*)` フックで hkbCharacterSetup/Data を patch = **アクター 3D 初期化のたび int16 親インデックス配列を書き換え**。観測破損値 [5,5,5,1] 等は hkaSkeleton parentIndices として自然。BD 獣リグ(拡張ボーン大量)ほど patch 量が多い | 追加後に §2 再走。SCENE CORRUPTION の値が int16-run なら大当たり |
-| +2 | **AutoPhysicsReset** | `ExecuteForcefulReset` = **"Forceful 3D reset"(DoReset3D 級のアクター 3D 全リビルド)** を家具/騎乗/同期アニメ/セル移動等の **0.5 秒後**に発火(BSAnimationGraphEvent 監視)= free/alloc 嵐の定期供給 | **ini で bEnableLog=true にして**リセット時刻を採る。家具に座る→立つ→0.5 秒後の窓で persist add をぶつける |
+| +2 | **AutoPhysicsReset** | `ExecuteForcefulReset` = **"Forceful 3D reset"(DoReset3D 級のアクター 3D 全リビルド)** を家具/騎乗/同期アニメ/セル移動等の **0.5 秒後**に発火(BSAnimationGraphEvent 監視)= free/alloc 嵐の定期供給 | **ini で bEnableLog=true にして**リセット時刻を採る。家具に座る→立つ→0.5 秒後の窓で persist add をぶつける。**セッション冒頭に 1 分だけ box 検証**: 鹿キャラで box トークン装備 → ヴェールが揺れる+headdiag に Armor_ 出現 = 08-02 の ESP 種族修正の実証(bugreport 別件確定の節) |
 | +3 | **DynamicArmorPhysics** | 半径 1280 内アクターの**四肢 havok 形状に質量/マテリアルを書き込む**(ini [ArmorWeight]/[ArmorMaterial])。crash-19 スタックの bhkRagdollPenetrationUtil と領域が重なる | 追加後 §2 再走 |
 | +4 | skee v5(2026-04 版) | 報告者との最後の大きな版差。overlay 内部が別物の可能性 | 〃 |
 | +5 | SoftBody / cbp | ボーン予算枯渇+二重物理 | 〃 |

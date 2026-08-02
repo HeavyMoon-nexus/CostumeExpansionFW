@@ -1462,6 +1462,73 @@ namespace CostumeFW
             return anyBody;
         }
 
+        // A worn box token whose ARMAs cover neither the player's race nor its
+        // ArmorRace proxy is a silent brick: the engine refuses to render the
+        // (invisible) carrier, FSMP never sees its mesh, and every content in
+        // the box stays permanently static - with nothing in any log. Proven
+        // in-game 2026-08-02 on BD Ungulates (race ArmorRace=ImperialRace vs
+        // the carrier's DefaultRace-only ARMA; headdiag showed zero Armor_
+        // merge groups while the token was worn and the carrier file held).
+        // The data fix puts the standard 23-race list on every CEF ARMA, so
+        // this tripwire should stay silent - it exists for the next exotic
+        // race (ArmorRace = itself, a custom race, or null).
+        bool ArmaCoversRace(const RE::TESObjectARMA* a_aa, const RE::TESRace* a_race)
+        {
+            if (!a_aa || !a_race) {
+                return false;
+            }
+            if (a_aa->race == a_race) {
+                return true;
+            }
+            for (const auto* extra : a_aa->additionalRaces) {
+                if (extra == a_race) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void WarnIfTokenRaceGap(RE::FormID a_tokenForm, RE::PlayerCharacter* a_player)
+        {
+            if (a_tokenForm == 0 || !a_player) {
+                return;
+            }
+            auto* race = a_player->GetRace();
+            if (!race) {
+                return;
+            }
+            // Once per (token, race) pair per session - a race swap mid-session
+            // (ShowRaceMenu) re-arms the check for the new race.
+            static std::unordered_set<std::uint64_t> s_checked;
+            const std::uint64_t key =
+                (static_cast<std::uint64_t>(a_tokenForm) << 32) | race->GetFormID();
+            if (!s_checked.insert(key).second) {
+                return;
+            }
+            auto* armo = RE::TESForm::LookupByID<RE::TESObjectARMO>(a_tokenForm);
+            if (!armo) {
+                return;
+            }
+            const RE::TESRace* proxy = race->armorParentRace;
+            for (auto* aa : armo->armorAddons) {
+                if (ArmaCoversRace(aa, race) || (proxy && ArmaCoversRace(aa, proxy))) {
+                    return;  // covered - the normal case
+                }
+            }
+            const auto edid = [](const RE::TESForm* f) {
+                const char* e = f ? f->GetFormEditorID() : nullptr;
+                return (e && *e) ? e : "<no-edid>";
+            };
+            SKSE::log::warn(
+                "box token '{}' ({:08X}): no armor addon covers the player's race '{}' "
+                "(ArmorRace '{}') - the engine will not render the box carrier, so this "
+                "box CANNOT get SMP physics on this race. The token/carrier ARMA needs "
+                "the race (or its ArmorRace) in its race list",
+                armo->GetName(), a_tokenForm, edid(race), edid(proxy));
+            RE::DebugNotification(
+                "CostumeFW: this box cannot get physics on your race (see the CEF log)");
+        }
+
         // True if the addon carries ANY sex's 3P biped model path (the injection
         // falls back across sexes, so one non-empty model makes it usable).
         bool HasBodyModel(RE::TESObjectARMA* a_aa)
@@ -2099,6 +2166,9 @@ namespace CostumeFW
                 show = (it.tokenForm == 0);
                 if (!show && player) {
                     show = (player->GetWornArmor(it.tokenForm) != nullptr);
+                    if (show) {
+                        WarnIfTokenRaceGap(it.tokenForm, player);
+                    }
                 }
             }
             // §8.10 hide-when-worn: hide this content while any of its configured
