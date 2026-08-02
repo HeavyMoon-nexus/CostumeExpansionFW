@@ -1479,6 +1479,21 @@ Armor_ マージが鹿キャラに出現し box コンテンツが SMP バイン
 - **次 = R5(+ skee v5 = RaceMenu 2026-04-18 版、報告者と同版)**。
   Default プロファイルの RaceMenu 更新になるので **MO2 の別 mod として導入
   (優先度で上書き)= 巻き戻し可能な形**を推奨。
+
+### R5 結果(08-02 11:08-11:18、ログ= R5_log)
+
+- **skee v5 = 本物**: `BodyMorph interface: acquired (version 5)` +
+  skee64.dll **2,521,088 bytes**(= 報告者と同一ビルド。RaceMenu AE
+  **v0.4.20.0**、日付 04-19 表示は TZ 差)。報告者との最後の大きな版差が消えた
+- **stomp: 陰性**。SCENE CORRUPTION 0 / containment 0 / error 0 / quarantine 0 /
+  トリップワイヤ 0 / CTD なし。APR Forceful ×1(家具アタック再実施 ✓)、
+  persist-add 2・bound 123・park 2 / rearm 3。teeth watchdog 継続動作(mouth 5 行)
+- **含意**: 損傷テクスチャ+鹿種族+SkeletonAutoPatch+APR+DAP+FSMP 4.0.1+
+  skee v5 という「報告者环境の主要因ほぼ全部乗せ」でも stomp は出ない。
+  **残る差分 = SoftBody/cbp(R6)+ ライト系(Relight/intellightent/LP)+
+  メモリ圧+マージ環境+プレイ時間の長さ**
+- **次 = R6(+ SoftBody / cbp、BodySlide 再ビルド込み)**。R6 も陰性なら
+  ローカル再現は打ち止め → 主戦場は報告者側 test.4 テレメトリへ(PM 送付が前提)
 留意(未検証の周辺): persist HDPT の ValidRaces = HeadPartsAllRacesMinusBeast
 (0A803F)だが実行時経路では効いていない模様(鹿で動作)。**バニラ獣種族
 (Khajiit/Argonian)での persist 動作は未確認** — 後日 1 回試す価値。
