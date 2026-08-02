@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased (v1.5.2 candidate)
+## v1.5.2 (2026-08-02)
+
+### Changed
+
+- **The documented `CostumeExpansionFW.ini` now ships in the package**
+  (`SKSE\Plugins\CostumeExpansionFW.ini`) instead of being a
+  download-on-request extra. Note for users who edited theirs (e.g.
+  `bDebugMode=1`): reinstalling/updating resets the ini to defaults —
+  re-apply your edits after updating.
+- **This release updates CostumeFW.esp** (the race-coverage fix below), so
+  install the full package — do not overwrite only the DLL. The esp change
+  adds race entries to existing armor addons only: no new records, no
+  FormID changes, safe to update mid-save.
 
 ### Fixed
 

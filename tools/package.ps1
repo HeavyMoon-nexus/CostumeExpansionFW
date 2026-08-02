@@ -43,6 +43,11 @@ Copy-Item "$mod\Scripts\CFW_Native.pex" "$stage\Scripts\"
 Copy-Item "$mod\Scripts\CostumeFW_MCM.pex" "$stage\Scripts\"
 New-Item -ItemType Directory -Force "$stage\SKSE\Plugins" | Out-Null
 Copy-Item "$mod\SKSE\Plugins\CostumeExpansionFW.dll" "$stage\SKSE\Plugins\"
+# The documented ini ships from the REPO (distribution defaults: bDebugMode=0),
+# never from the live mod folder (the owner's copy carries diagnostic toggles).
+# Missing from the package once (test.3, 2026-07-30) - the ini had to be sent
+# separately. Update note for users who edited it: reinstalling resets it.
+Copy-Item "$repo\CostumeExpansionFW.ini" "$stage\SKSE\Plugins\"
 
 # --- from the repo (licenses + script sources) ---
 Copy-Item "$repo\LICENSE" $stage
