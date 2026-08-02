@@ -1494,6 +1494,30 @@ Armor_ マージが鹿キャラに出現し box コンテンツが SMP バイン
   メモリ圧+マージ環境+プレイ時間の長さ**
 - **次 = R6(+ SoftBody / cbp、BodySlide 再ビルド込み)**。R6 も陰性なら
   ローカル再現は打ち止め → 主戦場は報告者側 test.4 テレメトリへ(PM 送付が前提)
+
+---
+
+## v1.5.2 公開+PM 送付完了(2026-08-02)— 待機フェーズ
+
+オーナーが Nexus に **v1.5.2 本体+VR パッチを公開し、PM
+(PM_DRAFT_2026-08-02_v152_release.md)を送付**。test.4 個別送付は廃止済み。
+
+**現在の観測体制**: 全ユーザーが frame containment のセンサー網。次に報告者
+(または誰か)の環境で stomp が起きれば、CTD ではなく
+**SCENE CORRUPTION ログ+node hexdump(書き手の指紋)**が届く設計。
+
+**次のログが来たときの判定表**(§次ラウンドの判定表を参照):
+生存+SCENE CORRUPTION = 指紋入手(値が int16 連なら SkeletonAutoPatch 系濃厚)/
+同秒 CTD 継続 = フレーム内 stomp = 別スレッド書き手/
+BDDeer 修復後に消える = half-init overlay 機序で確定/
+parked 通知 = 反復書き手。
+
+**開いている枝(いずれも独立・任意)**:
+- R6(+SoftBody/cbp)— ローカル最終ラウンド
+- バニラ獣種族(Khajiit/Argonian)での persist 動作確認(HDPT ValidRaces=
+  MinusBeast の件)
+- 報告者の BDDeer テクスチャ修復の実施確認(次の返信で)
+- 別件 pending: NPC wig 自動 unequip 調査([[npc-support-planning]])
 留意(未検証の周辺): persist HDPT の ValidRaces = HeadPartsAllRacesMinusBeast
 (0A803F)だが実行時経路では効いていない模様(鹿で動作)。**バニラ獣種族
 (Khajiit/Argonian)での persist 動作は未確認** — 後日 1 回試す価値。
