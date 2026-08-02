@@ -1458,6 +1458,27 @@ Armor_ マージが鹿キャラに出現し box コンテンツが SMP バイン
   post-load rearm で自己回復するはずの既知パターン、次セッション冒頭に目視
 - Reconcile 87 / head rebuild 9 / equips 26。healthpoll 全ホルダー健全
 - **次 = R4(+ DynamicArmorPhysics)**。E7D の揺れ確認を冒頭に追加
+
+### R4 結果(08-02 10:36-10:52、ログ= R4_log)
+
+- 構成検証済み: **+Dynamic Armor Physics 有効**(modlist.txt 実測。DAP は自前
+  ログを書かない mod と判明——稼働確認はプロファイル側で)。FSMP は R3/R4 とも
+  **4,231,168 = 4.0.1(報告者と同一)** ✓。プロファイル= Default(test CEF bug
+  ではなく Default で campaign が走っている——§0 の記述と実態の差、結果は同じ)。
+  既存の Dynamic Armor **Variants**(別 mod)も R2 以前から有効と判明。
+- **stomp: 陰性**。SCENE CORRUPTION 0 / containment 発動 0 / error 0 /
+  quarantine 0 / トリップワイヤ 0 / CTD なし。活動量は R3 比で大
+  (persist-add 8 件・bound 202 行・park 7・rearm 11)。
+- E7D は R3 の予想どおり自己回復(ロード後 bound → 世代交代のたび dead-bind
+  検出→再注入のループを正常継続)。DressF も同様の既知レース挙動のみ。
+- **teeth-drop watchdog が鹿の口で初実戦**: `BDDeerFemMouth` ABSENT 検出 →
+  clean rebuild #1 → 再欠落 → **#2 で ChangeHeadPart 昇格**(escalation 設計
+  どおり)。カスタム種族の口でも 3 段検出が機能。
+- 逸脱 1 点: **APR Forceful reset = 0 発**(R3 は 3 発)。家具アタックが
+  今回は不発 → R5 で再実施。
+- **次 = R5(+ skee v5 = RaceMenu 2026-04-18 版、報告者と同版)**。
+  Default プロファイルの RaceMenu 更新になるので **MO2 の別 mod として導入
+  (優先度で上書き)= 巻き戻し可能な形**を推奨。
 留意(未検証の周辺): persist HDPT の ValidRaces = HeadPartsAllRacesMinusBeast
 (0A803F)だが実行時経路では効いていない模様(鹿で動作)。**バニラ獣種族
 (Khajiit/Argonian)での persist 動作は未確認** — 後日 1 回試す価値。
