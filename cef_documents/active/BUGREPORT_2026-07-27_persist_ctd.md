@@ -1435,6 +1435,29 @@ box が直れば persist 過積載の圧力も下がる。
 
 検証残: 次セッション冒頭(R3 前)に鹿キャラで box トークン装備 → ヴェールが
 揺れる+headdiag に Armor_ グループ出現、の 1 分実証。
+**→ 実証完了(08-02 R3 セッション、10:15:36)**:
+`bound 48 bone(s) ... PhSVeil_A 1 -> AutoRename_Armor_00000005` = 前日ゼロだった
+Armor_ マージが鹿キャラに出現し box コンテンツが SMP バインド。**ESP 種族修正は
+実地で機能確認済み**。しかも APR の Forceful reset 3 発(10:17:34/10:20:07/
+10:20:52)で Armor 世代が 05→0D→2B と進む中、毎回再バインドに成功
+(10:17:34 のリセット 15ms 後に新世代へ bound = APR リセット→Load3D 再注入→
+再バインドのチェーンが第三者強制リビルド越しに一周)。
+
+### R3 結果(08-02、ログ= cef_documents/CEF bdrepro test/R3_log、gitignore 対象)
+
+- 構成: 損傷テクスチャ + SkeletonAutoPatch + AutoPhysicsReset(bEnableLog=true)。
+  新 DLL(file 10:01:33 = 種族トリップワイヤ入り。**banner の compile 文字列は
+  Aug 1 のまま = plugin.cpp 未再コンパイルの既知現象**、識別は file mtime で)
+- **stomp: 陰性**。SCENE CORRUPTION 0 / frame containment 発動 0 / error 0 /
+  quarantine 0 / CTD なし
+- 種族トリップワイヤ("no armor addon covers")発火 0 = ESP 修正が鹿をカバー ✓
+- 家具アタック実施(APR Forceful reset 3 発)。persist add 2 件(DressF 237 骨 /
+  E7D 152 骨、カタログ 9→10)— 既知のマージレースで park→rearm、DressF は
+  Head_12→13 で bound 完了。**E7D はセッション終了時点で bind 未確認(park 後の
+  rearm 順待ちの可能性。ホルダー自体は健全 size=8 cap=8)** — 次回ロードの
+  post-load rearm で自己回復するはずの既知パターン、次セッション冒頭に目視
+- Reconcile 87 / head rebuild 9 / equips 26。healthpoll 全ホルダー健全
+- **次 = R4(+ DynamicArmorPhysics)**。E7D の揺れ確認を冒頭に追加
 留意(未検証の周辺): persist HDPT の ValidRaces = HeadPartsAllRacesMinusBeast
 (0A803F)だが実行時経路では効いていない模様(鹿で動作)。**バニラ獣種族
 (Khajiit/Argonian)での persist 動作は未確認** — 後日 1 回試す価値。
