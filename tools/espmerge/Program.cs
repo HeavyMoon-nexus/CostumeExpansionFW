@@ -82,11 +82,35 @@ internal static class Program
         }
     }
 
+    // The community-standard additional-race set (RNAM stays DefaultRace).
+    // MUST stay in sync with tools/esprace (main, commit 01277f6): custom races
+    // whose RACE.ArmorRace proxies a vanilla race only render a worn ARMA when
+    // that vanilla race is in this list - a gap means the invisible carrier
+    // silently never attaches and FSMP gets no mesh (permanently static).
     private static readonly uint[] kNpcRaceIds = {
-        0x013740, 0x013741, 0x013742, 0x013743, 0x013744,
-        0x013745, 0x013746, 0x013747, 0x013748, 0x013749,
-        0x08883A, 0x08883C, 0x08883D, 0x088840, 0x088844,
-        0x088845, 0x088794, 0x0A82B9, 0x088846, 0x088884
+        0x013740, // ArgonianRace
+        0x013741, // BretonRace
+        0x013742, // DarkElfRace
+        0x013743, // HighElfRace
+        0x013744, // ImperialRace
+        0x013745, // KhajiitRace
+        0x013746, // NordRace
+        0x013747, // OrcRace
+        0x013748, // RedguardRace
+        0x013749, // WoodElfRace
+        0x067CD8, // ElderRace
+        0x088794, // NordRaceVampire
+        0x08883A, // ArgonianRaceVampire
+        0x08883C, // BretonRaceVampire
+        0x08883D, // DarkElfRaceVampire
+        0x088840, // HighElfRaceVampire
+        0x088844, // ImperialRaceVampire
+        0x088845, // KhajiitRaceVampire
+        0x088846, // RedguardRaceVampire
+        0x088884, // WoodElfRaceVampire
+        0x0A82B9, // OrcRaceVampire
+        0x0A82BA, // ElderRaceVampire
+        0x10760A, // ManakinRace
     };
 
     private static int BuildNpcAddon(string corePath, string outDir)
