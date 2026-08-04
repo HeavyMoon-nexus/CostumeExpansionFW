@@ -111,6 +111,10 @@ namespace CostumeFW
     bool HasNprWork();
     bool AssignNpcPersist(RE::Actor* a_actor, const std::vector<std::string>& a_contents);
     bool RemoveNpcPersist(RE::Actor* a_actor);
+    // Manual FSMP-convergence driver for an npc-persist assignment: split-frame
+    // carrier re-equip + clears a restoreSuspended park. False if the actor has
+    // no assignment. Main thread only.
+    bool RefreshNpcPersist(RE::Actor* a_actor);
     void RestoreNpcPersistWear();
     void OnNpcActorLoaded(RE::ActorHandle a_handle);
     std::vector<NprAssignmentInfo> NprAssignmentsSnapshot();

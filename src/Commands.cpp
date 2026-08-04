@@ -449,6 +449,14 @@ namespace CostumeFW
                     Print(RemoveNpcPersist(ref ? ref.get()->As<RE::Actor>() : nullptr) ?
                         "[CEF] NPC persist removed" : "[CEF] NPC has no persist assignment");
                 });
+            } else if (op == "refresh") {
+                const auto handle = actor->GetHandle();
+                SKSE::GetTaskInterface()->AddTask([handle] {
+                    auto ref = handle.get();
+                    Print(RefreshNpcPersist(ref ? ref.get()->As<RE::Actor>() : nullptr) ?
+                        "[CEF] NPC persist refresh queued (re-equip lands in ~1s)" :
+                        "[CEF] NPC has no persist assignment");
+                });
             }
         } else if (sub == "pub") {
             if (rest.empty() || rest == "list") {

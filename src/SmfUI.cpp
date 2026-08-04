@@ -935,6 +935,22 @@ namespace CostumeFW::SmfUI
                     });
                 }
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Refresh crosshair NPC")) {
+                auto* pick = RE::CrosshairPickData::GetSingleton();
+                auto ref = pick ? pick->targetActor.get() : RE::NiPointer<RE::TESObjectREFR>{};
+                if (!ref && pick) ref = pick->target.get();
+                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+                if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
+                    const auto handle = actor->GetHandle();
+                    SKSE::GetTaskInterface()->AddTask([handle] {
+                        auto resolved = handle.get();
+                        RefreshNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr);
+                    });
+                }
+            }
+            ImGui::TextDisabled(
+                "Refresh re-equips the carrier so FSMP physics converge (repeat until the outfit sways).");
             ImGui::SeparatorText("Published costumes");
             if (published.empty()) {
                 ImGui::TextDisabled("(nothing published)");

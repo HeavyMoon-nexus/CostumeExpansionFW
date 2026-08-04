@@ -669,13 +669,68 @@ namespace CostumeFW
         auto* token = PubTokenArmo(a_slot);
         auto* equip = RE::ActorEquipManager::GetSingleton();
         if (!token || !equip) return;
+        std::vector<RE::ActorHandle> wearers;
         for (auto& binding : g_bindings) {
             if (binding.pubSlot != a_slot || !binding.wearer) continue;
             if (auto* actor = ResolveActor(binding)) {
                 equip->UnequipObject(actor, token, nullptr, 1, nullptr, true, false, false);
-                equip->EquipObject(actor, token, nullptr, 1, nullptr, true, false, false);
+                wearers.push_back(actor->GetHandle());
             }
         }
+        if (wearers.empty()) return;
+        // plan-Y lesson (in-game proven, see BoxStore's carrier-swap post-mortem):
+        // an unequip+equip pair issued together either COALESCES to a no-op
+        // (same-frame applyNow) or STALLS >10s in the equip queue (queued pair) -
+        // which made this Refresh a silent no-op and left NPC FSMP convergence
+        // without any working driver (NPC_AUDIT_2026-08-03 F3). Split the pair
+        // across frames: the unequip drains first, a fresh task re-equips.
+        RunAfterDelayMs(750, [a_slot, wearers] {
+            auto* token = PubTokenArmo(a_slot);
+            auto* equip = RE::ActorEquipManager::GetSingleton();
+            if (!token || !equip) return;
+            for (const auto& handle : wearers) {
+                auto ref = handle.get();
+                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+                if (actor && !actor->GetWornArmor(token->GetFormID()))
+                    equip->EquipObject(actor, token, nullptr, 1, nullptr, true, false, false);
+            }
+        });
+    }
+
+    bool RefreshNpcPersist(RE::Actor* a_actor)
+    {
+        // The npc-persist counterpart of RefreshPubWearers - there was NO manual
+        // FSMP-convergence driver for persist at all (the only re-equips were the
+        // 30s auto-restore and cell reloads; NPC_AUDIT_2026-08-03 F3). Also
+        // clears a 3-strike restoreSuspended park so a user action always
+        // re-arms the assignment. Same split-frame cycle as RefreshPubWearers.
+        if (!a_actor) return false;
+        NprAssignmentInfo* item = nullptr;
+        for (auto& it : g_nprAssignments) {
+            if (it.actorFormID == a_actor->GetFormID()) { item = &it; break; }
+        }
+        if (!item) return false;
+        item->restoreSuspended = false;
+        auto* token = NprTokenArmo(item->poolSlot);
+        auto* equip = RE::ActorEquipManager::GetSingleton();
+        if (!token || !equip) return false;
+        if (a_actor->GetWornArmor(token->GetFormID()))
+            equip->UnequipObject(a_actor, token, nullptr, 1, nullptr, true, false, false);
+        const auto handle = a_actor->GetHandle();
+        const int slot = item->poolSlot;
+        RunAfterDelayMs(750, [handle, slot] {
+            auto ref = handle.get();
+            auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+            auto* token = NprTokenArmo(slot);
+            auto* equip = RE::ActorEquipManager::GetSingleton();
+            if (!actor || !token || !equip) return;
+            if (!ActorHasItem(actor, token))
+                actor->AddObjectToContainer(token, nullptr, 1, nullptr);
+            if (!actor->GetWornArmor(token->GetFormID()))
+                equip->EquipObject(actor, token, nullptr, 1, nullptr, true, false, false);
+            ReconcileActorByHandle(handle);
+        });
+        return true;
     }
 
     bool RecallPublished(int a_slot)
