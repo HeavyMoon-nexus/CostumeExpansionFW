@@ -2715,7 +2715,8 @@ namespace CostumeFW
                 continue;
             }
             const char* nm = armo->GetFullName();
-            out.push_back({ (nm && *nm) ? std::string(nm) : MakeColonId(armo), MakeColonId(armo) });
+            out.push_back({ (nm && *nm) ? EnsureUtf8(std::string(nm)) : MakeColonId(armo),
+                MakeColonId(armo) });
         }
         std::sort(out.begin(), out.end(),
             [](const WornItem& a, const WornItem& b) { return a.name < b.name; });
@@ -2767,7 +2768,7 @@ namespace CostumeFW
                 continue;
             }
             const char* nm = armo->GetFullName();
-            std::string name = (nm && *nm) ? std::string(nm) : MakeColonId(armo);
+            std::string name = (nm && *nm) ? EnsureUtf8(std::string(nm)) : MakeColonId(armo);
             if (!matchesFilter(name)) {
                 continue;
             }
@@ -2925,6 +2926,73 @@ namespace CostumeFW
         return AddBox(a_label, token, {});  // definition only
     }
 
+    namespace
+    {
+        // Strict UTF-8 validity scan (no decode, no allocation).
+        bool IsValidUtf8(std::string_view a_s)
+        {
+            std::size_t i = 0;
+            const auto n = a_s.size();
+            while (i < n) {
+                const auto c = static_cast<unsigned char>(a_s[i]);
+                std::size_t need = 0;
+                if (c < 0x80) {
+                    ++i;
+                    continue;
+                } else if ((c & 0xE0) == 0xC0 && c >= 0xC2) {
+                    need = 1;
+                } else if ((c & 0xF0) == 0xE0) {
+                    need = 2;
+                } else if ((c & 0xF8) == 0xF0 && c <= 0xF4) {
+                    need = 3;
+                } else {
+                    return false;
+                }
+                if (i + need >= n + 1 && need > n - i - 1) {
+                    return false;
+                }
+                for (std::size_t k = 1; k <= need; ++k) {
+                    if (i + k >= n ||
+                        (static_cast<unsigned char>(a_s[i + k]) & 0xC0) != 0x80) {
+                        return false;
+                    }
+                }
+                i += need + 1;
+            }
+            return true;
+        }
+    }
+
+    std::string EnsureUtf8(const std::string& a_text)
+    {
+        // ImGui expects UTF-8; a byte sequence it cannot decode renders as one
+        // '?' per bad byte. Modern JP/CN/KR plugins ship UTF-8 strings, but
+        // legacy ESPs carry raw ANSI-codepage bytes (cp932/cp936/cp1252...).
+        // If the text is not valid UTF-8, reinterpret it in the SYSTEM codepage
+        // - on the machine playing a cp932 mod that is almost always cp932 -
+        // and convert. Valid UTF-8 (the common case) passes through untouched.
+        if (a_text.empty() || IsValidUtf8(a_text)) {
+            return a_text;
+        }
+        const int wlen = ::MultiByteToWideChar(CP_ACP, 0, a_text.data(),
+            static_cast<int>(a_text.size()), nullptr, 0);
+        if (wlen <= 0) {
+            return a_text;
+        }
+        std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+        ::MultiByteToWideChar(CP_ACP, 0, a_text.data(),
+            static_cast<int>(a_text.size()), wide.data(), wlen);
+        const int ulen = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen,
+            nullptr, 0, nullptr, nullptr);
+        if (ulen <= 0) {
+            return a_text;
+        }
+        std::string out(static_cast<std::size_t>(ulen), '\0');
+        ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen, out.data(), ulen,
+            nullptr, nullptr);
+        return out;
+    }
+
     std::string ItemDisplayName(const std::string& a_colonId)
     {
         StoreLock lk;
@@ -2935,7 +3003,7 @@ namespace CostumeFW
         auto* form = RE::TESForm::LookupByID(formId);
         auto* full = form ? form->As<RE::TESFullName>() : nullptr;
         const char* nm = full ? full->GetFullName() : nullptr;
-        return (nm && *nm) ? std::string(nm) : a_colonId;
+        return (nm && *nm) ? EnsureUtf8(std::string(nm)) : a_colonId;
     }
 
     namespace
@@ -3240,7 +3308,7 @@ namespace CostumeFW
             }
             const char* nm = spell->GetFullName();
             if (nm && std::string_view(nm).starts_with("Costume:")) {
-                out.push_back({ std::string(nm), MakeColonId(spell) });
+                out.push_back({ EnsureUtf8(std::string(nm)), MakeColonId(spell) });
             }
         }
         std::sort(out.begin(), out.end(),
@@ -3504,7 +3572,7 @@ namespace CostumeFW
                     const char* nm = full ? full->GetFullName() : nullptr;
                     char buf[96]{};
                     std::snprintf(buf, sizeof(buf), "%s %.0f",
-                        (nm && *nm) ? nm : "effect", e.magnitude);
+                        (nm && *nm) ? EnsureUtf8(nm).c_str() : "effect", e.magnitude);
                     effs.push_back(buf);
                 }
             } else if (auto* ench = armo->formEnchanting) {
@@ -3516,7 +3584,7 @@ namespace CostumeFW
                     const char* nm = full ? full->GetFullName() : nullptr;
                     char buf[96]{};
                     std::snprintf(buf, sizeof(buf), "%s %.0f",
-                        (nm && *nm) ? nm : "effect", e->effectItem.magnitude);
+                        (nm && *nm) ? EnsureUtf8(nm).c_str() : "effect", e->effectItem.magnitude);
                     effs.push_back(buf);
                 }
             }
@@ -3953,7 +4021,8 @@ namespace CostumeFW
             if (!enchants.empty()) {
                 enchants += ", ";
             }
-            enchants += std::format("{} {:.0f}", (nm && *nm) ? nm : "effect", a_mag);
+            enchants += std::format("{} {:.0f}",
+                (nm && *nm) ? EnsureUtf8(nm).c_str() : "effect", a_mag);
         };
         if (const auto snap = g_contentEnchants.find(a_id);
             snap != g_contentEnchants.end() && !snap->second.empty()) {

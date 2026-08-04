@@ -1047,7 +1047,7 @@ namespace CostumeFW::SmfUI
                         auto* actor = form ? form->As<RE::Actor>() : nullptr;
                         const char* name = actor ? actor->GetName() : nullptr;
                         fresh.assignmentNames.push_back(
-                            name && *name ? name : "(unloaded)");
+                            name && *name ? EnsureUtf8(name) : "(unloaded)");
                         auto* token = NprTokenArmo(item.poolSlot);
                         fresh.assignmentWorn.push_back(
                             actor && token && actor->GetWornArmor(token->GetFormID()) ? 1 : 0);
@@ -1216,9 +1216,10 @@ namespace CostumeFW::SmfUI
                     crosshairActor = actor;
                 }
             }
-            ImGui::Text("Crosshair target: %s",
+            const std::string crosshairName =
                 crosshairActor && crosshairActor->GetName() && *crosshairActor->GetName() ?
-                    crosshairActor->GetName() : "(no NPC under crosshair)");
+                    EnsureUtf8(crosshairActor->GetName()) : "(no NPC under crosshair)";
+            ImGui::Text("Crosshair target: %s", crosshairName.c_str());
             {
                 std::vector<std::string> newRows = view.catalog;
                 for (const auto& [cid, on] : g_newAssignChecks) {
