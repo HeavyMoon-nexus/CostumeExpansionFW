@@ -902,6 +902,15 @@ namespace CostumeFW::SmfUI
             std::vector<PubSnapshot> published;
             std::vector<PubBindingInfo> bindings;
             std::vector<NprAssignmentInfo> assignments;
+            // Parallel to assignments (same index): resolved actor name and
+            // whether the carrier is currently worn. Resolved in the refresh
+            // task (main thread) so the renderer never touches live forms.
+            std::vector<std::string> assignmentNames;
+            std::vector<std::uint8_t> assignmentWorn;
+            // Display names for every content id on the page (assignments +
+            // catalog), same main-thread rule.
+            std::unordered_map<std::string, std::string> names;
+            std::size_t unresolvedNpr{ 0 };
             std::vector<std::string> catalog;
             std::unordered_map<int, bool> hidden;
             std::size_t injected{ 0 };
@@ -910,6 +919,19 @@ namespace CostumeFW::SmfUI
             bool espLoaded{ false };
             bool valid{ false };
         };
+        // Per-assignment checkbox edit buffers (render-thread only). baseline =
+        // the assignment contents the checks were initialized from; when the
+        // cache shows different contents and the user has no pending edits, the
+        // buffer re-syncs. dirty = user changed something; Apply/Revert clear it.
+        struct NprEditBuffer
+        {
+            std::string baseline;
+            std::unordered_map<std::string, bool> checks;
+            bool dirty{ false };
+        };
+        std::unordered_map<int, NprEditBuffer> g_nprEdit;
+        std::unordered_map<std::string, bool> g_newAssignChecks;
+
         NpcPageCache g_npcPageCache;
         std::mutex g_npcPageCacheMutex;
         std::atomic<bool> g_npcPageRefreshQueued{ false };
@@ -931,8 +953,25 @@ namespace CostumeFW::SmfUI
                     fresh.catalog = PersistContents();
                     fresh.injected = InjectedNpcCount();
                     fresh.maxInjected = MaxNpcInjected();
+                    fresh.unresolvedNpr = UnresolvedNprAssignmentCount();
                     for (const auto& snap : fresh.published) {
                         fresh.hidden[snap.pubSlot] = PubHidden(snap.pubSlot);
+                    }
+                    for (const auto& item : fresh.assignments) {
+                        auto* form = RE::TESForm::LookupByID(item.actorFormID);
+                        auto* actor = form ? form->As<RE::Actor>() : nullptr;
+                        const char* name = actor ? actor->GetName() : nullptr;
+                        fresh.assignmentNames.push_back(
+                            name && *name ? name : "(unloaded)");
+                        auto* token = NprTokenArmo(item.poolSlot);
+                        fresh.assignmentWorn.push_back(
+                            actor && token && actor->GetWornArmor(token->GetFormID()) ? 1 : 0);
+                        for (const auto& id : item.contents) {
+                            if (!fresh.names.contains(id)) fresh.names[id] = ItemDisplayName(id);
+                        }
+                    }
+                    for (const auto& id : fresh.catalog) {
+                        if (!fresh.names.contains(id)) fresh.names[id] = ItemDisplayName(id);
                     }
                 }
                 fresh.valid = true;
@@ -971,56 +1010,152 @@ namespace CostumeFW::SmfUI
             ImGui::Text("Injected NPCs: %d / %d", static_cast<int>(view.injected),
                 view.maxInjected);
             ImGui::SeparatorText("NPC persist");
-            const auto& assignments = view.assignments;
-            for (const auto& item : assignments) {
-                ImGui::BulletText("Pool %02d  actor %08X  %d item(s)%s%s",
-                    item.poolSlot + 1, item.actorFormID, static_cast<int>(item.contents.size()),
-                    item.unresolved ? " (unresolved)" : "",
-                    item.restoreSuspended ? " (restore suspended)" : "");
+            ImGui::Text("Pool slots: %d / 8 used", static_cast<int>(
+                view.assignments.size() + view.unresolvedNpr));
+            for (std::size_t i = 0; i < view.assignments.size(); ++i) {
+                const auto& item = view.assignments[i];
+                const auto& actorName =
+                    i < view.assignmentNames.size() ? view.assignmentNames[i] : std::string("?");
+                const bool worn = i < view.assignmentWorn.size() && view.assignmentWorn[i] != 0;
+                const auto title = std::format("Pool {:02}  {}  ({:08X})  {} item(s){}{}{}###nprslot{}",
+                    item.poolSlot + 1, actorName, item.actorFormID,
+                    static_cast<int>(item.contents.size()),
+                    worn ? "  [worn]" : "", item.unresolved ? "  (unresolved)" : "",
+                    item.restoreSuspended ? "  (restore suspended)" : "", item.poolSlot);
+                if (!ImGui::TreeNode(title.c_str())) {
+                    continue;
+                }
+                auto& buf = g_nprEdit[item.poolSlot];
+                std::string current;
+                for (const auto& id : item.contents) {
+                    current += id;
+                    current += '\n';
+                }
+                if (!buf.dirty && buf.baseline != current) {
+                    buf.baseline = current;
+                    buf.checks.clear();
+                    for (const auto& id : item.contents) {
+                        buf.checks[id] = true;
+                    }
+                }
+                // Union rows: the assignment's contents first (their order),
+                // then catalog entries not yet assigned.
+                std::vector<std::string> rows = item.contents;
+                for (const auto& id : view.catalog) {
+                    if (std::find(rows.begin(), rows.end(), id) == rows.end()) {
+                        rows.push_back(id);
+                    }
+                }
+                int checkedCount = 0;
+                for (const auto& id : rows) {
+                    auto it = buf.checks.find(id);
+                    bool checked = it != buf.checks.end() && it->second;
+                    const auto nameIt = view.names.find(id);
+                    const auto label = std::format("{}##npchk{}_{}",
+                        nameIt != view.names.end() ? nameIt->second : id, item.poolSlot, id);
+                    if (ImGui::Checkbox(label.c_str(), &checked)) {
+                        buf.checks[id] = checked;
+                        buf.dirty = true;
+                    }
+                    if (checked) {
+                        ++checkedCount;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%s)", id.c_str());
+                }
+                ImGui::BeginDisabled(!buf.dirty || checkedCount == 0);
+                if (ImGui::Button(std::format("Apply changes##npap{}", item.poolSlot).c_str())) {
+                    std::vector<std::string> sel;
+                    for (const auto& id : rows) {
+                        auto it = buf.checks.find(id);
+                        if (it != buf.checks.end() && it->second) {
+                            sel.push_back(id);
+                        }
+                    }
+                    const RE::FormID actorID = item.actorFormID;
+                    SKSE::GetTaskInterface()->AddTask([actorID, sel] {
+                        auto* form = RE::TESForm::LookupByID(actorID);
+                        UpdateNpcPersist(form ? form->As<RE::Actor>() : nullptr, sel);
+                    });
+                    buf.dirty = false;
+                    buf.baseline.clear();  // resync from the next cache refresh
+                }
+                ImGui::EndDisabled();
+                if (buf.dirty) {
+                    ImGui::SameLine();
+                    if (ImGui::Button(std::format("Revert##nprev{}", item.poolSlot).c_str())) {
+                        buf.dirty = false;
+                        buf.baseline.clear();
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(std::format("Refresh##npfr{}", item.poolSlot).c_str())) {
+                    const RE::FormID actorID = item.actorFormID;
+                    SKSE::GetTaskInterface()->AddTask([actorID] {
+                        auto* form = RE::TESForm::LookupByID(actorID);
+                        RefreshNpcPersist(form ? form->As<RE::Actor>() : nullptr);
+                    });
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(std::format("Remove assignment##nprm{}", item.poolSlot).c_str())) {
+                    const RE::FormID actorID = item.actorFormID;
+                    SKSE::GetTaskInterface()->AddTask([actorID] {
+                        auto* form = RE::TESForm::LookupByID(actorID);
+                        RemoveNpcPersist(form ? form->As<RE::Actor>() : nullptr);
+                    });
+                }
+                ImGui::TreePop();
             }
-            const auto& catalog = view.catalog;
-            if (catalog.empty()) {
-                ImGui::TextDisabled("Add contents to the shared Persist catalog before assigning an NPC.");
-            } else if (ImGui::Button("Assign Persist catalog to crosshair NPC")) {
+            ImGui::SeparatorText("New assignment");
+            // Crosshair name readout: short-lived NiPointer read, same pattern
+            // as the existing crosshair buttons (accepted in the merge review).
+            RE::Actor* crosshairActor = nullptr;
+            {
                 auto* pick = RE::CrosshairPickData::GetSingleton();
                 auto ref = pick ? pick->targetActor.get() : RE::NiPointer<RE::TESObjectREFR>{};
                 if (!ref && pick) ref = pick->target.get();
                 auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
                 if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
-                    const auto handle = actor->GetHandle();
-                    SKSE::GetTaskInterface()->AddTask([handle, catalog] {
-                        auto resolved = handle.get();
-                        AssignNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr, catalog);
-                    });
+                    crosshairActor = actor;
                 }
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Remove from crosshair NPC")) {
-                auto* pick = RE::CrosshairPickData::GetSingleton();
-                auto ref = pick ? pick->targetActor.get() : RE::NiPointer<RE::TESObjectREFR>{};
-                if (!ref && pick) ref = pick->target.get();
-                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
-                if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
-                    const auto handle = actor->GetHandle();
-                    SKSE::GetTaskInterface()->AddTask([handle] {
-                        auto resolved = handle.get();
-                        RemoveNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr);
-                    });
+            ImGui::Text("Crosshair target: %s",
+                crosshairActor && crosshairActor->GetName() && *crosshairActor->GetName() ?
+                    crosshairActor->GetName() : "(no NPC under crosshair)");
+            if (view.catalog.empty()) {
+                ImGui::TextDisabled("Capture items into the shared Persist catalog first.");
+            } else {
+                int newChecked = 0;
+                for (const auto& id : view.catalog) {
+                    bool checked = g_newAssignChecks[id];
+                    const auto nameIt = view.names.find(id);
+                    const auto label = std::format("{}##npnew_{}",
+                        nameIt != view.names.end() ? nameIt->second : id, id);
+                    if (ImGui::Checkbox(label.c_str(), &checked)) {
+                        g_newAssignChecks[id] = checked;
+                    }
+                    if (checked) {
+                        ++newChecked;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%s)", id.c_str());
                 }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Refresh crosshair NPC")) {
-                auto* pick = RE::CrosshairPickData::GetSingleton();
-                auto ref = pick ? pick->targetActor.get() : RE::NiPointer<RE::TESObjectREFR>{};
-                if (!ref && pick) ref = pick->target.get();
-                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
-                if (actor && actor != RE::PlayerCharacter::GetSingleton()) {
-                    const auto handle = actor->GetHandle();
-                    SKSE::GetTaskInterface()->AddTask([handle] {
+                ImGui::BeginDisabled(newChecked == 0 || !crosshairActor);
+                if (ImGui::Button("Assign selected to crosshair NPC##npnewgo")) {
+                    std::vector<std::string> sel;
+                    for (const auto& id : view.catalog) {
+                        if (g_newAssignChecks[id]) {
+                            sel.push_back(id);
+                        }
+                    }
+                    const auto handle = crosshairActor->GetHandle();
+                    SKSE::GetTaskInterface()->AddTask([handle, sel] {
                         auto resolved = handle.get();
-                        RefreshNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr);
+                        AssignNpcPersist(resolved ? resolved.get()->As<RE::Actor>() : nullptr, sel);
                     });
+                    g_newAssignChecks.clear();
                 }
+                ImGui::EndDisabled();
             }
             ImGui::TextDisabled(
                 "Refresh re-equips the carrier so FSMP physics converge (repeat until the outfit sways).");

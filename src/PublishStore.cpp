@@ -937,6 +937,41 @@ namespace CostumeFW
         SyncPersistManifest();
     }
 
+    bool UpdateNpcPersist(RE::Actor* a_actor, const std::vector<std::string>& a_contents)
+    {
+        // In-place contents edit for an existing assignment (SMF NPC page):
+        // keeps the pool slot, unregisters contents that leave, re-registers the
+        // new set (re-freezing the per-content settings snapshot, H2), re-bakes
+        // the carrier via the manifest sync, and runs the split-frame re-equip
+        // so FSMP converges on the new bake. An empty selection is refused -
+        // removing everything is the Remove-assignment action, not an edit.
+        if (!NpcEspLoaded() || !a_actor || a_contents.empty()) return false;
+        NprAssignmentInfo* item = nullptr;
+        for (auto& it : g_nprAssignments) {
+            if (it.actorFormID == a_actor->GetFormID()) { item = &it; break; }
+        }
+        if (!item) return false;
+        std::vector<std::string> next;
+        for (auto id : a_contents) {
+            CanonicalizeColonId(id);
+            if (id.empty() || !CanResolveContent(id)) return false;
+            if (std::find(next.begin(), next.end(), id) == next.end())
+                next.push_back(std::move(id));
+        }
+        if (next.empty()) return false;
+        for (const auto& id : item->contents) {
+            if (std::find(next.begin(), next.end(), id) == next.end())
+                RemoveActorContent(a_actor, id);
+        }
+        item->contents = std::move(next);
+        item->female = a_actor->GetActorBase() &&
+            a_actor->GetActorBase()->GetSex() == RE::SEXES::kFemale;
+        RegisterNpr(a_actor, *item);
+        SyncPersistManifest();
+        RefreshNpcPersist(a_actor);
+        return true;
+    }
+
     bool RemoveNpcPersist(RE::Actor* a_actor)
     {
         if (!a_actor) return false;

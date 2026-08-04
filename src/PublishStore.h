@@ -115,6 +115,10 @@ namespace CostumeFW
     // carrier re-equip + clears a restoreSuspended park. False if the actor has
     // no assignment. Main thread only.
     bool RefreshNpcPersist(RE::Actor* a_actor);
+    // In-place contents edit of an existing assignment: keeps the pool slot,
+    // re-freezes settings, re-bakes the carrier and re-equips. False if the
+    // actor has no assignment or the selection is empty/unresolvable.
+    bool UpdateNpcPersist(RE::Actor* a_actor, const std::vector<std::string>& a_contents);
     void RestoreNpcPersistWear();
     void OnNpcActorLoaded(RE::ActorHandle a_handle);
     std::vector<NprAssignmentInfo> NprAssignmentsSnapshot();
