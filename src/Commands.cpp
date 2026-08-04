@@ -77,7 +77,7 @@ namespace CostumeFW
                     const std::string line = a_script->GetCommand();
                     if (line.size() >= 3 && _strnicmp(line.c_str(), "cef", 3) == 0 &&
                         (line.size() == 3 || std::isspace(static_cast<unsigned char>(line[3])))) {
-                        HandleConsoleCommand(line);
+                        HandleConsoleCommand(line, a_targetRef);
                         return;  // suppress vanilla "unknown command"
                     }
                 }
@@ -111,7 +111,7 @@ namespace CostumeFW
         SKSE::log::info("console hook installed (Script::CompileAndRun)");
     }
 
-    void HandleConsoleCommand(const std::string& a_line)
+    void HandleConsoleCommand(const std::string& a_line, RE::TESObjectREFR* a_target)
     {
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
@@ -423,10 +423,18 @@ namespace CostumeFW
                 }
                 return;
             }
-            auto selected = RE::Console::GetSelectedRef();
-            auto* actor = selected ? selected->As<RE::Actor>() : nullptr;
+            // The engine hands the console-selected reference straight into
+            // CompileAndRun (a_target). RE::Console::GetSelectedRef() is kept
+            // only as a fallback - its NG implementation reads a raw offset
+            // that misses on 1.6.1170 and returns null (field-hit 2026-08-04).
+            auto* actor = a_target ? a_target->As<RE::Actor>() : nullptr;
+            if (!actor) {
+                auto selected = RE::Console::GetSelectedRef();
+                actor = selected ? selected->As<RE::Actor>() : nullptr;
+            }
             if (!actor || actor == RE::PlayerCharacter::GetSingleton()) {
-                Print("[CEF] npcpersist: select an NPC in the console first");
+                Print("[CEF] npcpersist: click an NPC in the console first (its RefID "
+                      "shows top-center), then run this with it still selected");
                 return;
             }
             if (op == "add") {

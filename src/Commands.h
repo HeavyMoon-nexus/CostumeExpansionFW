@@ -2,6 +2,11 @@
 
 #include <string>
 
+namespace RE
+{
+    class TESObjectREFR;
+}
+
 namespace CostumeFW
 {
     // Install the console-command hook (Script::CompileAndRun). Call once on
@@ -14,5 +19,9 @@ namespace CostumeFW
     //   cef detach <id> | clear | list | nuke | repair | carriers | testnif
     //   cef persist [regen|remove|on <id>|off <id>]
     //   cef morph [<id> on|off] | recover <id> | headdiag | hair <HDPT>
-    void HandleConsoleCommand(const std::string& a_line);
+    // a_target = the console-selected reference the ENGINE passed into
+    // Script::CompileAndRun. Used instead of RE::Console::GetSelectedRef(),
+    // whose CommonLibSSE-NG implementation reads a raw (non-address-library)
+    // offset that misses on 1.6.1170 and always returned null.
+    void HandleConsoleCommand(const std::string& a_line, RE::TESObjectREFR* a_target = nullptr);
 }
