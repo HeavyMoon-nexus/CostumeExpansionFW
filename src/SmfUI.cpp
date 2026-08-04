@@ -12,9 +12,12 @@
 #include "RE/C/CrosshairPickData.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <format>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -884,28 +887,97 @@ namespace CostumeFW::SmfUI
             EndScrollList();
         }
 
-        void __stdcall RenderNpc()
+        // H3 (NPC_AUDIT_2026-08-03): the SMF render callback runs on the D3D
+        // present thread, and the old code DEEP-COPIED the live publish/npr
+        // stores (vector<shared_ptr> + strings + maps) every frame while the
+        // main-thread task pump erases/push_backs them - a vector reallocation
+        // or string destruction mid-copy is a use-after-free. The snapshots are
+        // now taken ON THE MAIN THREAD via a queued task and handed to the
+        // renderer through a mutex-guarded cache (refreshed every ~500ms while
+        // the page is visible). Buttons already mutate via AddTask, so a
+        // half-second-stale VIEW is harmless.
+        struct NpcPageCache
         {
-            if (!NpcEspLoaded()) {
-                ImGui::TextWrapped("The NPC token add-on plugin (CostumeFW_NPC.esp) is not installed. Install it to use NPC distribution.");
-                const auto dormant = PublishedSnapshot().size();
-                if (dormant) ImGui::Text("%d published definition(s) are dormant.",
-                    static_cast<int>(dormant));
+            std::vector<PubSnapshot> published;
+            std::vector<PubBindingInfo> bindings;
+            std::vector<NprAssignmentInfo> assignments;
+            std::vector<std::string> catalog;
+            std::unordered_map<int, bool> hidden;
+            std::size_t injected{ 0 };
+            int maxInjected{ 8 };
+            std::size_t dormant{ 0 };
+            bool espLoaded{ false };
+            bool valid{ false };
+        };
+        NpcPageCache g_npcPageCache;
+        std::mutex g_npcPageCacheMutex;
+        std::atomic<bool> g_npcPageRefreshQueued{ false };
+        std::chrono::steady_clock::time_point g_npcPageCacheStamp{};
+
+        void QueueNpcPageRefresh()
+        {
+            if (g_npcPageRefreshQueued.exchange(true)) {
                 return;
             }
-            const auto published = PublishedSnapshot();
-            const auto bindings = PubBindingsSnapshot();
-            ImGui::Text("Injected NPCs: %d / %d", static_cast<int>(InjectedNpcCount()),
-                MaxNpcInjected());
+            SKSE::GetTaskInterface()->AddTask([] {
+                NpcPageCache fresh;
+                fresh.espLoaded = NpcEspLoaded();
+                fresh.published = PublishedSnapshot();
+                fresh.dormant = fresh.published.size();
+                if (fresh.espLoaded) {
+                    fresh.bindings = PubBindingsSnapshot();
+                    fresh.assignments = NprAssignmentsSnapshot();
+                    fresh.catalog = PersistContents();
+                    fresh.injected = InjectedNpcCount();
+                    fresh.maxInjected = MaxNpcInjected();
+                    for (const auto& snap : fresh.published) {
+                        fresh.hidden[snap.pubSlot] = PubHidden(snap.pubSlot);
+                    }
+                }
+                fresh.valid = true;
+                {
+                    std::scoped_lock lk(g_npcPageCacheMutex);
+                    g_npcPageCache = std::move(fresh);
+                    g_npcPageCacheStamp = std::chrono::steady_clock::now();
+                }
+                g_npcPageRefreshQueued.store(false);
+            });
+        }
+
+        void __stdcall RenderNpc()
+        {
+            NpcPageCache view;
+            {
+                std::scoped_lock lk(g_npcPageCacheMutex);
+                view = g_npcPageCache;
+                const auto age = std::chrono::steady_clock::now() - g_npcPageCacheStamp;
+                if (!view.valid || age > std::chrono::milliseconds(500)) {
+                    QueueNpcPageRefresh();
+                }
+            }
+            if (!view.valid) {
+                ImGui::TextDisabled("(loading...)");
+                return;
+            }
+            if (!view.espLoaded) {
+                ImGui::TextWrapped("The NPC token add-on plugin (CostumeFW_NPC.esp) is not installed. Install it to use NPC distribution.");
+                if (view.dormant) ImGui::Text("%d published definition(s) are dormant.",
+                    static_cast<int>(view.dormant));
+                return;
+            }
+            const auto& published = view.published;
+            const auto& bindings = view.bindings;
+            ImGui::Text("Injected NPCs: %d / %d", static_cast<int>(view.injected),
+                view.maxInjected);
             ImGui::SeparatorText("NPC persist");
-            const auto assignments = NprAssignmentsSnapshot();
+            const auto& assignments = view.assignments;
             for (const auto& item : assignments) {
                 ImGui::BulletText("Pool %02d  actor %08X  %d item(s)%s%s",
                     item.poolSlot + 1, item.actorFormID, static_cast<int>(item.contents.size()),
                     item.unresolved ? " (unresolved)" : "",
                     item.restoreSuspended ? " (restore suspended)" : "");
             }
-            const auto catalog = PersistContents();
+            const auto& catalog = view.catalog;
             if (catalog.empty()) {
                 ImGui::TextDisabled("Add contents to the shared Persist catalog before assigning an NPC.");
             } else if (ImGui::Button("Assign Persist catalog to crosshair NPC")) {
@@ -972,7 +1044,8 @@ namespace CostumeFW::SmfUI
                 const auto title = std::format("Pub {:02}: {} (slot {}, {} item(s), {}/{} worn/held, {} unresolved)###npc{}",
                     snap.pubSlot + 1, snap.label, snap.sourceSlot, snap.contents.size(), wearers,
                     holders, unresolved, snap.pubSlot);
-                const bool hidden = PubHidden(snap.pubSlot);
+                const auto hiddenIt = view.hidden.find(snap.pubSlot);
+                const bool hidden = hiddenIt != view.hidden.end() && hiddenIt->second;
                 if (ImGui::Button(std::format("{}##npv{}", hidden ? "Show" : "Hide",
                         snap.pubSlot).c_str())) {
                     const int slot = snap.pubSlot;
