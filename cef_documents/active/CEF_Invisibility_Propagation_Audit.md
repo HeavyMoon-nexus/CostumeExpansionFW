@@ -1,5 +1,36 @@
 # CEF登録アイテムへの透明化エフェクト伝播 調査報告
 
+## 決着 2026-08-04: 不具合は再現せず — 伝播は既に機能している（実測で確定・CLOSED）
+
+`cef invisdiag`（56a6e68 + fadeNode/effectData 拡張）による 2 巡の実測と視覚確認の結果:
+
+1. **第1巡（4段階）**: 透明化の全段階で propAlpha / matAlpha / kRefraction / flags は
+   通常装備・CEF holder とも完全に不変 → バニラ透明化は per-geometry の
+   シェーダプロパティを書き換えない。本書 §4 が想定した方式②（手動 alpha 同期）は
+   複製対象が存在せず原理的に不適。
+2. **第2巡（完全透明時, invisibilityAV=1.00）**: エンジンの実チャネルは
+   `BSShaderProperty` の **kTempRefraction フラグ + effectData リンク**
+   （InvisFXShader EFSH 0002DF92 の ShaderReferenceEffect 由来）で、
+   **CEF 注入ジオメトリにも通常装備と同一ポインタ（0x24d525c4f40）で張られていた**。
+   解除後は両者とも tmpRefr=0・flags 復元で対称。オーナー視覚確認でも
+   CEF アイテムは体と同様に透明化。
+3. 機構: effect は actor ルート配下の全ジオメトリへ per-geometry リンクを適用する。
+   CEF holder は同じルート配下に attach されるため自動的に包含される —
+   §2 の「自動的に参加していないと考えられる」という推定が誤りだった。
+
+**残余の未検証ケース1件（低優先・30秒で確認可能）**: 「完全透明の最中に」box token を
+装備 / persist を新規表示した場合に、後から attach されたジオメトリへリンクが張られるか。
+再現した場合のみ、§4 の設計（記録済みジオメトリへの effectData 同期）を最小実装する。
+実装するときの答えは本決着メモに揃っている: 対象 = ActiveItem の記録済みジオメトリ、
+チャネル = `SetEffectShaderData` + kTempRefraction、参照元 =
+`ProcessLists::ForEachShaderEffect` で target==player の effect。
+
+backlog 6-1 は CLOSED。`cef invisdiag` は診断コマンドとして恒久保持。
+
+---
+
+（以下は 2026-08-02 時点の調査原文。§2 の結論は上記の実測により覆っている）
+
 - 調査日: 2026-08-02
 - 対象: Costume Expansion Framework（CEF）
 - 対象ソース: `K:\dev\CostumeExpansionFW`
