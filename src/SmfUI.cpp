@@ -407,6 +407,7 @@ namespace CostumeFW::SmfUI
                         for (const auto& id : PersistActiveIds()) {
                             ReturnStoredItem(id, true);
                         }
+                        UninstallNpcCleanup();  // NPC arm: recall published + strip persist
                         DetachAll();
                         SetCefEnabled(false);  // persist the OFF state (no re-apply on reload)
                         Reconcile();

@@ -126,6 +126,10 @@ namespace CostumeFW
         std::vector<std::string> a_contents, bool a_female);
     std::size_t UnresolvedNprAssignmentCount();
     void ClearNpcBindings();
+    // "Prepare for uninstall" NPC arm: recall every published slot + remove
+    // every npc-persist assignment (unresolvable ones dropped, loudly). No-op
+    // without the addon esp. Main thread only.
+    void UninstallNpcCleanup();
 
     std::vector<PubSaveState> PubStatesForSave();
     std::vector<PubBindSave> PubBindingsForSave();

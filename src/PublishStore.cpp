@@ -875,6 +875,50 @@ namespace CostumeFW
         return true;
     }
 
+    void UninstallNpcCleanup()
+    {
+        // "Prepare for uninstall" left every NPC dressed: tokens in NPC
+        // inventories, NPR carriers equipped, ability spells granted - the
+        // cleanup flow was player-only (NPC_AUDIT_2026-08-03 M9). Recall every
+        // published slot (returns tokens to the player, strips spells, clears
+        // bindings) and remove every npc-persist assignment; unresolvable
+        // assignments (actor unloaded/gone) are dropped so nothing rides the
+        // next co-save of a mod the user is about to delete.
+        if (!NpcEspLoaded()) {
+            return;
+        }
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            if (PubBySlot(slot)) {
+                RecallPublished(slot);
+            }
+        }
+        // Copy first: RemoveNpcPersist erases from g_nprAssignments.
+        std::vector<RE::FormID> actors;
+        actors.reserve(g_nprAssignments.size());
+        for (const auto& item : g_nprAssignments) {
+            actors.push_back(item.actorFormID);
+        }
+        for (const auto id : actors) {
+            auto* form = RE::TESForm::LookupByID(id);
+            auto* actor = form ? form->As<RE::Actor>() : nullptr;
+            if (actor) {
+                RemoveNpcPersist(actor);
+            }
+        }
+        const auto dropped = g_nprAssignments.size() + g_unresolvedNpr.size();
+        if (dropped) {
+            SKSE::log::warn(
+                "uninstall cleanup: dropping {} npc-persist assignment(s) whose actor "
+                "could not be resolved (unloaded or gone) - their carrier tokens stay "
+                "in those NPCs' inventories", dropped);
+        }
+        g_nprAssignments.clear();
+        RefreshNprGate();
+        g_unresolvedNpr.clear();
+        SyncNpcAbilities();
+        SyncPersistManifest();
+    }
+
     bool RemoveNpcPersist(RE::Actor* a_actor)
     {
         if (!a_actor) return false;
