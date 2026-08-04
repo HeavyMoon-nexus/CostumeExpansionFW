@@ -83,6 +83,16 @@ namespace CostumeFW
     bool BodyMorphOn(const std::string& a_id);
     bool SetBodyMorphOn(const std::string& a_id, bool a_on);  // def + json  // def + json
 
+    // Item-data passthrough toggles (PLAN_2026-08-04): default ON = current
+    // behavior. Fully reversible - CEF keeps the captured data and only stops
+    // feeding it in. Setters re-flow the holder's ability/token stats.
+    bool StatEnchantOn(const std::string& a_id);
+    bool SetStatEnchantOn(const std::string& a_id, bool a_on);
+    bool StatWeightOn(const std::string& a_id);
+    bool SetStatWeightOn(const std::string& a_id, bool a_on);
+    bool StatArmorOn(const std::string& a_id);
+    bool SetStatArmorOn(const std::string& a_id, bool a_on);
+
     // --- Show the player's real body under this content (per content) --------
     // Opt-in (default off). Pairs with HideShapes: after dropping a costume's own
     // body shape, inject the player's morphed skin (naked) body so the garments

@@ -95,6 +95,13 @@ namespace CostumeFW
         // piercings use arbitrary modder-chosen slots), so the user opts in per
         // content. GLOBAL config, content-keyed.
         std::unordered_set<std::string> g_bodyMorphOn;
+        // Item-data passthrough opt-OUTs (PLAN_2026-08-04): default is ON
+        // (= current behavior), so the sets hold the ids a user switched OFF.
+        // statEnchant gates BuildEnchantSpell (box AND persist single choke);
+        // statWeight/statArmor gate SetTokenStats' per-content sums.
+        std::unordered_set<std::string> g_statEnchantOff;
+        std::unordered_set<std::string> g_statWeightOff;
+        std::unordered_set<std::string> g_statArmorOff;
 
         // Per-content set of SHAPE NAMES to drop at injection (default none). Lets
         // the user hide a costume's bundled body shape by name so it doesn't double
@@ -257,6 +264,19 @@ namespace CostumeFW
                 morphs.push_back(id);
             }
             doc["bodyMorph"] = std::move(morphs);
+
+            // Item-data opt-OUTs: store the OFF content-ids (default on = absent).
+            const auto writeOffSet = [&doc](const char* a_key,
+                                         const std::unordered_set<std::string>& a_set) {
+                auto arr = nlohmann::json::array();
+                for (const auto& id : a_set) {
+                    arr.push_back(id);
+                }
+                doc[a_key] = std::move(arr);
+            };
+            writeOffSet("statEnchantOff", g_statEnchantOff);
+            writeOffSet("statWeightOff", g_statWeightOff);
+            writeOffSet("statArmorOff", g_statArmorOff);
 
             // Per-content hidden shape names: { content-id: [shapeName, ...] }.
             auto hideShapes = nlohmann::json::object();
@@ -1266,6 +1286,9 @@ namespace CostumeFW
         g_hideRules.clear();
         g_genderModes.clear();
         g_bodyMorphOn.clear();
+        g_statEnchantOff.clear();
+        g_statWeightOff.clear();
+        g_statArmorOff.clear();
         g_hideShapes.clear();
         g_contentShapes.clear();
         g_showRealBody.clear();
@@ -1457,6 +1480,20 @@ namespace CostumeFW
                 g_showRealBody.insert(std::move(s));
             }
         }
+        const auto readOffSet = [&doc, &healed](const char* a_key,
+                                    std::unordered_set<std::string>& a_set) {
+            for (const auto& id : doc.value(a_key, nlohmann::json::array())) {
+                if (id.is_string()) {
+                    auto s = id.get<std::string>();
+                    healed |= MigrateLegacyColonId(s);
+                    healed |= CanonicalizeColonId(s);  // ROOT D
+                    a_set.insert(std::move(s));
+                }
+            }
+        };
+        readOffSet("statEnchantOff", g_statEnchantOff);
+        readOffSet("statWeightOff", g_statWeightOff);
+        readOffSet("statArmorOff", g_statArmorOff);
         {
             // Capture blacklist (v1.3.2): absent field (any pre-1.3.2 json) =
             // hard skips active, shipped defaults active, no user entries -
@@ -1529,6 +1566,9 @@ namespace CostumeFW
             g_hideRules.clear();
             g_genderModes.clear();
             g_bodyMorphOn.clear();
+        g_statEnchantOff.clear();
+        g_statWeightOff.clear();
+        g_statArmorOff.clear();
             g_contentEnchants.clear();
             g_persistPreset.clear();
             PublishPolicy({});
@@ -2973,6 +3013,9 @@ namespace CostumeFW
             // r3 (re-review P1-2): single ability choke - box AND persist
             // ability synthesis skip quarantined contents here.
             for (const auto& c : AdmittedContents(a_contents)) {
+                if (g_statEnchantOff.contains(c)) {
+                    continue;  // item-data toggle: enchant passthrough OFF
+                }
                 const auto snap = g_contentEnchants.find(c);
                 if (snap != g_contentEnchants.end()) {
                     for (const auto& e : snap->second) {
@@ -3131,8 +3174,12 @@ namespace CostumeFW
             if (a_box.enabled) {
                 for (const auto& c : AdmittedContents(a_box.contents)) {  // r3: skip quarantined
                     if (auto* armo = ResolveArmo(c)) {
-                        armorSum += armo->GetArmorRating();
-                        weightSum += armo->weight;
+                        if (!g_statArmorOff.contains(c)) {
+                            armorSum += armo->GetArmorRating();
+                        }
+                        if (!g_statWeightOff.contains(c)) {
+                            weightSum += armo->weight;
+                        }
                     }
                 }
             }
@@ -3432,8 +3479,17 @@ namespace CostumeFW
             if (!armo) {
                 continue;
             }
-            armorSum += armo->GetArmorRating();
-            weightSum += armo->weight;
+            // Item-data toggles: an OFF channel leaves the summary too, so the
+            // readout matches what actually reaches the token/ability.
+            if (!g_statArmorOff.contains(c)) {
+                armorSum += armo->GetArmorRating();
+            }
+            if (!g_statWeightOff.contains(c)) {
+                weightSum += armo->weight;
+            }
+            if (g_statEnchantOff.contains(c)) {
+                continue;  // enchant OFF: skip the effect listing below
+            }
             // Same priority as the synthesized ability (BuildEnchantSpell):
             // the captured player-enchant snapshot beats the base enchantment.
             // Showing only the base made a captured enchant look unapplied
@@ -3851,6 +3907,9 @@ namespace CostumeFW
         g_hideRules.erase(a_content);       // drop any hide rule for the removed content
         g_genderModes.erase(a_content);     // and its gender override
         g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
+        g_statEnchantOff.erase(a_content);  // and its item-data opt-outs
+        g_statWeightOff.erase(a_content);
+        g_statArmorOff.erase(a_content);
         g_hideShapes.erase(a_content);      // and its per-shape hide choices
         g_contentShapes.erase(a_content);   // and its cached shape list
         g_showRealBody.erase(a_content);    // and its show-real-body opt-in
@@ -3871,6 +3930,87 @@ namespace CostumeFW
         WriteJson();
         ResetTokenStats(a_token);  // freed token: clear its stat fields
         return true;
+    }
+
+    namespace
+    {
+        // Re-flow a changed item-data toggle through the existing contents-change
+        // machinery: ability rebuild for the holder + token stats + re-apply.
+        void ReapplyStatsForContent(const std::string& a_id)
+        {
+            const std::string holder = ContentHolder(a_id);
+            if (holder.empty()) {
+                return;
+            }
+            if (holder == "persist") {
+                RebuildPersistAbility();
+            } else {
+                RebuildBoxAbility(holder);
+                const int idx = FindBox(holder);
+                if (idx >= 0) {
+                    SetTokenStats(g_boxes[idx]);
+                }
+            }
+            ApplyBoxAbilities();
+        }
+
+        bool SetStatToggle(std::unordered_set<std::string>& a_offSet,
+            const char* a_what, const std::string& a_id, bool a_on)
+        {
+            StoreLock lk;
+            if (a_id.empty()) {
+                return false;
+            }
+            std::string id = a_id;
+            CanonicalizeColonId(id);  // ROOT D
+            if (!a_on) {
+                if (ContentHolder(id).empty()) {  // ROOT E: no orphan entries
+                    SKSE::log::warn("itemdata: '{}' is held by no box/persist - ignoring", id);
+                    return false;
+                }
+                a_offSet.insert(id);
+            } else {
+                a_offSet.erase(id);
+            }
+            SKSE::log::info("itemdata: {} passthrough {} for '{}'", a_what,
+                a_on ? "ON" : "OFF", id);
+            WriteJson();
+            ReapplyStatsForContent(id);
+            return true;
+        }
+    }
+
+    bool StatEnchantOn(const std::string& a_id)
+    {
+        StoreLock lk;
+        return !g_statEnchantOff.contains(a_id);
+    }
+
+    bool SetStatEnchantOn(const std::string& a_id, bool a_on)
+    {
+        return SetStatToggle(g_statEnchantOff, "enchant", a_id, a_on);
+    }
+
+    bool StatWeightOn(const std::string& a_id)
+    {
+        StoreLock lk;
+        return !g_statWeightOff.contains(a_id);
+    }
+
+    bool SetStatWeightOn(const std::string& a_id, bool a_on)
+    {
+        return SetStatToggle(g_statWeightOff, "weight", a_id, a_on);
+    }
+
+    bool StatArmorOn(const std::string& a_id)
+    {
+        StoreLock lk;
+        return !g_statArmorOff.contains(a_id);
+    }
+
+    bool SetStatArmorOn(const std::string& a_id, bool a_on)
+    {
+        return SetStatToggle(g_statArmorOff, "armor", a_id, a_on);
     }
 
     bool SetBoxLabel(const std::string& a_token, const std::string& a_label)

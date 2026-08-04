@@ -115,8 +115,10 @@ namespace CostumeFW
             for (const auto& id : a_snap.contents) {
                 auto* item = ResolveColonForm<RE::TESObjectARMO>(id);
                 if (!item) continue;
-                armor += item->GetArmorRating();
-                weight += item->weight;
+                // Item-data toggles ride the global per-content settings, so a
+                // published costume follows the same ON/OFF decisions.
+                if (StatArmorOn(id)) armor += item->GetArmorRating();
+                if (StatWeightOn(id)) weight += item->weight;
                 for (auto* keyword : item->GetKeywords()) {
                     if (!keyword) continue;
                     const char* editorId = keyword->formEditorID.c_str();
@@ -166,7 +168,7 @@ namespace CostumeFW
                 return nullptr;
             }
             for (const auto& [id, effects] : a_snap.enchants) {
-                (void)id;
+                if (!StatEnchantOn(id)) continue;  // item-data toggle
                 for (const auto& frozen : effects) {
                     auto* mgef = ResolveColonForm<RE::EffectSetting>(frozen.mgef);
                     if (!mgef) continue;
