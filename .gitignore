@@ -28,36 +28,21 @@ tools/**/obj/
 # Skyrim archives
 *.bsa
 
-# Internal dev docs (not for public release)
-HANDOFF.md
-HANDOVER.md
-FSMP_API_PROPOSAL.md
-FSMP_INTEGRATION.md
-FSMP_APPROACH_A.md
-FSMP_APPROACH_B.md
-FSMP_APPROACH_C.md
-FSMP_REINVESTIGATION.md
-FSMP_BLE.md
-FSMP_PLAN_Y.md
-FSMP_WIG_ROUTING.md
-CODEX_WIG_INVESTIGATION.md
-NEXUS_DESCRIPTION.txt
-CEF_REVIEW_2026-07-05.md
-CEF_STATE_SCOPE.md
-BORDER_AUDIT_2026-07-09.md
-# Outbound-message working copies (PM drafts; kept locally, never published)
-PM_DRAFT_*.md
+# Internal dev docs are LOCAL-ONLY from 2026-08-04 (owner decision).
+# ONE rule, ONE place: every development document -- investigation notes, test
+# lists, plans, audits, archived designs, Nexus/PM drafts -- lives under
+# cef_documents/ and never enters the repo. Put new dev docs THERE, not at the
+# repo root; nothing else needs a .gitignore entry.
+# Deliberately still tracked (public-facing, do not move into cef_documents/):
+#   README.md + fsmp_patches/ + tools/nifcarrier/ READMEs, CHANGELOG.md
+#   (release process), THIRD-PARTY-NOTICES.md (license notices),
+#   NPC_SUPPORT_TESTING_EN.md (linked from the public v1.4.0-beta.1 release),
+#   README_NPC.txt / README_VR.txt (shipped inside the release archives).
+cef_documents/
 
-# Internal working docs are LOCAL-ONLY from 2026-08-04 (owner decision).
-# Investigation notes, test lists, plans, replies and archived audits stay on
-# disk but out of the repo. Kept tracked on purpose: every README, CHANGELOG.md
-# (release process), THIRD-PARTY-NOTICES.md (license notices) and
-# NPC_SUPPORT_TESTING_EN.md (linked from the public v1.4.0-beta.1 release).
-# Scoped to *.md on purpose: the .txt siblings under cef_documents/nexus/
-# (store-page blurbs) stay tracked as before.
-cef_documents/**/*.md
-NPC_SUPPORT_*.md
-!NPC_SUPPORT_TESTING_EN.md
+# Safety net: an outbound PM draft must never reach the public repo, even if
+# one gets written outside cef_documents/replies/ by mistake.
+PM_DRAFT_*.md
 
 # ETW traces (memory investigation)
 *.etl

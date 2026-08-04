@@ -1,2 +1,0 @@
-1.5.2 Update - the custom-race box fix!
-If you play a custom race (BD Ungulates and friends), boxes silently never got SMP physics for you - the invisible carrier wasn't allowed to render on your race. Fixed: boxes now work on custom races, and the crash-defense net now checks every frame instead of every 2.5 seconds. [b]This update changes CostumeFW.esp - install the full package, don't overwrite just the DLL.[/b] Safe mid-save. Full details in the changelog.
