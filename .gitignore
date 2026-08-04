@@ -48,6 +48,17 @@ BORDER_AUDIT_2026-07-09.md
 # Outbound-message working copies (PM drafts; kept locally, never published)
 PM_DRAFT_*.md
 
+# Internal working docs are LOCAL-ONLY from 2026-08-04 (owner decision).
+# Investigation notes, test lists, plans, replies and archived audits stay on
+# disk but out of the repo. Kept tracked on purpose: every README, CHANGELOG.md
+# (release process), THIRD-PARTY-NOTICES.md (license notices) and
+# NPC_SUPPORT_TESTING_EN.md (linked from the public v1.4.0-beta.1 release).
+# Scoped to *.md on purpose: the .txt siblings under cef_documents/nexus/
+# (store-page blurbs) stay tracked as before.
+cef_documents/**/*.md
+NPC_SUPPORT_*.md
+!NPC_SUPPORT_TESTING_EN.md
+
 # ETW traces (memory investigation)
 *.etl
 NEXUS_CHANGELOG_v*.txt
