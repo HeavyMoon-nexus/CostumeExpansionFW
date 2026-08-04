@@ -761,7 +761,11 @@ namespace CostumeFW
             a_actor->GetActorBase()->GetSex() == RE::SEXES::kFemale;
         for (auto id : a_contents) {
             CanonicalizeColonId(id);
-            if (id.empty() || !ResolveColonForm<RE::TESObjectARMA>(id)) return false;
+            // ARMA or ARMO: the persist catalog stores standard captures as ARMO
+            // colon-ids, so an ARMA-only resolve silently refused every normal
+            // catalog entry (NPC_AUDIT_2026-08-03 F2). CanResolveContent is the
+            // same ARMA/ARMO gate the registration path applies (IMPL 10.3).
+            if (id.empty() || !CanResolveContent(id)) return false;
             if (std::find(item.contents.begin(), item.contents.end(), id) == item.contents.end())
                 item.contents.push_back(std::move(id));
         }
