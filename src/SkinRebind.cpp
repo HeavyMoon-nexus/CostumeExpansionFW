@@ -2503,8 +2503,20 @@ namespace CostumeFW
 
     std::size_t InjectedNpcCount()
     {
+        // Count only states whose actor currently HAS a 3D: a state whose actor
+        // unloaded (or died holding items) still occupied a cap slot, so with
+        // maxNpcInjected=8 the 9th NPC silently showed nothing while the screen
+        // had zero dressed NPCs (NPC_AUDIT_2026-08-03 H4). Unloaded states cost
+        // no injection budget - they re-count the moment their 3D loads.
         return static_cast<std::size_t>(std::count_if(g_actors.begin(), g_actors.end(),
-            [](const ActorState& state) { return !state.isPlayer && !state.items.empty(); }));
+            [](const ActorState& state) {
+                if (state.isPlayer || state.items.empty()) {
+                    return false;
+                }
+                const auto ref = state.handle.get();
+                auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+                return actor && actor->Get3D(false) != nullptr;
+            }));
     }
 
     std::uint32_t ResolveFormId(const std::string& a_colonId)
