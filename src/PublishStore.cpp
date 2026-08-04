@@ -566,7 +566,11 @@ namespace CostumeFW
         binding.wearer = a_equipped;
         const bool allowed = g_hidden[snap->pubSlot] || HasActorBindings(actor) ||
             InjectedNpcCount() < static_cast<std::size_t>(g_maxNpcInjected);
-        ApplyManualAbility(actor, *snap, a_equipped && allowed);
+        // CefEnabled gate (7.6 parity): a cell re-attach re-fires equip events
+        // while the master switch is OFF, and this was the one ability path
+        // without the gate - it silently re-granted spells SyncNpcAbilities had
+        // just stripped (NPC_AUDIT_2026-08-03 M8).
+        ApplyManualAbility(actor, *snap, a_equipped && allowed && CefEnabled());
         if (a_equipped && allowed && !g_hidden[snap->pubSlot])
             RegisterSnapshot(actor, *snap);
         if (!a_equipped) RemoveActorToken(actor, a_base);
@@ -913,6 +917,13 @@ namespace CostumeFW
     void ReapplyNpcBindings()
     {
         InitializeNpcSupport();
+        // Addon removed mid-save: the engine already silently deleted the token
+        // items, so re-applying bindings could only re-grant ability spells with
+        // no visible costume and no way to unequip (NPC_AUDIT_2026-08-03 M8).
+        // Cosave data is preserved either way; nothing is lost by waiting.
+        if (!NpcEspLoaded()) {
+            return;
+        }
         for (auto& binding : g_bindings) {
             if (!binding.wearer) continue;
             if (auto* actor = ResolveActor(binding)) {
