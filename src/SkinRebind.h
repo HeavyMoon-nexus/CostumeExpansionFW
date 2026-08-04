@@ -2,11 +2,14 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace RE
 {
+    class Actor;
     class BGSHeadPart;
 }
 
@@ -132,6 +135,29 @@ namespace CostumeFW
     // walk can read it; parks an id after repeated strikes. Cheap when healthy.
     // Main thread only (called from the Update hook, plugin.cpp).
     void ContainmentSweepFrame();
+
+    // NPC actor-state hooks. No-op for actors without registered CEF content.
+    // Must be called on the main thread.
+    bool HasActorBindings(RE::Actor* a_actor);
+    void ReconcileActorByHandle(RE::ActorHandle a_handle);
+
+    // Immutable per-item settings used by published snapshots. Null means the
+    // live global content settings are followed.
+    struct ContentSettings
+    {
+        std::vector<int> hideSlots;
+        int genderMode{ 0 };
+        bool bodyMorph{ false };
+        std::unordered_set<std::string> hideShapes;
+        bool showRealBody{ false };
+    };
+
+    bool RegisterActorContent(RE::Actor* a_actor, const std::string& a_contentId,
+        const std::string& a_tokenId, std::uint32_t a_tokenForm,
+        std::shared_ptr<const ContentSettings> a_settings = {});
+    void RemoveActorToken(RE::Actor* a_actor, std::uint32_t a_tokenForm);
+    void RemoveActorContent(RE::Actor* a_actor, const std::string& a_contentId);
+    std::size_t InjectedNpcCount();
 
     // Detach + unregister every active item. Main thread only.
     void DetachAll();

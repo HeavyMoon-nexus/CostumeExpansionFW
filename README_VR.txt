@@ -19,7 +19,8 @@ REQUIREMENTS (VR)
    version-1-4-15-0.csv and will not start without it)
 * Skyrim VR ESL Support            https://www.nexusmods.com/skyrimspecialedition/mods/106712
   (required - CostumeFW.esp is ESL-flagged with a 1.71 header; vanilla
-   Skyrim VR loads neither)
+   Skyrim VR loads neither. The same mod also covers the optional
+   CostumeFW_NPC.esp add-on - no extra requirement)
 * SkyUI VR (MCM)                   https://github.com/Odie/skyui-vr
 * RaceMenu VR 0.4.14 (skee)        https://www.nexusmods.com/skyrimspecialedition/mods/19080
   (optional-files tab of the RaceMenu page; needed for body-morph follow)
@@ -48,6 +49,24 @@ author. If anything misbehaves:
 2. Report with  Documents\My Games\Skyrim VR\SKSE\CostumeExpansionFW.log
    attached. Its first lines show a build stamp and
    "runtime: Skyrim VR 1.4.15.0" - please include them.
+
+NPC FEATURES ON VR (v1.4.0-beta.1)
+----------------------------------
+The NPC add-on (CostumeFW_NPC.esp + its meshes) works on VR under the same
+requirements as the core - Skyrim VR ESL Support handles its plugin too.
+Three VR-specific caveats:
+
+* The NPC management UI lives in the SKSE Menu Framework menu. On VR that
+  needs SKSE Menu Framework + ImGui VR Helper
+  (https://www.nexusmods.com/skyrimspecialedition/mods/183466). Without
+  them, manage publishes from the console instead: "cef pub" and
+  "cef npcpersist" cover listing, refresh, recall and persist assignment.
+* The NPC 3D-load hook (Character::Load3D) is statically VR-safe (verified
+  against the VR vtable data) but has NOT yet been exercised on VR
+  hardware. If you get crashes when NPCs stream in, that hook is the prime
+  suspect - please report it, and use CEF_DISABLE.txt to keep playing.
+* You cannot see your own published costume in first person without VRIK
+  (as with all player-worn CEF content).
 
 KNOWN VR NOTES
 --------------

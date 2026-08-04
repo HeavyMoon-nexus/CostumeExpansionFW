@@ -64,6 +64,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/Papyrus.cpp
     src/BoxStore.cpp
     src/CapturePolicy.cpp
+    src/PublishStore.cpp
     src/BodyMorph.cpp
     src/Preset.cpp
     src/LoreBox.cpp
