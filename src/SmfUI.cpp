@@ -989,6 +989,33 @@ namespace CostumeFW::SmfUI
         };
         std::unordered_map<int, NprEditBuffer> g_nprEdit;
         std::unordered_map<std::string, bool> g_newAssignChecks;
+        char g_npcInvFilter[64] = {};
+
+        // "+ Add from inventory" (reference-only): picks a carried ARMO's colon
+        // id straight into a checklist. The item is NOT captured and never
+        // leaves the player's inventory - npc-persist bakes from the ARMA
+        // records, so an id reference is all an assignment needs (same
+        // semantics as 'cef npcpersist add'). Snapshot on combo open, the
+        // accepted pattern for inventory enumeration in this UI.
+        template <class TOnPick>
+        void NpcInventoryAddCombo(const std::string& a_uiKey, TOnPick&& a_onPick)
+        {
+            if (!ImGui::BeginCombo(
+                    std::format("+ Add from inventory##npinv{}", a_uiKey).c_str(), "(pick)")) {
+                return;
+            }
+            static std::vector<WornItem> s_inv;
+            if (ImGui::IsWindowAppearing()) {
+                s_inv = InventoryArmors(g_npcInvFilter);
+            }
+            for (const auto& wi : s_inv) {
+                if (ImGui::Selectable(
+                        std::format("{}##npinv{}_{}", wi.name, a_uiKey, wi.id).c_str())) {
+                    a_onPick(wi.id);
+                }
+            }
+            ImGui::EndCombo();
+        }
 
         NpcPageCache g_npcPageCache;
         std::mutex g_npcPageCacheMutex;
@@ -1104,13 +1131,20 @@ namespace CostumeFW::SmfUI
                         rows.push_back(id);
                     }
                 }
+                for (const auto& [cid, on] : buf.checks) {
+                    (void)on;  // keep the row visible even if unchecked again
+                    if (std::find(rows.begin(), rows.end(), cid) == rows.end()) {
+                        rows.push_back(cid);
+                    }
+                }
                 int checkedCount = 0;
                 for (const auto& id : rows) {
                     auto it = buf.checks.find(id);
                     bool checked = it != buf.checks.end() && it->second;
                     const auto nameIt = view.names.find(id);
                     const auto label = std::format("{}##npchk{}_{}",
-                        nameIt != view.names.end() ? nameIt->second : id, item.poolSlot, id);
+                        nameIt != view.names.end() ? nameIt->second : ItemDisplayName(id),
+                        item.poolSlot, id);
                     if (ImGui::Checkbox(label.c_str(), &checked)) {
                         buf.checks[id] = checked;
                         buf.dirty = true;
@@ -1121,6 +1155,11 @@ namespace CostumeFW::SmfUI
                     ImGui::SameLine();
                     ImGui::TextDisabled("(%s)", id.c_str());
                 }
+                NpcInventoryAddCombo(std::format("a{}", item.poolSlot),
+                    [&buf](const std::string& a_id) {
+                        buf.checks[a_id] = true;
+                        buf.dirty = true;
+                    });
                 ImGui::BeginDisabled(!buf.dirty || checkedCount == 0);
                 if (ImGui::Button(std::format("Apply changes##npap{}", item.poolSlot).c_str())) {
                     std::vector<std::string> sel;
@@ -1180,15 +1219,25 @@ namespace CostumeFW::SmfUI
             ImGui::Text("Crosshair target: %s",
                 crosshairActor && crosshairActor->GetName() && *crosshairActor->GetName() ?
                     crosshairActor->GetName() : "(no NPC under crosshair)");
-            if (view.catalog.empty()) {
-                ImGui::TextDisabled("Capture items into the shared Persist catalog first.");
-            } else {
+            {
+                std::vector<std::string> newRows = view.catalog;
+                for (const auto& [cid, on] : g_newAssignChecks) {
+                    (void)on;
+                    if (std::find(newRows.begin(), newRows.end(), cid) == newRows.end()) {
+                        newRows.push_back(cid);
+                    }
+                }
+                if (newRows.empty()) {
+                    ImGui::TextDisabled(
+                        "Pick from the shared Persist catalog below or add straight from "
+                        "your inventory.");
+                }
                 int newChecked = 0;
-                for (const auto& id : view.catalog) {
+                for (const auto& id : newRows) {
                     bool checked = g_newAssignChecks[id];
                     const auto nameIt = view.names.find(id);
                     const auto label = std::format("{}##npnew_{}",
-                        nameIt != view.names.end() ? nameIt->second : id, id);
+                        nameIt != view.names.end() ? nameIt->second : ItemDisplayName(id), id);
                     if (ImGui::Checkbox(label.c_str(), &checked)) {
                         g_newAssignChecks[id] = checked;
                     }
@@ -1198,10 +1247,14 @@ namespace CostumeFW::SmfUI
                     ImGui::SameLine();
                     ImGui::TextDisabled("(%s)", id.c_str());
                 }
+                NpcInventoryAddCombo("new",
+                    [](const std::string& a_id) { g_newAssignChecks[a_id] = true; });
+                ImGui::InputText("Inventory filter##npif", g_npcInvFilter,
+                    sizeof(g_npcInvFilter));
                 ImGui::BeginDisabled(newChecked == 0 || !crosshairActor);
                 if (ImGui::Button("Assign selected to crosshair NPC##npnewgo")) {
                     std::vector<std::string> sel;
-                    for (const auto& id : view.catalog) {
+                    for (const auto& id : newRows) {
                         if (g_newAssignChecks[id]) {
                             sel.push_back(id);
                         }
