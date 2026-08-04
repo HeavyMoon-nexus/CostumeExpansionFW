@@ -281,6 +281,40 @@ namespace CostumeFW::SmfUI
         }
 
         // Selected-content editor (right-panel twin of the MCM box page).
+        // "Item data" fold: per-content passthrough toggles. a_full = box
+        // contents (all three channels); persist gets enchant only - weight and
+        // armor ride the TOKEN, which the persist class does not have.
+        void RenderItemDataFold(const std::string& a_id, const std::string& a_uiKey, bool a_full)
+        {
+            if (!ImGui::CollapsingHeader(std::format("Item data##itd{}", a_uiKey).c_str())) {
+                return;
+            }
+            ImGui::TextDisabled("%s", ContentStatsSummary(a_id).c_str());
+            bool en = StatEnchantOn(a_id);
+            if (ImGui::Checkbox(std::format("Enchantments##ien{}", a_uiKey).c_str(), &en)) {
+                const std::string id = a_id;
+                const bool v = en;
+                SKSE::GetTaskInterface()->AddTask([id, v] { SetStatEnchantOn(id, v); });
+            }
+            if (a_full) {
+                bool wt = StatWeightOn(a_id);
+                if (ImGui::Checkbox(std::format("Weight##iwt{}", a_uiKey).c_str(), &wt)) {
+                    const std::string id = a_id;
+                    const bool v = wt;
+                    SKSE::GetTaskInterface()->AddTask([id, v] { SetStatWeightOn(id, v); });
+                }
+                bool ar = StatArmorOn(a_id);
+                if (ImGui::Checkbox(std::format("Armor rating##iar{}", a_uiKey).c_str(), &ar)) {
+                    const std::string id = a_id;
+                    const bool v = ar;
+                    SKSE::GetTaskInterface()->AddTask([id, v] { SetStatArmorOn(id, v); });
+                }
+            } else {
+                ImGui::TextDisabled(
+                    "Weight/armor don't apply: persist has no token to carry them.");
+            }
+        }
+
         void RenderContentDetail(const std::string& a_token, int a_slot, const std::string& a_id)
         {
             ImGui::SeparatorText(ItemDisplayName(a_id).c_str());
@@ -326,6 +360,8 @@ namespace CostumeFW::SmfUI
                     s_status = "Show real body ON - pair with Hide shapes on the costume's body (doubles if your body already shows)";
                 }
             }
+
+            RenderItemDataFold(a_id, std::format("b{}", a_slot), true);
 
             if (ImGui::Button(std::format("Remove from box##rm{}", a_slot).c_str())) {
                 const std::string token = a_token;
@@ -465,8 +501,9 @@ namespace CostumeFW::SmfUI
                 const bool worn = BoxWornAt(i);
                 // "###" id keyed by SLOT (stable): a deletion shifting box indices
                 // must not re-target open tree nodes (the MCM's ROOT I analog).
+                const std::string headTitle = b.label.empty() ? SlotName(slot) : b.label;
                 const std::string header = std::format("Box {}: {} - {} item(s){}###cfwbox{}",
-                    slot, SlotName(slot), b.contents.size(), worn ? "  [WORN]" : "", slot);
+                    slot, headTitle, b.contents.size(), worn ? "  [WORN]" : "", slot);
                 if (!ImGui::TreeNode(header.c_str())) {
                     continue;
                 }
@@ -539,6 +576,26 @@ namespace CostumeFW::SmfUI
                     s_exportName[0] != '\0') {
                     const std::string file = UiOps::ExportPreset(token, s_exportName);
                     s_status = file.empty() ? "export failed (see log)" : ("exported " + file);
+                }
+
+                // Rename (Nexus request): the label follows into the token's
+                // inventory name, so the item reads as the outfit it holds.
+                static char s_boxLabel[64] = {};
+                static std::string s_boxLabelFor;
+                if (s_boxLabelFor != token) {
+                    std::snprintf(s_boxLabel, sizeof(s_boxLabel), "%s", b.label.c_str());
+                    s_boxLabelFor = token;
+                }
+                ImGui::InputText(std::format("##bxl{}", slot).c_str(), s_boxLabel,
+                    sizeof(s_boxLabel));
+                ImGui::SameLine();
+                if (ImGui::Button(std::format("Rename##bxlb{}", slot).c_str()) &&
+                    s_boxLabel[0] != '\0') {
+                    const std::string label = s_boxLabel;
+                    SKSE::GetTaskInterface()->AddTask([token, label] {
+                        SetBoxLabel(token, label);
+                    });
+                    s_status = "box renamed (inventory name follows)";
                 }
 
                 ImGui::Text("Stats: %s", BoxStatsSummary(i).c_str());
@@ -780,6 +837,7 @@ namespace CostumeFW::SmfUI
                 if (ImGui::Button(std::format("Apply##phb{}", id).c_str())) {
                     UiOps::SetHideSlotsStr(id, s_hideSlots);
                 }
+                RenderItemDataFold(id, std::format("p{}", id), false);
                 if (ImGui::Button(std::format("Remove from catalog##prm{}", id).c_str())) {
                     // MCM custody (P1 2026-07-07): fabricate fallback only for an
                     // entry THIS save displays; pair the return with deactivation.

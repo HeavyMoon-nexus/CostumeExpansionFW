@@ -92,6 +92,9 @@ namespace CostumeFW
     bool SetStatWeightOn(const std::string& a_id, bool a_on);
     bool StatArmorOn(const std::string& a_id);
     bool SetStatArmorOn(const std::string& a_id, bool a_on);
+    // Read-only one-liner of a content's captured values ("Fortify X 25 |
+    // Weight 8.0 | Armor 26") for the Item-data fold.
+    std::string ContentStatsSummary(const std::string& a_id);
 
     // --- Show the player's real body under this content (per content) --------
     // Opt-in (default off). Pairs with HideShapes: after dropping a costume's own

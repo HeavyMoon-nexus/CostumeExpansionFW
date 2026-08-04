@@ -459,6 +459,7 @@ namespace CostumeFW
 
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
+        void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
@@ -1779,6 +1780,7 @@ namespace CostumeFW
                 RegisterBoxById(c, b.token);
             }
             SetTokenStats(b);  // token fields revert on load - re-apply
+            ApplyBoxLabelToToken(b);  // inventory name too (rename feature)
         }
         // Persist actives are per-save: the co-save restore (which precedes this
         // kPostLoadGame pass) already re-registered them (M2, CEF_STATE_SCOPE.md §3).
@@ -3932,8 +3934,60 @@ namespace CostumeFW
         return true;
     }
 
+    std::string ContentStatsSummary(const std::string& a_id)
+    {
+        // Raw captured values (pre-toggle) so the user can see what each
+        // switch is worth: "Fortify Destruction 25 | Weight 8.0 | Armor 26".
+        StoreLock lk;
+        auto* armo = ResolveArmo(a_id);
+        if (!armo) {
+            return "(unresolved)";
+        }
+        std::string enchants;
+        const auto appendEffect = [&enchants](RE::EffectSetting* a_mgef, float a_mag) {
+            if (!a_mgef) {
+                return;
+            }
+            auto* full = a_mgef->As<RE::TESFullName>();
+            const char* nm = full ? full->GetFullName() : nullptr;
+            if (!enchants.empty()) {
+                enchants += ", ";
+            }
+            enchants += std::format("{} {:.0f}", (nm && *nm) ? nm : "effect", a_mag);
+        };
+        if (const auto snap = g_contentEnchants.find(a_id);
+            snap != g_contentEnchants.end() && !snap->second.empty()) {
+            for (const auto& e : snap->second) {
+                appendEffect(ResolveMgef(e.mgef), e.magnitude);
+            }
+        } else if (auto* ench = armo->formEnchanting) {
+            for (auto* e : ench->effects) {
+                if (e) {
+                    appendEffect(e->baseEffect, e->effectItem.magnitude);
+                }
+            }
+        }
+        return std::format("{} | Weight {:.1f} | Armor {:.0f}",
+            enchants.empty() ? "No enchantment" : enchants,
+            armo->weight, armo->GetArmorRating());
+    }
+
     namespace
     {
+        // Stamp the box label onto the token's inventory name (same volatile
+        // form-edit lifetime as armorRating/keyword passthrough: re-applied on
+        // every settings load). Empty label falls back to the ESP default.
+        void ApplyBoxLabelToToken(const BoxDefInfo& a_box)
+        {
+            auto* token = ResolveArmo(a_box.token);
+            if (!token) {
+                return;
+            }
+            if (!a_box.label.empty()) {
+                token->fullName = a_box.label.c_str();
+            }
+        }
+
         // Re-flow a changed item-data toggle through the existing contents-change
         // machinery: ability rebuild for the holder + token stats + re-apply.
         void ReapplyStatsForContent(const std::string& a_id)
@@ -4021,6 +4075,7 @@ namespace CostumeFW
             return false;
         }
         g_boxes[idx].label = a_label;
+        ApplyBoxLabelToToken(g_boxes[idx]);  // inventory name follows the label
         WriteJson();
         return true;
     }
