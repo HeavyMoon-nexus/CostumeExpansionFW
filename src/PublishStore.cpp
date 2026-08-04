@@ -691,7 +691,18 @@ namespace CostumeFW
             for (const auto& handle : wearers) {
                 auto ref = handle.get();
                 auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
-                if (actor && !actor->GetWornArmor(token->GetFormID()))
+                if (!actor) continue;
+                // The 750ms window is a real gap: a Recall/Unpublish that ran in
+                // between already stripped this actor - re-equipping would undo
+                // it (merge review 2026-08-04). Only re-equip a still-live wearer
+                // binding.
+                const bool stillBound = std::any_of(g_bindings.begin(), g_bindings.end(),
+                    [&](const PubBinding& b) {
+                        return b.pubSlot == a_slot && b.wearer &&
+                               b.actorFormID == actor->GetFormID();
+                    });
+                if (!stillBound) continue;
+                if (!actor->GetWornArmor(token->GetFormID()))
                     equip->EquipObject(actor, token, nullptr, 1, nullptr, true, false, false);
             }
         });
@@ -721,9 +732,16 @@ namespace CostumeFW
         RunAfterDelayMs(750, [handle, slot] {
             auto ref = handle.get();
             auto* actor = ref ? ref.get()->As<RE::Actor>() : nullptr;
+            if (!actor) return;
+            // The 750ms window is a real gap: RemoveNpcPersist/UninstallNpcCleanup
+            // may have erased the assignment (and stripped the token) in between -
+            // re-adding the carrier would dress a de-assigned NPC, and worse, the
+            // pool slot can be re-baked for ANOTHER actor later (merge review
+            // 2026-08-04). Re-verify the assignment is still alive.
+            if (!FindNpr(actor->GetFormID(), slot)) return;
             auto* token = NprTokenArmo(slot);
             auto* equip = RE::ActorEquipManager::GetSingleton();
-            if (!actor || !token || !equip) return;
+            if (!token || !equip) return;
             if (!ActorHasItem(actor, token))
                 actor->AddObjectToContainer(token, nullptr, 1, nullptr);
             if (!actor->GetWornArmor(token->GetFormID()))

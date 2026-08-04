@@ -675,7 +675,7 @@ namespace CostumeFW
         std::atomic<int> g_rebindRetryBudget{ 0 };
         std::atomic<bool> g_rebindRetryQueued{ false };
         bool g_inRebindRetry = false;          // main-thread only (tasks + Reconcile)
-        bool g_injectStatic3p = false;         // set by RebindGeometry, read by InjectInternal
+        bool g_injectStatic3p = false;         // set by RebindGeometry, read by InjectFor
         std::vector<std::string> g_rebindRetryIds;  // items to detach+re-inject on retry
 
         // Per-content carrier bone prefix of the item currently being injected
@@ -683,7 +683,7 @@ namespace CostumeFW
         // a multi-content carrier's copy of this content's custom bones is
         // "C<fnv1a32>_<bone>", so the FSMP-renamed lookup must try the prefixed
         // name first, then the plain one (single-content carriers stay plain).
-        // Set by InjectInternal, read by RebindGeometry. Main thread only.
+        // Set by InjectFor, read by RebindGeometry. Main thread only.
         std::string g_rebindPrefix;
 
         // --- persist head-rebuild debounce + diagnostics (Codex Phase 2) -------
@@ -777,7 +777,7 @@ namespace CostumeFW
             // growing to 7 items, each round a full detach + NIF load + clone +
             // rebind + reattach. Permanent scene-graph churn for work that cannot
             // succeed. g_staticDiagReported is cleared the moment the item binds
-            // physics again (InjectInternal), so a carrier rebuild or a 3D rebuild
+            // physics again (InjectFor), so a carrier rebuild or a 3D rebuild
             // still re-arms it - this parks the hopeless case, it does not give up
             // on a recoverable one.
             if (g_staticDiagReported.contains(a_id)) {

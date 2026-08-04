@@ -1054,19 +1054,19 @@ namespace CostumeFW::SmfUI
                 }
                 ImGui::SameLine();
                 if (!ImGui::TreeNode(title.c_str())) continue;
-                if (ImGui::Button(std::format("Refresh##npr{}", snap.pubSlot).c_str())) {
+                if (ImGui::Button(std::format("Refresh##npref{}", snap.pubSlot).c_str())) {
                     const int slot = snap.pubSlot;
                     SKSE::GetTaskInterface()->AddTask([slot] { RefreshPubWearers(slot); });
                 }
                 ImGui::SameLine();
                 const auto recallPopup = std::format("Recall published costume?###npr{}", snap.pubSlot);
-                if (ImGui::Button(std::format("Recall##npr{}", snap.pubSlot).c_str()))
+                if (ImGui::Button(std::format("Recall##nprec{}", snap.pubSlot).c_str()))
                     ImGui::OpenPopup(recallPopup.c_str());
                 ImGui::SameLine();
                 const bool canUnpublish = npcHolders == 0 && unresolved == 0;
                 const auto unpublishPopup = std::format("Unpublish costume?###npu{}", snap.pubSlot);
                 ImGui::BeginDisabled(!canUnpublish);
-                if (ImGui::Button(std::format("Unpublish##npu{}", snap.pubSlot).c_str()))
+                if (ImGui::Button(std::format("Unpublish##npunp{}", snap.pubSlot).c_str()))
                     ImGui::OpenPopup(unpublishPopup.c_str());
                 ImGui::EndDisabled();
                 if (!canUnpublish)
@@ -1154,18 +1154,37 @@ namespace CostumeFW::SmfUI
             }
             ImGui::Separator();
 
-            // Snapshot once per open/click, not per frame - DiagLines() walks the
-            // whole store and the render callback fires every frame.
+            // Snapshot once per open/click, not per frame - and ON THE MAIN
+            // THREAD: DiagLines() now includes NpcDiagLines(), which walks the
+            // lock-free PublishStore vectors, so running it on the render thread
+            // raced the task pump (merge review 2026-08-04; same class the NPC
+            // page cache fixed).
+            static std::mutex s_linesMutex;
             static std::vector<std::string> s_lines;
-            static bool s_loaded = false;
-            if (ImGui::Button("Refresh##cfwdiag") || !s_loaded) {
-                s_lines = DiagLines();
-                s_loaded = true;
+            static std::atomic<bool> s_linesPending{ false };
+            static bool s_requested = false;
+            if (ImGui::Button("Refresh##cfwdiag") || !s_requested) {
+                s_requested = true;
+                if (!s_linesPending.exchange(true)) {
+                    SKSE::GetTaskInterface()->AddTask([] {
+                        auto lines = DiagLines();
+                        {
+                            std::scoped_lock lk(s_linesMutex);
+                            s_lines = std::move(lines);
+                        }
+                        s_linesPending.store(false);
+                    });
+                }
+            }
+            std::vector<std::string> linesView;
+            {
+                std::scoped_lock lk(s_linesMutex);
+                linesView = s_lines;
             }
             // Grows with the store (one line per box content / persist entry) -
             // the report's "can't reach the bottom" applies here too.
             BeginScrollList("##cfwdiaglist");
-            for (const auto& l : s_lines) {
+            for (const auto& l : linesView) {
                 if (l.rfind("# ", 0) == 0) {
                     ImGui::SeparatorText(l.c_str() + 2);
                 } else {
