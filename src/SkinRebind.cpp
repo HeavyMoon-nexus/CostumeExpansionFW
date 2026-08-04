@@ -21,6 +21,9 @@
 #include "RE/A/ActorValues.h"
 #include "RE/B/BSFadeNode.h"
 #include "RE/B/BipedAnim.h"
+#include "RE/P/ProcessLists.h"
+#include "RE/S/ShaderReferenceEffect.h"
+#include "RE/T/TESEffectShader.h"
 #include "RE/B/BSDismemberSkinInstance.h"
 #include "RE/M/Misc.h"  // RE::DebugNotification (quarantine parking notice)
 #include "RE/N/NiNode.h"
@@ -3036,11 +3039,17 @@ namespace CostumeFW
                     }
                     const bool refr = (flags & (1ull << 15)) != 0;      // kRefraction
                     const bool tmpRefr = (flags & (1ull << 2)) != 0;    // kTempRefraction
+                    // fadeNode + effectData are the audit's two unverified
+                    // channels: SetEffectShaderData is the engine's own
+                    // per-geometry link to an active TESEffectShader, and the
+                    // first capture proved alpha/flags never move.
+                    const void* fadeNodePtr = prop ? prop->fadeNode : nullptr;
+                    const void* effectDataPtr = prop ? prop->effectData.get() : nullptr;
                     out.push_back(std::format(
                         "  [{}] '{}' shader={} propAlpha={:.3f} matAlpha={:.3f} "
-                        "refr={} tmpRefr={} flags={:#018x}",
+                        "refr={} tmpRefr={} fadeNode={} effectData={} flags={:#018x}",
                         a_tag, a_geom->name.c_str(), type, propAlpha, matAlpha,
-                        refr ? 1 : 0, tmpRefr ? 1 : 0, flags));
+                        refr ? 1 : 0, tmpRefr ? 1 : 0, fadeNodePtr, effectDataPtr, flags));
                     ++n;
                     return RE::BSVisit::BSVisitControl::kContinue;
                 });
@@ -3066,6 +3075,30 @@ namespace CostumeFW
             out.push_back(
                 "# Normal equip: NOTHING worn - equip one normal armor piece so the "
                 "diag has an engine-side reference");
+        }
+        // Active shader effects targeting the player: the suspected channel.
+        // Correlate each effect's BSEffectShaderData pointer with the
+        // per-geometry effectData column above.
+        out.push_back("# Active ShaderReferenceEffects on the player");
+        if (auto* lists = RE::ProcessLists::GetSingleton()) {
+            int found = 0;
+            lists->ForEachShaderEffect([&](RE::ShaderReferenceEffect& a_effect) {
+                auto targetRef = a_effect.target.get();
+                if (targetRef && targetRef.get() == player) {
+                    const auto* shader = a_effect.effectData;
+                    out.push_back(std::format(
+                        " effect: efsh={:08X} shaderData={} finished={} targetRoot={}",
+                        shader ? shader->GetFormID() : 0,
+                        static_cast<const void*>(a_effect.effectShaderData),
+                        a_effect.finished ? 1 : 0,
+                        static_cast<const void*>(a_effect.targetRoot.get())));
+                    ++found;
+                }
+                return RE::BSContainer::ForEachResult::kContinue;
+            });
+            if (!found) {
+                out.push_back(" (none)");
+            }
         }
         out.push_back("# CEF injected holders");
         bool any = false;
