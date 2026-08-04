@@ -134,6 +134,17 @@ Save, then remove the mod.
 - Content must be weighted to bones present on your live skeleton (standard XPMSSE). Content
   built for a different/extended skeleton may show parts statically (logged as a remap).
 
+## Non-English text in the menu
+
+CEF guarantees valid UTF-8 for every string it shows, but the glyphs come
+from SKSE Menu Framework's own font. If item names in your language render
+as "?", install a font that covers your language into
+`SKSE Menu Framework/SKSE/Plugins/fonts/`, point `PrimaryFont` at it in
+`SKSEMenuFramework.ini`, and enable the language under `[Fonts]`. Enable
+ONLY the language you play in - all CJK ranges at once can exceed the GPU
+texture limit and crash on startup. This is SMF-side configuration; CEF
+does not bundle fonts.
+
 ## Mod compatibility
 
 - **Strip / unequip mods** work automatically: a box hides when its token is unequipped.

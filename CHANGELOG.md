@@ -1,5 +1,80 @@
 # Changelog
 
+## v1.6.0 (2026-08-05)
+
+### Added
+
+- **NPC support is out of beta.** Dress NPCs two ways, both driven from the
+  new SMF "NPC" page:
+  - **Publish**: freeze a box into a wearable costume token and hand it to
+    any NPC through normal gameplay (gift menus, follower managers). CEF
+    tracks wearers and re-applies across saves; recall/unpublish any time.
+  - **NPC persist**: assign costumes to a specific NPC (crosshair-targeted).
+    Per-NPC content checklists let you pick items from the shared Persist
+    catalog **or straight from your inventory** (reference-only - the item
+    stays in your bags), edit an assignment in place, and re-equip the
+    carrier with a Refresh button until physics converge.
+  - Console: `cef pub ...` / `cef npcpersist ...` for scripting/testing.
+  - Requires the separate **CostumeFW_NPC.esp add-on package** (ships
+    alongside this release; ESL-flagged, Skyrim.esm-only). Without it, CEF
+    runs exactly as before and the NPC page shows an install notice.
+- **"Item data" switches** (Nexus request): every captured item gets
+  per-item ON/OFF switches for its **enchantments, weight, and armor
+  rating** under a collapsible "Item data" section - drop an outfit's
+  enchantment and keep the look. Defaults ON (nothing changes until you
+  touch them), fully reversible, and the readout shows what each switch is
+  worth. Persist entries show the enchantment switch only (weight/armor
+  never applied there to begin with).
+- **Box renaming** (Nexus request): rename any box; the name follows into
+  the token in your inventory, so it reads as the outfit it holds instead
+  of a slot number.
+- **CJK-safe menu text**: item/NPC names in legacy ANSI-codepage plugins
+  (Japanese cp932, Chinese cp936, ...) no longer render as "????" - CEF now
+  guarantees UTF-8 at every string it feeds the menu. NOTE: glyphs
+  themselves come from SKSE Menu Framework's own font - if your language
+  still shows "?", install a font covering it into SMF's fonts folder and
+  enable the language in SKSEMenuFramework.ini (enable ONLY the language
+  you play in: all CJK ranges at once can exceed the GPU texture limit and
+  crash on startup).
+- `cef invisdiag`: diagnostic dump comparing engine-equipped gear and
+  CEF-displayed pieces under invisibility (verified: invisibility already
+  propagates to CEF costumes - kept as a permanent triage tool).
+
+### Fixed
+
+- The NPC addon esp now carries the same 23-race armor-addon list as the
+  v1.5.2 core fix - publish/persist carriers were silently physics-dead on
+  Elder and ArmorRace-proxy custom races (custom-race followers!).
+- NPC persist refused every standard catalog capture (it only accepted
+  raw armor-addon ids) - completely silent failure.
+- The NPC page Refresh button was a silent no-op (the unequip+equip pair
+  coalesced inside one frame); it now cycles across frames, and npc-persist
+  gained its own Refresh (there was NO manual physics-convergence driver).
+- The player's hide-when-worn rules no longer apply to NPC persist
+  costumes - an NPC's own AI-equipped gear (e.g. a follower whose default
+  outfit is its own wig) could silently hide CEF content.
+- The 8-NPC display budget no longer counts unloaded/dead actors - the 9th
+  NPC went silently undressed with zero dressed NPCs on screen.
+- Ability spells: no longer re-granted by cell re-attach while the master
+  switch is off, and no longer touched at all if the NPC addon esp was
+  removed mid-save.
+- "Prepare for uninstall" now also recalls published costumes and strips
+  every npc-persist assignment - NPCs no longer stay dressed into a save
+  of a mod you are deleting.
+- `cef npcpersist` could never see the console-selected NPC on 1.6.1170
+  (a CommonLib raw-offset miss); it now uses the engine-passed reference.
+- Two render-thread races (the NPC page and the Diagnostics readout
+  deep-copying live state while the game mutates it) - both now snapshot
+  on the main thread.
+
+### Notes
+
+- **v1.4.0-beta.1 testers**: this release supersedes the beta - update
+  core AND the NPC addon (the addon esp changed; FormIDs are unchanged, so
+  existing saves and assignments are safe).
+- VR: the VR patch ships as before; the NPC page needs SMF's VR helper or
+  the console fallbacks.
+
 ## v1.5.2 (2026-08-02)
 
 ### Changed
