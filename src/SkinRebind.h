@@ -140,6 +140,12 @@ namespace CostumeFW
     // Must be called on the main thread.
     bool HasActorBindings(RE::Actor* a_actor);
     void ReconcileActorByHandle(RE::ActorHandle a_handle);
+    // Invisibility-propagation diagnostic (audit section 6): one-shot state
+    // dump comparing engine-equipped biped parts against CEF holders (shader /
+    // material alpha, refraction flags, fade node). Run per invisibility stage.
+    // Main thread only.
+    std::vector<std::string> InvisDiag();
+
     // Lock-free "any NPC has registered content" gate, safe from any thread
     // (the Load3D thunk runs on the background loading thread). A queued task
     // must still re-verify the specific actor on the main thread.

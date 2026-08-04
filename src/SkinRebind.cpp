@@ -18,6 +18,9 @@
 #include "RE/B/BSShaderProperty.h"
 #include "RE/B/BSTextureSet.h"
 #include "RE/B/BSVisit.h"
+#include "RE/A/ActorValues.h"
+#include "RE/B/BSFadeNode.h"
+#include "RE/B/BipedAnim.h"
 #include "RE/B/BSDismemberSkinInstance.h"
 #include "RE/M/Misc.h"  // RE::DebugNotification (quarantine parking notice)
 #include "RE/N/NiNode.h"
@@ -2969,6 +2972,127 @@ namespace CostumeFW
     // trigger: a hopeless item (carrier truly boneless) re-parks after its 4
     // tries, so this cannot recreate the 2026-07-28 endless-retry churn
     // (35 rounds/2.5min) that the park exists to prevent.
+    std::vector<std::string> InvisDiag()
+    {
+        // One-shot comparison for the invisibility-propagation work
+        // (CEF_Invisibility_Propagation_Audit.md section 6): the user runs this
+        // BEFORE invisibility, DURING the fade, at FULL invisibility and AFTER
+        // dispel; diffing the reference (engine-equipped biped parts, reached
+        // through the biped RECORDS - no skeleton search) against the CEF
+        // holders tells us which channel the engine actually uses (shader
+        // alpha / material alpha / refraction flags / fade node) and therefore
+        // which sync strategy to implement. Read-only; user-initiated.
+        StoreLock lk;
+        std::vector<std::string> out;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            return out;
+        }
+        {
+            int q = QuarantineSweep();  // containment first, as everywhere
+            if (q > 0) {
+                out.push_back(std::format("(quarantined {} broken holder(s) first)", q));
+            }
+        }
+        const float invisAV = player->AsActorValueOwner()->GetActorValue(
+            RE::ActorValue::kInvisibility);
+        out.push_back(std::format("# Actor  invisibilityAV={:.2f}", invisAV));
+        for (int fp = 0; fp <= 1; ++fp) {
+            auto* root = player->Get3D(fp != 0);
+            auto* fade = root ? root->AsFadeNode() : nullptr;
+            out.push_back(std::format("root {} : fadeNode={} currentFade={:.3f}",
+                fp ? "1p" : "3p", fade ? "yes" : "no",
+                fade ? fade->GetRuntimeData().currentFade : -1.0f));
+        }
+        const auto describeGeoms = [&out](RE::NiAVObject* a_sub, const char* a_tag, int a_max) {
+            if (!a_sub) {
+                return;
+            }
+            int n = 0;
+            RE::BSVisit::TraverseScenegraphGeometries(a_sub,
+                [&](RE::BSGeometry* a_geom) {
+                    if (n >= a_max) {
+                        return RE::BSVisit::BSVisitControl::kStop;
+                    }
+                    auto& rt = a_geom->GetGeometryRuntimeData();
+                    auto* prop = ::netimmerse_cast<RE::BSShaderProperty*>(
+                        rt.properties[RE::BSGeometry::States::kEffect].get());
+                    float propAlpha = -1.0f;
+                    float matAlpha = -1.0f;
+                    std::uint64_t flags = 0;
+                    const char* type = "none";
+                    if (prop) {
+                        propAlpha = prop->alpha;
+                        flags = prop->flags.underlying();
+                        if (auto* ls = ::netimmerse_cast<RE::BSLightingShaderProperty*>(prop)) {
+                            type = "lighting";
+                            if (ls->material) {
+                                matAlpha = static_cast<RE::BSLightingShaderMaterialBase*>(
+                                    ls->material)->materialAlpha;
+                            }
+                        } else {
+                            type = "other";
+                        }
+                    }
+                    const bool refr = (flags & (1ull << 15)) != 0;      // kRefraction
+                    const bool tmpRefr = (flags & (1ull << 2)) != 0;    // kTempRefraction
+                    out.push_back(std::format(
+                        "  [{}] '{}' shader={} propAlpha={:.3f} matAlpha={:.3f} "
+                        "refr={} tmpRefr={} flags={:#018x}",
+                        a_tag, a_geom->name.c_str(), type, propAlpha, matAlpha,
+                        refr ? 1 : 0, tmpRefr ? 1 : 0, flags));
+                    ++n;
+                    return RE::BSVisit::BSVisitControl::kContinue;
+                });
+        };
+        // Reference: engine-equipped parts via the biped RECORDS (partClone),
+        // never a skeleton search.
+        constexpr std::size_t kBipedTotal = 42;  // BIPED_OBJECTS::kTotal
+        const auto& biped = player->GetBiped1(false);
+        int shown = 0;
+        if (biped) {
+            out.push_back("# Normal equip (biped partClone, reference)");
+            for (std::size_t i = 0; i < kBipedTotal && shown < 3; ++i) {
+                const auto& part = biped->objects[i].partClone;
+                if (!part) {
+                    continue;
+                }
+                out.push_back(std::format(" biped[{}] '{}':", i, part->name.c_str()));
+                describeGeoms(part.get(), "equip", 4);
+                ++shown;
+            }
+        }
+        if (!shown) {
+            out.push_back(
+                "# Normal equip: NOTHING worn - equip one normal armor piece so the "
+                "diag has an engine-side reference");
+        }
+        out.push_back("# CEF injected holders");
+        bool any = false;
+        for (auto& state : g_actors) {
+            auto* actor = ResolveActor(state);
+            const char* who = state.isPlayer ? "player" :
+                (actor && actor->GetName() && *actor->GetName() ? actor->GetName() : "npc");
+            for (auto& it : state.items) {
+                if (!it.holder3p) {
+                    continue;
+                }
+                any = true;
+                out.push_back(std::format(" holder '{}' ({}):", it.id, who));
+                describeGeoms(it.holder3p.get(), "cef", 6);
+            }
+            if (state.realBodyHolder3p) {
+                any = true;
+                out.push_back(std::format(" holder realbody ({}):", who));
+                describeGeoms(state.realBodyHolder3p.get(), "cef", 4);
+            }
+        }
+        if (!any) {
+            out.push_back(" (no CEF holders attached - show a box/persist item first)");
+        }
+        return out;
+    }
+
     void RearmStaticBinds(const char* a_reason)
     {
         StoreLock lk;

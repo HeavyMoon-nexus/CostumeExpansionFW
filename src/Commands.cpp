@@ -117,7 +117,8 @@ namespace CostumeFW
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | repair | persist | "
-                  "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | slottest");
+                  "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
+                  "slottest | invisdiag");
             return;
         }
 
@@ -502,6 +503,23 @@ namespace CostumeFW
                 else if (op == "recall")
                     SKSE::GetTaskInterface()->AddTask([slot] { RecallPublished(slot); });
             }
+        } else if (sub == "invisdiag") {
+            // Invisibility-propagation groundwork: run once per stage
+            // (before / fading / fully invisible / after dispel), then read the
+            // log. Prints to console AND log so either can be pasted.
+            SKSE::GetTaskInterface()->AddTask([] {
+                const auto lines = InvisDiag();
+                SKSE::log::info("--- cef invisdiag ---");
+                for (const auto& l : lines) {
+                    SKSE::log::info("  {}", l);
+                }
+                if (auto* c = RE::ConsoleLog::GetSingleton()) {
+                    c->Print("[CEF] invisdiag (also in the log):");
+                    for (const auto& l : lines) {
+                        c->Print(("  " + l).c_str());
+                    }
+                }
+            });
         } else if (sub == "recover") {
             // Deliberate escape hatch for the STORE-ONLY return rule: the MCM
             // return flows never fabricate an item (a store miss on this save
@@ -519,7 +537,8 @@ namespace CostumeFW
             });
         } else {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | repair | persist | "
-                  "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | slottest");
+                  "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
+                  "slottest | invisdiag");
         }
     }
 }
