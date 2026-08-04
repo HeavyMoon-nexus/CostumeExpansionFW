@@ -247,8 +247,26 @@ namespace CostumeFW
                 return false;
             bool any = false;
             for (const auto& id : a_assignment.contents) {
+                // Freeze the per-content settings at registration instead of the
+                // null-settings live fallback (NPC_AUDIT_2026-08-03 H2). Two
+                // reasons: (1) predictability - a later live-settings edit no
+                // longer silently restyles an already-dressed NPC mid-session;
+                // (2) hide-when-worn is deliberately NOT carried over: it is a
+                // player-equipment feature ("hide my nails under my boots"), and
+                // evaluating the player's hide rules against an NPC's AI-driven
+                // outfit made content vanish for no visible reason - the prime
+                // suspect for the owner-observed wig auto-unequip (a follower
+                // whose DefaultOutfit IS its own slot-31 wig re-equips it on
+                // every outfit re-evaluation, which would hide a slot-31-gated
+                // CEF wig on the next Reconcile).
+                auto settings = std::make_shared<ContentSettings>();
+                settings->genderMode = GenderModeFor(id);
+                settings->bodyMorph = BodyMorphOn(id);
+                const auto hideShapes = HideShapesFor(id);
+                settings->hideShapes.insert(hideShapes.begin(), hideShapes.end());
+                settings->showRealBody = ShowRealBodyOn(id);
                 any |= RegisterActorContent(a_actor, id, NprTokenId(a_assignment.poolSlot),
-                    token->GetFormID(), {});
+                    token->GetFormID(), std::move(settings));
             }
             return any;
         }
