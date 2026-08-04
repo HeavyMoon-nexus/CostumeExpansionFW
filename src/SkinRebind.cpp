@@ -121,6 +121,23 @@ namespace CostumeFW
         };
         std::vector<ActorState> g_actors;
 
+        // Lock-free mirror of "any non-player state tracks items" for the
+        // Character::Load3D thunk (background loading thread; M11). The queued
+        // task re-verifies through FindState on the main thread.
+        std::atomic<bool> g_anyNpcBindings{ false };
+
+        void RefreshNpcBindingsGate()
+        {
+            bool any = false;
+            for (const auto& state : g_actors) {
+                if (!state.isPlayer && !state.items.empty()) {
+                    any = true;
+                    break;
+                }
+            }
+            g_anyNpcBindings.store(any, std::memory_order_relaxed);
+        }
+
         ActorState& PlayerState()
         {
             if (g_actors.empty()) {
@@ -2399,6 +2416,7 @@ namespace CostumeFW
             const auto ref = a_state.handle.get();
             return !ref || !ref.get()->As<RE::Actor>();
         });
+        RefreshNpcBindingsGate();
     }
 
     void Reconcile()
@@ -2448,6 +2466,11 @@ namespace CostumeFW
         return state && !state->items.empty();
     }
 
+    bool AnyActorBindings()
+    {
+        return g_anyNpcBindings.load(std::memory_order_relaxed);
+    }
+
     bool RegisterActorContent(RE::Actor* a_actor, const std::string& a_contentId,
         const std::string& a_tokenId, std::uint32_t a_tokenForm,
         std::shared_ptr<const ContentSettings> a_settings)
@@ -2476,6 +2499,7 @@ namespace CostumeFW
         for (auto& item : state->items) {
             if (item.id == id) item.settings = std::move(a_settings);
         }
+        RefreshNpcBindingsGate();
         return true;
     }
 
@@ -2491,6 +2515,7 @@ namespace CostumeFW
             DetachNodes(*state, id);
             Unregister(*state, id);
         }
+        RefreshNpcBindingsGate();
     }
 
     void RemoveActorContent(RE::Actor* a_actor, const std::string& a_contentId)
@@ -2499,6 +2524,7 @@ namespace CostumeFW
         if (!state) return;
         DetachNodes(*state, a_contentId);
         Unregister(*state, a_contentId);
+        RefreshNpcBindingsGate();
     }
 
     std::size_t InjectedNpcCount()
@@ -3772,6 +3798,7 @@ namespace CostumeFW
         // player would never reconcile again). Force the invariant either way.
         g_actors[0].isPlayer = true;
         g_actors[0].handle = {};
+        RefreshNpcBindingsGate();
         // Fresh scene, fresh slate: stale baselines can't match anything, and a
         // poison-park is a per-scene verdict (the stomping neighbor may be gone).
         g_holderArrayBaseline.clear();

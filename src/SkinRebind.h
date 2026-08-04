@@ -140,6 +140,10 @@ namespace CostumeFW
     // Must be called on the main thread.
     bool HasActorBindings(RE::Actor* a_actor);
     void ReconcileActorByHandle(RE::ActorHandle a_handle);
+    // Lock-free "any NPC has registered content" gate, safe from any thread
+    // (the Load3D thunk runs on the background loading thread). A queued task
+    // must still re-verify the specific actor on the main thread.
+    bool AnyActorBindings();
 
     // Immutable per-item settings used by published snapshots. Null means the
     // live global content settings are followed.

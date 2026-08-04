@@ -98,7 +98,11 @@ namespace
                 const auto npcHandle = a_this->GetHandle();
                 SKSE::GetTaskInterface()->AddTask([npcHandle] { CostumeFW::OnNpcActorLoaded(npcHandle); });
             }
-            if (CostumeFW::HasActorBindings(a_this)) {
+            // Atomic gate only on this (possibly background-loading) thread:
+            // walking the registry here raced the main thread's mutations
+            // (NPC_AUDIT_2026-08-03 M11). ReconcileActorByHandle re-verifies the
+            // actor on the main thread and no-ops for unknown handles.
+            if (CostumeFW::AnyActorBindings()) {
                 const auto handle = a_this->GetHandle();
                 SKSE::GetTaskInterface()->AddTask(
                     [handle] { CostumeFW::ReconcileActorByHandle(handle); });

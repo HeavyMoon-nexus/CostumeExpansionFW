@@ -10,6 +10,8 @@
 #include "RE/S/SpellItem.h"
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+
 namespace CostumeFW
 {
     namespace
@@ -34,6 +36,17 @@ namespace CostumeFW
         std::unordered_map<int, bool> g_hidden;
         std::vector<NprAssignmentInfo> g_nprAssignments;
         std::vector<NprSaveAssignment> g_unresolvedNpr;
+        // Lock-free mirror of !g_nprAssignments.empty() for the Character::Load3D
+        // thunk, which can run on the background loading thread while the main
+        // thread mutates the vector (NPC_AUDIT_2026-08-03 M11). Refreshed after
+        // every mutation; the queued task re-checks the real state on the main
+        // thread, so a stale read only costs one no-op task.
+        std::atomic<bool> g_nprGate{ false };
+
+        void RefreshNprGate()
+        {
+            g_nprGate.store(!g_nprAssignments.empty(), std::memory_order_relaxed);
+        }
         std::unordered_set<RE::FormID> g_pubForms;
         std::unordered_set<RE::FormID> g_nprForms;
         int g_maxNpcInjected = 8;
@@ -796,6 +809,7 @@ namespace CostumeFW
         auto* equip = RE::ActorEquipManager::GetSingleton();
         if (!token || !equip) return false;
         g_nprAssignments.push_back(std::move(item));
+        RefreshNprGate();
         auto& saved = g_nprAssignments.back();
         if (!ActorHasItem(a_actor, token))
             a_actor->AddObjectToContainer(token, nullptr, 1, nullptr);
@@ -817,6 +831,7 @@ namespace CostumeFW
         const int slot = it->poolSlot;
         auto* token = NprTokenArmo(slot);
         g_nprAssignments.erase(it);  // erase before unequip so the sink cannot schedule a restore
+        RefreshNprGate();
         if (token) {
             RemoveActorToken(a_actor, token->GetFormID());
             if (auto* equip = RE::ActorEquipManager::GetSingleton())
@@ -899,6 +914,7 @@ namespace CostumeFW
         for (auto& id : a_contents) CanonicalizeColonId(id);
         std::erase_if(a_contents, [](const std::string& id) { return id.empty(); });
         g_nprAssignments.push_back({ a_slot, a_actor, {}, std::move(a_contents), a_female });
+        RefreshNprGate();
     }
 
     void CarryUnresolvedNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
@@ -963,11 +979,12 @@ namespace CostumeFW
 
     bool HasNprWork()
     {
-        // Character::Load3D-thunk gate (may run during background loading):
-        // emptiness read only - same threading model as the thunk's existing
-        // HasActorBindings call. OnNpcActorLoaded services npc-persist
-        // assignments exclusively, so their absence makes the task pointless.
-        return !g_nprAssignments.empty();
+        // Character::Load3D-thunk gate (may run during background loading): an
+        // atomic mirror, NOT the vector itself - reading a std::vector while the
+        // main thread push_backs/erases is a data race (M11). OnNpcActorLoaded
+        // services npc-persist assignments exclusively, so their absence makes
+        // the task pointless.
+        return g_nprGate.load(std::memory_order_relaxed);
     }
 
     void ClearNpcBindings()
@@ -981,6 +998,7 @@ namespace CostumeFW
         g_unresolved.clear();
         g_hidden.clear();
         g_nprAssignments.clear();
+        RefreshNprGate();
         g_unresolvedNpr.clear();
     }
 
