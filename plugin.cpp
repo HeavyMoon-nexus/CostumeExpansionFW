@@ -70,6 +70,9 @@ namespace
         {
             CostumeFW::ContainmentSweepFrame();
             func(a_this, a_delta);
+            // AFTER the original: whatever a visual effect wrote onto the actor
+            // this frame is in place, so the injected costumes can shadow it.
+            CostumeFW::SyncInjectedVisualState();
         }
         static inline REL::Relocation<decltype(thunk)> func;
 
@@ -349,13 +352,15 @@ namespace
             if (REL::Module::IsVR()) {
                 SKSE::log::info(
                     "frame containment: skipped on VR (vfunc index differs) - watchdog "
-                    "cadence covers containment");
+                    "cadence covers containment; the visual shadow runs on injection "
+                    "only (no per-frame maintenance pass)");
             } else if (CostumeFW::IniFlag("bframecontainment", true)) {
                 PlayerUpdateHook::Install();
             } else {
                 SKSE::log::warn(
                     "frame containment DISABLED (CostumeExpansionFW.ini [Diagnostics] "
-                    "bFrameContainment=0) - corruption checks fall back to the 2.5s watchdog");
+                    "bFrameContainment=0) - corruption checks fall back to the 2.5s "
+                    "watchdog, and the visual shadow runs on injection only");
             }
             NpcLoad3DHook::Install();
             CostumeFW::InstallLoreBoxHook();  // soft LoreBox tooltip integration

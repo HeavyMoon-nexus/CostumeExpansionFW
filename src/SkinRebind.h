@@ -136,6 +136,16 @@ namespace CostumeFW
     // Main thread only (called from the Update hook, plugin.cpp).
     void ContainmentSweepFrame();
 
+    // Visual shadow: copy the effect state the engine already wrote onto a
+    // normal equipped biped part (kTempRefraction / BSEffectShaderData) onto the
+    // geometry CEF injected, so a costume shown DURING an invisibility - or any
+    // effect shader - looks like the body it hangs on instead of floating. Called
+    // from the Update hook AFTER the original (plugin.cpp); the injection paths
+    // call the same sync themselves so a late attach is covered immediately.
+    // Costs two compares per actor in a normal frame; writes only on a change.
+    // Main thread only.
+    void SyncInjectedVisualState();
+
     // NPC actor-state hooks. No-op for actors without registered CEF content.
     // Must be called on the main thread.
     bool HasActorBindings(RE::Actor* a_actor);

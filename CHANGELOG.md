@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.6.1 (2026-08-05)
+
+### Fixed
+
+- **Costumes shown while you are invisible now go invisible too.** Skyrim's
+  invisibility (and any effect shader) only treats the geometry that exists
+  when the effect starts, so a CEF costume added or re-shown mid-effect kept
+  floating in plain sight. CEF now shadows whatever the engine has written
+  onto your own equipped body and mirrors it onto the meshes it injected -
+  for boxes, persist entries, substitute bodies, first and third person, and
+  NPCs alike. It follows the effect ending just as faithfully, and a shape
+  whose author gave it refraction of its own keeps it.
+
 ## v1.6.0 (2026-08-05)
 
 ### Added

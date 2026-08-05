@@ -75,3 +75,10 @@ KNOWN VR NOTES
 * The "cef" console commands run through a VR-specific hook offset. If the
   console misbehaves ONLY on VR, please report it; every other feature is
   independent of that hook.
+* Invisibility / effect-shader follow (v1.6.1): a costume shown while you are
+  invisible picks up the effect the moment it appears - that part works the
+  same on VR. What VR does not get is the per-frame maintenance pass, which
+  rides on a PlayerCharacter::Update hook whose index differs on VR (the same
+  reason frame containment is SE/AE only). In practice that means a costume
+  already on screen when an effect STARTS or ENDS follows the engine's own
+  timing on VR instead of CEF's; re-showing the item resynchronizes it.

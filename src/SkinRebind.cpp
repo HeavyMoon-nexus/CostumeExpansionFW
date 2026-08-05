@@ -82,6 +82,57 @@ namespace CostumeFW
             const RE::TESModelTextureSwap* swap;  // alternate textures (or nullptr)
         };
 
+        // --- reference-shadow visual sync (invisibility & effect shaders) -------
+        // The engine's visual effects (invisibility, cloaks, any EFSH) sweep the
+        // geometry that exists WHEN THE EFFECT STARTS. CEF holders attached after
+        // that moment never receive the state, so a costume shown mid-invisibility
+        // floats visibly on an invisible body (investigation 2026-08-05, §1/§6).
+        //
+        // CEF does not try to detect, enumerate or reproduce those effects. It
+        // reads the state the engine ALREADY wrote onto a normal equipped biped
+        // part of the same actor - the two channels the diagnostics found in use,
+        // the kTempRefraction shader flag and the BSEffectShaderData pointer - and
+        // shadows it onto the geometry CEF injected. Whatever the body shows, the
+        // costume shows; when the body's state clears, the costume's clears with
+        // it. No effect-type analysis, no end-of-effect bookkeeping, no alpha or
+        // material writes (§11).
+        struct VisualSyncRef
+        {
+            RE::NiPointer<RE::BSGeometry> geom;
+            // What the NIF author's own shader flags said at injection time. A
+            // shape that legitimately uses refraction keeps it when the reference
+            // has none (OR composition), so shadowing an effect can never destroy
+            // an authored look - or fail to restore it afterwards.
+            bool authoredTmpRefr{ false };
+        };
+
+        // The engine-side state being shadowed. effectData is held as void* on
+        // purpose: it is an IDENTITY for change detection and is never
+        // dereferenced from here (the live smart pointer is re-read from the
+        // reference property in the frame it is applied).
+        struct VisualRefState
+        {
+            bool        valid{ false };
+            bool        tmpRefr{ false };
+            const void* effectData{ nullptr };
+            bool operator==(const VisualRefState&) const = default;
+        };
+
+        // Per-skeleton reference: one normal equipped biped part, reached through
+        // the biped RECORDS - never a skeleton search (§10). The biped index +
+        // partClone pointer are kept so staleness is an O(1) compare instead of a
+        // re-walk: the engine swaps partClone whenever that slot is re-equipped or
+        // the 3D is rebuilt, and that is exactly when the reference must be
+        // re-taken.
+        struct VisualRefSlot
+        {
+            RE::NiPointer<RE::BSGeometry> geom;
+            RE::NiPointer<RE::NiAVObject> part;
+            std::uint32_t  bipedIndex{ RE::BIPED_OBJECTS::kTotal };
+            VisualRefState last;
+            std::uint8_t   missTicks{ 0 };  // back-off after a failed acquisition
+        };
+
         struct ActiveItem
         {
             std::string id;
@@ -106,6 +157,10 @@ namespace CostumeFW
             // Frozen per-content settings (published snapshots). Null = follow
             // the live global content settings.
             std::shared_ptr<const ContentSettings> settings;
+            // The geometry this item put on each skeleton, for the visual shadow.
+            // Same lifetime as the holder records above: every path that detaches
+            // through DetachRecorded clears the matching list.
+            std::vector<VisualSyncRef> visual3p, visual1p;
         };
         constexpr int kRebindRetryBudget = 4;
         struct ActorState
@@ -124,6 +179,10 @@ namespace CostumeFW
             bool rebindRetryQueued{ false };
             bool inRebindRetry{ false };
             bool realBodyShown{ false };
+            // Visual shadow (see VisualSyncRef): the real body's injected geometry
+            // per skeleton, and the engine-side reference each skeleton follows.
+            std::vector<VisualSyncRef> visualRealBody3p, visualRealBody1p;
+            VisualRefSlot visualRef3p, visualRef1p;
         };
         std::vector<ActorState> g_actors;
 
@@ -258,13 +317,23 @@ namespace CostumeFW
         // created and to the node it hung it on, and detaches through the pair.
         // Neither end can dangle - NiPointer keeps both alive - and neither
         // ->parent nor any children array is ever touched.
-        void DetachRecorded(RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder)
+        //
+        // a_visual is that skeleton's visual-shadow list (VisualSyncRef). It is
+        // released HERE, with the holder, so the two can never diverge: every
+        // detach path in the plugin goes through this function, and a stale
+        // NiPointer to geometry CEF no longer owns is exactly the extra reference
+        // the containment work forbids (§10).
+        void DetachRecorded(RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder,
+            std::vector<VisualSyncRef>* a_visual = nullptr)
         {
             if (a_parent && a_holder) {
                 a_parent->DetachChild(a_holder.get());
             }
             if (a_holder) {
                 g_holderArrayBaseline.erase(a_holder.get());
+            }
+            if (a_visual) {
+                a_visual->clear();
             }
             a_parent.reset();
             a_holder.reset();
@@ -412,7 +481,8 @@ namespace CostumeFW
         // containment that turns the primary corruption from a CTD into a log
         // line, whoever the writer turns out to be.
         bool QuarantineIfBroken(const char* a_what,
-            RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder)
+            RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder,
+            std::vector<VisualSyncRef>* a_visual = nullptr)
         {
             if (!a_holder) {
                 return false;
@@ -437,7 +507,7 @@ namespace CostumeFW
                 a_holder->name.c_str(), a_what, how, st.size, st.cap, st.freeIdx, st.data);
             HexDumpNode(a_holder.get());
             RepairHolderArray(a_holder.get());
-            DetachRecorded(a_parent, a_holder);
+            DetachRecorded(a_parent, a_holder, a_visual);
             const int strikes = ++g_quarantineStrikes[a_what];
             if (strikes == kQuarantineParkThreshold) {
                 g_poisonParked.insert(a_what);
@@ -463,8 +533,10 @@ namespace CostumeFW
             int hit = 0;
             for (auto& state : g_actors) {
                 for (auto& it : state.items) {
-                    hit += QuarantineIfBroken(it.id.c_str(), it.parent3p, it.holder3p) ? 1 : 0;
-                    hit += QuarantineIfBroken(it.id.c_str(), it.parent1p, it.holder1p) ? 1 : 0;
+                    hit += QuarantineIfBroken(it.id.c_str(), it.parent3p, it.holder3p,
+                               &it.visual3p) ? 1 : 0;
+                    hit += QuarantineIfBroken(it.id.c_str(), it.parent1p, it.holder1p,
+                               &it.visual1p) ? 1 : 0;
                 }
             }
             return hit;
@@ -478,8 +550,8 @@ namespace CostumeFW
                 }
                 const bool had3p = static_cast<bool>(it.holder3p);
                 const bool had1p = static_cast<bool>(it.holder1p);
-                DetachRecorded(it.parent3p, it.holder3p);
-                DetachRecorded(it.parent1p, it.holder1p);
+                DetachRecorded(it.parent3p, it.holder3p, &it.visual3p);
+                DetachRecorded(it.parent1p, it.holder1p, &it.visual1p);
                 // Pins go AFTER the detach: skin->bones[] are raw pointers, so
                 // releasing the pins first opens a window where a retired FSMP
                 // bone is freed while its geometry is still attached and
@@ -503,6 +575,210 @@ namespace CostumeFW
         void Unregister(ActorState& a_state, const std::string& a_id)
         {
             std::erase_if(a_state.items, [&](const ActiveItem& it) { return it.id == a_id; });
+        }
+
+        // --- visual shadow: read the body, write the costume --------------------
+        // See VisualSyncRef for the why. Everything below touches ONLY geometry
+        // CEF itself injected and recorded (never a skeleton walk, never the
+        // actor root), and writes only the two effect channels - no alpha, no
+        // material (§10, §11).
+
+        RE::BSShaderProperty* ShaderPropOf(RE::BSGeometry* a_geom)
+        {
+            if (!a_geom) {
+                return nullptr;
+            }
+            auto& rt = a_geom->GetGeometryRuntimeData();
+            return ::netimmerse_cast<RE::BSShaderProperty*>(
+                rt.properties[RE::BSGeometry::States::kEffect].get());
+        }
+
+        bool HasTempRefraction(RE::BSShaderProperty* a_prop)
+        {
+            return a_prop &&
+                   a_prop->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kTempRefraction);
+        }
+
+        // First shader-carrying geometry in ONE biped part's own subtree. The
+        // subtree is the engine's equip clone, not the actor skeleton, and this
+        // runs only when the reference is (re)taken - not per frame.
+        RE::BSGeometry* FirstShadedGeometry(RE::NiAVObject* a_part)
+        {
+            RE::BSGeometry* found = nullptr;
+            if (!a_part) {
+                return nullptr;
+            }
+            RE::BSVisit::TraverseScenegraphGeometries(a_part, [&](RE::BSGeometry* a_geom) {
+                if (ShaderPropOf(a_geom)) {
+                    found = a_geom;
+                    return RE::BSVisit::BSVisitControl::kStop;
+                }
+                return RE::BSVisit::BSVisitControl::kContinue;
+            });
+            return found;
+        }
+
+        // Take a fresh reference for one skeleton. Slot 32 (kBody) is tried first:
+        // it is the one biped slot that is filled even on a naked actor (the skin
+        // body), and it is never one of CEF's own invisible carriers. The scan of
+        // the remaining slots is the fallback for an actor whose body slot is
+        // genuinely empty.
+        bool AcquireVisualRef(RE::Actor* a_actor, bool a_firstPerson, VisualRefSlot& a_slot)
+        {
+            a_slot.geom.reset();
+            a_slot.part.reset();
+            a_slot.bipedIndex = RE::BIPED_OBJECTS::kTotal;
+            a_slot.last = {};
+            if (!a_actor) {
+                return false;
+            }
+            const auto& biped = a_actor->GetBiped1(a_firstPerson);
+            if (!biped) {
+                return false;
+            }
+            const auto take = [&](std::uint32_t a_i) {
+                auto& part = biped->objects[a_i].partClone;
+                auto* geom = FirstShadedGeometry(part.get());
+                if (!geom) {
+                    return false;
+                }
+                a_slot.geom.reset(geom);
+                a_slot.part = part;
+                a_slot.bipedIndex = a_i;
+                return true;
+            };
+            if (take(RE::BIPED_OBJECTS::kBody)) {
+                return true;
+            }
+            for (std::uint32_t i = 0; i < RE::BIPED_OBJECTS::kTotal; ++i) {
+                if (i != RE::BIPED_OBJECTS::kBody && take(i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Still the same equipped part in the same slot? The engine replaces
+        // partClone on re-equip and on every 3D rebuild, which is exactly when a
+        // reference goes stale. O(1) - no walking.
+        bool VisualRefStillValid(RE::Actor* a_actor, bool a_firstPerson, const VisualRefSlot& a_slot)
+        {
+            if (!a_slot.geom || !a_slot.part || a_slot.bipedIndex >= RE::BIPED_OBJECTS::kTotal) {
+                return false;
+            }
+            const auto& biped = a_actor->GetBiped1(a_firstPerson);
+            return biped &&
+                   biped->objects[a_slot.bipedIndex].partClone.get() == a_slot.part.get();
+        }
+
+        void ApplyVisualState(std::vector<VisualSyncRef>& a_list, const VisualRefState& a_state,
+            const RE::BSTSmartPointer<RE::BSEffectShaderData>& a_data, int& a_geomCount)
+        {
+            for (auto& ref : a_list) {
+                auto* prop = ShaderPropOf(ref.geom.get());
+                if (!prop) {
+                    continue;
+                }
+                // OR with the authored flag: an effect can add refraction to a
+                // shape, never take away the one its author put there.
+                const bool want = a_state.tmpRefr || ref.authoredTmpRefr;
+                if (HasTempRefraction(prop) != want) {
+                    prop->SetFlags(
+                        RE::BSShaderProperty::EShaderPropertyFlag8::kTempRefraction, want);
+                }
+                // AcceptsEffectData is the engine's own gate (false for property
+                // types that have nowhere to put it). The smart pointer carries
+                // the lifetime; nothing here owns the shader data.
+                if (prop->AcceptsEffectData() && prop->effectData != a_data) {
+                    prop->SetEffectShaderData(a_data);
+                }
+                ++a_geomCount;
+            }
+        }
+
+        bool AnyVisualRefs(const ActorState& a_state, bool a_firstPerson)
+        {
+            for (const auto& it : a_state.items) {
+                if (!(a_firstPerson ? it.visual1p : it.visual3p).empty()) {
+                    return true;
+                }
+            }
+            return !(a_firstPerson ? a_state.visualRealBody1p : a_state.visualRealBody3p).empty();
+        }
+
+        // One skeleton of one actor. a_force writes unconditionally (used right
+        // after an injection, where the reference may not have CHANGED but the
+        // new geometry has never been written); otherwise the whole frame cost is
+        // one pointer compare plus a (bit, pointer) compare, and nothing is
+        // written unless the body's state actually moved.
+        void SyncSkeletonVisualState(ActorState& a_state, RE::Actor* a_actor,
+            bool a_firstPerson, bool a_force)
+        {
+            auto& slot = a_firstPerson ? a_state.visualRef1p : a_state.visualRef3p;
+            if (!AnyVisualRefs(a_state, a_firstPerson)) {
+                slot = {};  // nothing of ours on this skeleton - drop the reference
+                return;
+            }
+            if (!VisualRefStillValid(a_actor, a_firstPerson, slot)) {
+                // Back off between failed acquisitions (during a 3D rebuild the
+                // biped is briefly empty) so a bipedless actor cannot turn this
+                // into a per-frame scan.
+                if (slot.missTicks > 0 && !a_force) {
+                    --slot.missTicks;
+                    return;
+                }
+                if (!AcquireVisualRef(a_actor, a_firstPerson, slot)) {
+                    slot.missTicks = 30;
+                    return;
+                }
+                slot.missTicks = 0;
+            }
+            auto* prop = ShaderPropOf(slot.geom.get());
+            if (!prop) {
+                slot = {};  // the reference lost its shader property - retake next frame
+                return;
+            }
+            VisualRefState now{};
+            now.valid = true;
+            now.tmpRefr = HasTempRefraction(prop);
+            now.effectData = static_cast<const void*>(prop->effectData.get());
+            if (!a_force && now == slot.last) {
+                return;
+            }
+            const RE::BSTSmartPointer<RE::BSEffectShaderData> data = prop->effectData;
+            int geoms = 0;
+            for (auto& it : a_state.items) {
+                ApplyVisualState(a_firstPerson ? it.visual1p : it.visual3p, now, data, geoms);
+            }
+            ApplyVisualState(
+                a_firstPerson ? a_state.visualRealBody1p : a_state.visualRealBody3p,
+                now, data, geoms);
+            const bool changed = !(now == slot.last);
+            slot.last = now;
+            // Only on an actual transition - never per frame (§10). A forced
+            // post-injection pass that found the body in its resting state has
+            // nothing to report.
+            if (geoms > 0 && (changed || now.tmpRefr || now.effectData)) {
+                SKSE::log::debug(
+                    "visual sync {} ({}): tmpRefr={} effectData={} -> {} injected shape(s){}",
+                    a_state.isPlayer ? "player" : "npc", a_firstPerson ? "1p" : "3p",
+                    now.tmpRefr ? 1 : 0, now.effectData, geoms, a_force ? " [inject]" : "");
+            }
+        }
+
+        void SyncActorVisualState(ActorState& a_state, bool a_force)
+        {
+            if (!AnyVisualRefs(a_state, false) && !AnyVisualRefs(a_state, true)) {
+                return;  // cheapest possible exit for an actor with nothing shown
+            }
+            auto* actor = ResolveActor(a_state);
+            if (!actor) {
+                return;
+            }
+            SyncSkeletonVisualState(a_state, actor, false, a_force);
+            if (a_state.isPlayer) {
+                SyncSkeletonVisualState(a_state, actor, true, a_force);
+            }
         }
 
         // BSModelDB::Demand expects a Data\Meshes-relative path: strip a leading
@@ -1191,11 +1467,15 @@ namespace CostumeFW
         // NiPointer to the node it created and to the node it hung it on, and
         // detaches through those - it never searches the skeleton for its own
         // work. See DetachRecorded for why.
+        // a_visualOut: filled with the geometry this attach put on the skeleton,
+        // for the visual shadow (see VisualSyncRef). Written only on a real
+        // attach - an idempotent skip leaves the caller's existing list intact.
         bool InjectOnRoot(RE::NiAVObject* a_root3D, const std::string& a_relPath,
             const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap,
             bool a_applyMorph, const std::unordered_set<std::string>& a_hideShapes,
             const std::string& a_id, bool a_cacheShapes, RE::Actor* a_morphActor,
-            RE::NiPointer<RE::NiNode>& a_holder, RE::NiPointer<RE::NiNode>& a_parent)
+            RE::NiPointer<RE::NiNode>& a_holder, RE::NiPointer<RE::NiNode>& a_parent,
+            std::vector<VisualSyncRef>* a_visualOut = nullptr)
         {
             if (!a_root3D) {
                 return false;
@@ -1383,6 +1663,19 @@ namespace CostumeFW
             // the sweep sees is a stomp.
             RecordHolderBaseline(holder);
 
+            // Visual-shadow record: `geoms` IS what now hangs on the skeleton
+            // (hidden shapes never got here, and unskinned nodes were left behind
+            // in the clone), so no second traversal is needed. Read the flags
+            // AFTER the texture/morph passes: whatever the shapes look like at
+            // this point is the authored baseline an effect must never destroy.
+            if (a_visualOut) {
+                a_visualOut->clear();
+                a_visualOut->reserve(geoms.size());
+                for (auto& g : geoms) {
+                    a_visualOut->push_back({ g, HasTempRefraction(ShaderPropOf(g.get())) });
+                }
+            }
+
             SKSE::log::debug("  attached {} ({} skinned shape(s))", a_nodeName, geoms.size());
             return true;
         }
@@ -1440,10 +1733,14 @@ namespace CostumeFW
             auto& parent3p = slot ? slot->parent3p : s_scratchParent3p;
             auto& holder1p = slot ? slot->holder1p : s_scratchHolder1p;
             auto& parent1p = slot ? slot->parent1p : s_scratchParent1p;
+            // No registry entry -> nothing owns a visual list either (the scratch
+            // holders above are already the "should never happen" branch).
+            auto* visual3p = slot ? &slot->visual3p : nullptr;
+            auto* visual1p = slot ? &slot->visual1p : nullptr;
             if (auto* root3p = actor->Get3D(false); root3p && !a_item.m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(a_item.m3p.nifPath), nodeName,
                     a_item.m3p.swap, applyMorph, hideShapes, a_item.id, true, actor,
-                    holder3p, parent3p);
+                    holder3p, parent3p, visual3p);
             }
             if (g_rebind3pFsmp) {
                 // Bound to physics again - re-arm the X-DIAG report so a later
@@ -1469,7 +1766,7 @@ namespace CostumeFW
                 if (auto* root1p = actor->Get3D(true); root1p && !a_item.m1p.nifPath.empty()) {
                     any |= InjectOnRoot(root1p, StripMeshesPrefix(a_item.m1p.nifPath), nodeName,
                         a_item.m1p.swap, applyMorph, hideShapes, a_item.id, false, actor,
-                        holder1p, parent1p);
+                        holder1p, parent1p, visual1p);
                 }
             }
             g_boneRefSink = nullptr;
@@ -1480,6 +1777,14 @@ namespace CostumeFW
             if (!any) {
                 SKSE::log::warn("InjectFor: nothing attached for id='{}'", a_item.id);
             }
+            // Immediate visual shadow. This is the fix for the reported bug: a
+            // costume shown DURING an invisibility (or any effect shader) never
+            // gets the engine's start-of-effect pass, so it must be handed the
+            // body's current state the moment it lands. Every injection path -
+            // Reconcile, box token equip, persist toggle, rebind retry, Load3D
+            // re-attach - funnels through InjectFor, so this one call covers all
+            // of them (§9.1's "one initial sync for every caller").
+            SyncActorVisualState(a_state, true);
             return any;
         }
 
@@ -1496,8 +1801,10 @@ namespace CostumeFW
         // DetachRecorded for why neither searching nor walking is allowed.
         void DetachRealBody(ActorState& a_state)
         {
-            DetachRecorded(a_state.realBodyParent3p, a_state.realBodyHolder3p);
-            DetachRecorded(a_state.realBodyParent1p, a_state.realBodyHolder1p);
+            DetachRecorded(a_state.realBodyParent3p, a_state.realBodyHolder3p,
+                &a_state.visualRealBody3p);
+            DetachRecorded(a_state.realBodyParent1p, a_state.realBodyHolder1p,
+                &a_state.visualRealBody1p);
         }
 
         // Pick the BODY (slot-32) addon from a skin ARMO's armature for the player's
@@ -1746,20 +2053,25 @@ namespace CostumeFW
             if (auto* root3p = actor->Get3D(false); root3p && !m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
                     m3p.swap, true, kNoHide, "realbody", false, actor,
-                    a_state.realBodyHolder3p, a_state.realBodyParent3p);
+                    a_state.realBodyHolder3p, a_state.realBodyParent3p,
+                    &a_state.visualRealBody3p);
                 ApplySkinTextures(root3p, kRealBodyNode, skinTx);
             }
             if (a_state.isPlayer) {
                 if (auto* root1p = actor->Get3D(true); root1p && !m1p.nifPath.empty()) {
                     any |= InjectOnRoot(root1p, StripMeshesPrefix(m1p.nifPath), kRealBodyNode,
                         m1p.swap, true, kNoHide, "realbody", false, actor,
-                        a_state.realBodyHolder1p, a_state.realBodyParent1p);
+                        a_state.realBodyHolder1p, a_state.realBodyParent1p,
+                        &a_state.visualRealBody1p);
                     ApplySkinTextures(root1p, kRealBodyNode, skinTx);
                 }
             }
             if (any) {
                 SKSE::log::info("realbody: injected player body addon {:08X}", bodyAA->GetFormID());
             }
+            // Same immediate shadow as InjectFor: a substitute body attached
+            // mid-effect must not be the one shape still visible.
+            SyncActorVisualState(a_state, true);
             return any;
         }
 
@@ -2144,9 +2456,9 @@ namespace CostumeFW
             int q = QuarantineSweep();
             for (auto& state : g_actors) {
                 q += QuarantineIfBroken("realbody-3p", state.realBodyParent3p,
-                         state.realBodyHolder3p) ? 1 : 0;
+                         state.realBodyHolder3p, &state.visualRealBody3p) ? 1 : 0;
                 q += QuarantineIfBroken("realbody-1p", state.realBodyParent1p,
-                         state.realBodyHolder1p) ? 1 : 0;
+                         state.realBodyHolder1p, &state.visualRealBody1p) ? 1 : 0;
             }
             if (q > 0) {
                 Reconcile();  // re-inject what was contained
@@ -2397,15 +2709,33 @@ namespace CostumeFW
         int q = QuarantineSweep();
         for (auto& state : g_actors) {
             q += QuarantineIfBroken("realbody-3p", state.realBodyParent3p,
-                     state.realBodyHolder3p) ? 1 : 0;
+                     state.realBodyHolder3p, &state.visualRealBody3p) ? 1 : 0;
             q += QuarantineIfBroken("realbody-1p", state.realBodyParent1p,
-                     state.realBodyHolder1p) ? 1 : 0;
+                     state.realBodyHolder1p, &state.visualRealBody1p) ? 1 : 0;
         }
         if (q > 0) {
             SKSE::log::error(
                 "frame containment: {} holder(s) contained before this frame's scene "
                 "pass - re-inject queued", q);
             SKSE::GetTaskInterface()->AddTask([] { Reconcile(); });
+        }
+    }
+
+    void SyncInjectedVisualState()
+    {
+        StoreLock lk;
+        // Maintenance half of the visual shadow (the injection half runs from
+        // InjectFor / InjectRealBody). Runs AFTER the engine's own Update, so
+        // whatever a visual effect wrote onto the actor this frame is already
+        // there to be read.
+        //
+        // This is deliberately NOT a per-frame material writer: per actor and
+        // skeleton it costs one pointer compare (is the reference part still the
+        // equipped one) plus one (bit, pointer) compare, and it writes only in
+        // the frames where the body's own state moved - effect start, effect end,
+        // effect swap. An actor with no CEF geometry exits on the first line.
+        for (auto& state : g_actors) {
+            SyncActorVisualState(state, false);
         }
     }
 
@@ -2439,9 +2769,9 @@ namespace CostumeFW
             int q = QuarantineSweep();
             for (auto& state : g_actors) {
                 q += QuarantineIfBroken("realbody-3p", state.realBodyParent3p,
-                         state.realBodyHolder3p) ? 1 : 0;
+                         state.realBodyHolder3p, &state.visualRealBody3p) ? 1 : 0;
                 q += QuarantineIfBroken("realbody-1p", state.realBodyParent1p,
-                         state.realBodyHolder1p) ? 1 : 0;
+                         state.realBodyHolder1p, &state.visualRealBody1p) ? 1 : 0;
             }
             if (q > 0) {
                 SKSE::log::error("quarantine: {} holder(s) contained this pass", q);
@@ -2738,8 +3068,8 @@ namespace CostumeFW
                 if (it.holder1p) {
                     ++total;
                 }
-                DetachRecorded(it.parent3p, it.holder3p);
-                DetachRecorded(it.parent1p, it.holder1p);
+                DetachRecorded(it.parent3p, it.holder3p, &it.visual3p);
+                DetachRecorded(it.parent1p, it.holder1p, &it.visual1p);
             }
             DetachRealBody(state);
         }
@@ -3098,6 +3428,34 @@ namespace CostumeFW
             });
             if (!found) {
                 out.push_back(" (none)");
+            }
+        }
+        // Visual shadow: which biped part each skeleton is following, and the
+        // state last copied from it. A late-injected costume is correct when its
+        // geometry below shows the SAME (tmpRefr, effectData) this line reports.
+        out.push_back("# CEF visual shadow (reference-follow state)");
+        {
+            bool anyRef = false;
+            for (auto& state : g_actors) {
+                auto* actor = ResolveActor(state);
+                const char* who = state.isPlayer ? "player" :
+                    (actor && actor->GetName() && *actor->GetName() ? actor->GetName() : "npc");
+                for (int fp = 0; fp <= 1; ++fp) {
+                    const auto& slot = fp ? state.visualRef1p : state.visualRef3p;
+                    if (!slot.geom) {
+                        continue;
+                    }
+                    anyRef = true;
+                    out.push_back(std::format(
+                        " {} {}: ref=biped[{}] '{}' applied tmpRefr={} effectData={}",
+                        who, fp ? "1p" : "3p", slot.bipedIndex, slot.geom->name.c_str(),
+                        slot.last.tmpRefr ? 1 : 0, slot.last.effectData));
+                }
+            }
+            if (!anyRef) {
+                out.push_back(
+                    " (no reference taken - nothing injected, or no equipped biped part "
+                    "to follow)");
             }
         }
         out.push_back("# CEF injected holders");
@@ -3940,8 +4298,8 @@ namespace CostumeFW
         // rebuilt underneath us.)
         for (auto& state : g_actors) {
             for (auto& it : state.items) {
-                DetachRecorded(it.parent3p, it.holder3p);
-                DetachRecorded(it.parent1p, it.holder1p);
+                DetachRecorded(it.parent3p, it.holder3p, &it.visual3p);
+                DetachRecorded(it.parent1p, it.holder1p, &it.visual1p);
             }
             DetachRealBody(state);
             state.items.clear();
