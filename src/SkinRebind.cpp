@@ -99,11 +99,26 @@ namespace CostumeFW
         struct VisualSyncRef
         {
             RE::NiPointer<RE::BSGeometry> geom;
-            // What the NIF author's own shader flags said at injection time. A
-            // shape that legitimately uses refraction keeps it when the reference
-            // has none (OR composition), so shadowing an effect can never destroy
-            // an authored look - or fail to restore it afterwards.
+            // The shape's OWN kTempRefraction at injection time, OR-ed in below so
+            // an effect can never take away a bit the shape already had.
+            //
+            // Captured as false whenever an effect was already live on the actor
+            // (see ReferenceEffectActive): a bit-2 seen at that moment is far more
+            // likely the engine's than the author's, and mistaking it for authored
+            // would LATCH the shape refracted forever - the one way this design
+            // could leave a permanent artifact. Erring the other way is transient:
+            // the next injection taken while the actor is clear re-reads it.
+            // (Note that the flag a NIF author actually sets for refraction is
+            // kRefraction, bit 15, which this code never touches at all - as with
+            // alpha and material, §11. So this is a guard on the runtime bit only.)
             bool authoredTmpRefr{ false };
+            // True once CEF has copied an effectData onto this shape - and the ONLY
+            // condition under which CEF will later clear one. An effectData CEF did
+            // not write belongs to whatever effect reached the shape on its own
+            // (in-game 2026-08-05: a mod's persistent EFSH reached two costume
+            // 'Hands' shapes CEF had injected); nulling that would be CEF fighting
+            // another mod's live effect.
+            bool cefEffectData{ false };
         };
 
         // The engine-side state being shadowed. effectData is held as void* on
@@ -679,21 +694,49 @@ namespace CostumeFW
                 if (!prop) {
                     continue;
                 }
-                // OR with the authored flag: an effect can add refraction to a
-                // shape, never take away the one its author put there.
+                // OR with the shape's own flag: an effect can add refraction to a
+                // shape, never take away one it already had.
                 const bool want = a_state.tmpRefr || ref.authoredTmpRefr;
                 if (HasTempRefraction(prop) != want) {
                     prop->SetFlags(
                         RE::BSShaderProperty::EShaderPropertyFlag8::kTempRefraction, want);
                 }
-                // AcceptsEffectData is the engine's own gate (false for property
-                // types that have nowhere to put it). The smart pointer carries
-                // the lifetime; nothing here owns the shader data.
-                if (prop->AcceptsEffectData() && prop->effectData != a_data) {
-                    prop->SetEffectShaderData(a_data);
+                // effectData is mirrored, not managed: CEF copies what the
+                // reference carries, and releases ONLY what CEF itself put there
+                // (see VisualSyncRef::cefEffectData). AcceptsEffectData is the
+                // engine's own gate for property types with nowhere to put it. The
+                // smart pointer carries the lifetime; nothing here owns the data.
+                if (prop->AcceptsEffectData()) {
+                    if (a_data) {
+                        if (prop->effectData != a_data) {
+                            prop->SetEffectShaderData(a_data);
+                        }
+                        ref.cefEffectData = true;
+                    } else if (ref.cefEffectData) {
+                        if (prop->effectData) {
+                            prop->SetEffectShaderData(a_data);  // null: release ours
+                        }
+                        ref.cefEffectData = false;
+                    }
                 }
                 ++a_geomCount;
             }
+        }
+
+        // Is a visual effect live on the actor's OWN equipped geometry right now?
+        // Asked at injection time so a shape attached mid-effect is not credited
+        // with a kTempRefraction that belongs to the effect (VisualSyncRef). Uses
+        // the cached reference, so it is O(1) once taken - and refreshing it here
+        // is work the sync that follows would do anyway.
+        bool ReferenceEffectActive(ActorState& a_state, RE::Actor* a_actor, bool a_firstPerson)
+        {
+            auto& slot = a_firstPerson ? a_state.visualRef1p : a_state.visualRef3p;
+            if (!VisualRefStillValid(a_actor, a_firstPerson, slot) &&
+                !AcquireVisualRef(a_actor, a_firstPerson, slot)) {
+                return false;  // no reference: treat the actor as clear
+            }
+            auto* prop = ShaderPropOf(slot.geom.get());
+            return prop && (HasTempRefraction(prop) || prop->effectData);
         }
 
         bool AnyVisualRefs(const ActorState& a_state, bool a_firstPerson)
@@ -1470,12 +1513,14 @@ namespace CostumeFW
         // a_visualOut: filled with the geometry this attach put on the skeleton,
         // for the visual shadow (see VisualSyncRef). Written only on a real
         // attach - an idempotent skip leaves the caller's existing list intact.
+        // a_effectActive: whether an effect is already live on this actor, so the
+        // shapes' own refraction baseline is not credited with the effect's bit.
         bool InjectOnRoot(RE::NiAVObject* a_root3D, const std::string& a_relPath,
             const std::string& a_nodeName, const RE::TESModelTextureSwap* a_swap,
             bool a_applyMorph, const std::unordered_set<std::string>& a_hideShapes,
             const std::string& a_id, bool a_cacheShapes, RE::Actor* a_morphActor,
             RE::NiPointer<RE::NiNode>& a_holder, RE::NiPointer<RE::NiNode>& a_parent,
-            std::vector<VisualSyncRef>* a_visualOut = nullptr)
+            std::vector<VisualSyncRef>* a_visualOut = nullptr, bool a_effectActive = false)
         {
             if (!a_root3D) {
                 return false;
@@ -1672,7 +1717,9 @@ namespace CostumeFW
                 a_visualOut->clear();
                 a_visualOut->reserve(geoms.size());
                 for (auto& g : geoms) {
-                    a_visualOut->push_back({ g, HasTempRefraction(ShaderPropOf(g.get())) });
+                    const bool ownRefr =
+                        !a_effectActive && HasTempRefraction(ShaderPropOf(g.get()));
+                    a_visualOut->push_back({ g, ownRefr, false });
                 }
             }
 
@@ -1740,7 +1787,8 @@ namespace CostumeFW
             if (auto* root3p = actor->Get3D(false); root3p && !a_item.m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(a_item.m3p.nifPath), nodeName,
                     a_item.m3p.swap, applyMorph, hideShapes, a_item.id, true, actor,
-                    holder3p, parent3p, visual3p);
+                    holder3p, parent3p, visual3p,
+                    ReferenceEffectActive(a_state, actor, false));
             }
             if (g_rebind3pFsmp) {
                 // Bound to physics again - re-arm the X-DIAG report so a later
@@ -1766,7 +1814,8 @@ namespace CostumeFW
                 if (auto* root1p = actor->Get3D(true); root1p && !a_item.m1p.nifPath.empty()) {
                     any |= InjectOnRoot(root1p, StripMeshesPrefix(a_item.m1p.nifPath), nodeName,
                         a_item.m1p.swap, applyMorph, hideShapes, a_item.id, false, actor,
-                        holder1p, parent1p, visual1p);
+                        holder1p, parent1p, visual1p,
+                        ReferenceEffectActive(a_state, actor, true));
                 }
             }
             g_boneRefSink = nullptr;
@@ -2054,7 +2103,7 @@ namespace CostumeFW
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
                     m3p.swap, true, kNoHide, "realbody", false, actor,
                     a_state.realBodyHolder3p, a_state.realBodyParent3p,
-                    &a_state.visualRealBody3p);
+                    &a_state.visualRealBody3p, ReferenceEffectActive(a_state, actor, false));
                 ApplySkinTextures(root3p, kRealBodyNode, skinTx);
             }
             if (a_state.isPlayer) {
@@ -2062,7 +2111,7 @@ namespace CostumeFW
                     any |= InjectOnRoot(root1p, StripMeshesPrefix(m1p.nifPath), kRealBodyNode,
                         m1p.swap, true, kNoHide, "realbody", false, actor,
                         a_state.realBodyHolder1p, a_state.realBodyParent1p,
-                        &a_state.visualRealBody1p);
+                        &a_state.visualRealBody1p, ReferenceEffectActive(a_state, actor, true));
                     ApplySkinTextures(root1p, kRealBodyNode, skinTx);
                 }
             }
