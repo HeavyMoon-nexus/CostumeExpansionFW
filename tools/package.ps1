@@ -75,6 +75,27 @@ Write-Host "DLL: $($dll.LastWriteTime)  $($dll.Length) bytes"
 $esp = Get-Item "$stage\CostumeFW.esp"
 Write-Host "ESP: $($esp.LastWriteTime)  $($esp.Length) bytes"
 
+# --- sanity: the repo mirrors of the two mod-folder-staged files must match ---
+# CostumeFW.esp and CostumeFW_KID.ini ship from the DEPLOYED folder, so their
+# tracked copies are mirrors, not sources. Silent drift is exactly what left the
+# repo's KID ini pointing at CostumeFW_VanillaSlots_001.esp for every release
+# after the v1.3.0 fold (found 2026-08-17: the shipped archives were correct,
+# the repo copy was not). Fail loud and refresh the mirror instead of shipping
+# blind. Text is compared CRLF-normalized so core.autocrlf cannot fake a diff.
+$espMirror = "$repo\package_assets\CostumeFW.esp"
+if (-not (Test-Path $espMirror)) { throw "repo mirror missing: $espMirror" }
+if ((Get-FileHash "$stage\CostumeFW.esp" -Algorithm SHA256).Hash -ne
+    (Get-FileHash $espMirror -Algorithm SHA256).Hash) {
+    throw "repo mirror is stale: $espMirror does not match the deployed esp. Copy the deployed CostumeFW.esp over it and commit, then re-run."
+}
+$kidMirror = "$repo\CostumeFW_KID.ini"
+if (-not (Test-Path $kidMirror)) { throw "repo mirror missing: $kidMirror" }
+$norm = { (Get-Content -Raw -LiteralPath $args[0]) -replace "`r`n", "`n" }
+if ((& $norm "$stage\CostumeFW_KID.ini") -ne (& $norm $kidMirror)) {
+    throw "repo mirror is stale: $kidMirror does not match the deployed KID ini. Copy the deployed CostumeFW_KID.ini over it and commit, then re-run."
+}
+Write-Host "repo mirrors: CostumeFW.esp + CostumeFW_KID.ini OK"
+
 if (Test-Path $out) { Remove-Item $out -Force }
 Push-Location $stage
 & $sevenZip a -t7z $out * | Select-Object -Last 3
