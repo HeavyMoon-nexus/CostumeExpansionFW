@@ -395,6 +395,12 @@ namespace
                 // THIS save's (ROOT A protection preserved). Clearing it here ran
                 // AFTER the restore and wiped it.
                 CostumeFW::ClearBoxSpellCache();
+                // v1.6.1: recover temper/enchant snapshots missing on older
+                // captures from the stored originals BEFORE stats reapply; a
+                // heal also restamps publish tokens (their armor sums live).
+                if (CostumeFW::HealStoredInstanceData()) {
+                    CostumeFW::StampAllPublishTokens();
+                }
                 CostumeFW::ReapplyBoxes();
                 CostumeFW::ApplyCarrierOverrides(false);
                 CostumeFW::Reconcile();

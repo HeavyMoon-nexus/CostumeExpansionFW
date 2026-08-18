@@ -151,6 +151,19 @@ namespace CostumeFW
         };
         std::unordered_map<std::string, std::vector<EnchEffect>> g_contentEnchants;
 
+        // Captured tempering multiplier per content (ExtraHealth.health; absent =
+        // untempered). The base ARMO's armorRating misses the smithing improvement
+        // exactly like it misses the player enchantment (2game.info 2026-08-18),
+        // so it snapshots at the same capture spot and scales every armor
+        // passthrough sum. GLOBAL config, content-keyed.
+        std::unordered_map<std::string, float> g_contentTemper;
+
+        float TemperMultOf(const std::string& a_id)
+        {
+            const auto it = g_contentTemper.find(a_id);
+            return it == g_contentTemper.end() ? 1.0f : it->second;
+        }
+
         // Persist class's applied preset name ("" = manual). Mirrors a box's preset.
         std::string g_persistPreset;
 
@@ -318,6 +331,12 @@ namespace CostumeFW
                 enchants[id] = std::move(arr2);
             }
             doc["enchants"] = std::move(enchants);
+
+            auto tempers = nlohmann::json::object();
+            for (const auto& [id, mult] : g_contentTemper) {
+                tempers[id] = mult;
+            }
+            doc["tempers"] = std::move(tempers);
             EmitPublishJson(doc);
 
             if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
@@ -461,6 +480,7 @@ namespace CostumeFW
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
+        void ReapplyStatsForContent(const std::string& a_id);          // fwd (defined below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
         // Inputs for tools/nifcarrier `sync`: per box, the resolved worn-NIF path
@@ -1294,6 +1314,7 @@ namespace CostumeFW
         g_contentShapes.clear();
         g_showRealBody.clear();
         g_contentEnchants.clear();
+        g_contentTemper.clear();
         g_persistPreset.clear();
         PublishPolicy({});
         g_cefEnabled = true;
@@ -1555,6 +1576,19 @@ namespace CostumeFW
                 g_contentEnchants[std::move(key)] = std::move(effs);
             }
         }
+        const auto tempers = doc.value("tempers", nlohmann::json::object());
+        for (auto it = tempers.begin(); it != tempers.end(); ++it) {
+            if (!it.value().is_number()) {
+                continue;
+            }
+            const float mult = it.value().get<float>();
+            if (mult > 1.0001f) {  // tempering only raises; 1.0 = no entry
+                std::string key = it.key();
+                healed |= MigrateLegacyColonId(key);
+                healed |= CanonicalizeColonId(key);  // ROOT D
+                g_contentTemper[std::move(key)] = mult;
+            }
+        }
         ParsePublishJson(doc);
         } catch (const std::exception& e) {
             // ROOT B: a wrong-typed field threw mid-extraction. Discard the partial
@@ -1571,6 +1605,7 @@ namespace CostumeFW
         g_statWeightOff.clear();
         g_statArmorOff.clear();
             g_contentEnchants.clear();
+            g_contentTemper.clear();
             g_persistPreset.clear();
             PublishPolicy({});
             g_cefEnabled = true;
@@ -3245,7 +3280,9 @@ namespace CostumeFW
                 for (const auto& c : AdmittedContents(a_box.contents)) {  // r3: skip quarantined
                     if (auto* armo = ResolveArmo(c)) {
                         if (!g_statArmorOff.contains(c)) {
-                            armorSum += armo->GetArmorRating();
+                            // Captured temper multiplier scales the base rating the
+                            // way the engine scales a worn tempered piece.
+                            armorSum += armo->GetArmorRating() * TemperMultOf(c);
                         }
                         if (!g_statWeightOff.contains(c)) {
                             weightSum += armo->weight;
@@ -3366,6 +3403,31 @@ namespace CostumeFW
         return out;
     }
 
+    namespace
+    {
+        // The temper multiplier riding an inventory entry: ExtraHealth on the
+        // worn - else first - extra list, i.e. the SAME list CaptureItemToStore
+        // moves into the hidden store. 1.0 = untempered.
+        float EntryTemperHealth(const RE::InventoryEntryData* a_entry)
+        {
+            if (!a_entry || !a_entry->extraLists) {
+                return 1.0f;
+            }
+            RE::ExtraDataList* xlist = nullptr;
+            for (auto* x : *a_entry->extraLists) {
+                if (x && (x->HasType<RE::ExtraWorn>() || x->HasType<RE::ExtraWornLeft>())) {
+                    xlist = x;
+                    break;
+                }
+            }
+            if (!xlist && !a_entry->extraLists->empty()) {
+                xlist = a_entry->extraLists->front();
+            }
+            const auto* health = xlist ? xlist->GetByType<RE::ExtraHealth>() : nullptr;
+            return health ? health->health : 1.0f;
+        }
+    }
+
     bool CaptureEnchant(const std::string& a_content)
     {
         StoreLock lk;
@@ -3395,6 +3457,9 @@ namespace CostumeFW
         // snapshots player enchantments.
         RE::EnchantmentItem* ench = nullptr;
         RE::EnchantmentItem* carried = nullptr;
+        float temper = 1.0f;
+        float carriedTemper = 1.0f;
+        bool sawWorn = false;
         // Target-only filter (review P1-2): the old Armor-wide filter made
         // GetInventory copy EVERY armor's InventoryEntryData - capturing a
         // perfectly safe item still copied a foreign runtime item's hostile
@@ -3413,14 +3478,20 @@ namespace CostumeFW
             }
             if (entry->IsWorn()) {
                 ench = entry->GetEnchantment();
+                temper = EntryTemperHealth(entry.get());
+                sawWorn = true;
                 break;
             }
             if (!carried) {
                 carried = entry->GetEnchantment();
+                carriedTemper = EntryTemperHealth(entry.get());
             }
         }
         if (!ench) {
             ench = carried;
+        }
+        if (!sawWorn) {
+            temper = carriedTemper;
         }
         std::vector<EnchEffect> effs;
         if (ench) {
@@ -3437,7 +3508,23 @@ namespace CostumeFW
         } else {
             g_contentEnchants.erase(a_content);
         }
+        // Tempering snapshot at the SAME spot (2game.info 2026-08-18): the token
+        // sums base armorRating, so the smithing improvement must ride a captured
+        // multiplier exactly like the player enchantment does.
+        if (temper > 1.0001f) {
+            SKSE::log::info("boxes: captured temper x{:.2f} for '{}'", temper, a_content);
+            g_contentTemper[a_content] = temper;
+        } else {
+            g_contentTemper.erase(a_content);
+        }
         WriteJson();
+        // The holder's synthesized ability / token stats may ALREADY be built:
+        // the persist aggregate builds at load, and the MCM flow runs the add
+        // native (which queues its rebuild) BEFORE this capture - a snapshot
+        // stored now would silently sit out until the next game load (07-21
+        // finding; the reporter's "enchant not reflected"). Rebuild + re-apply
+        // here so the caller's ordering can't matter.
+        ReapplyStatsForContent(a_content);
         return has;
     }
 
@@ -3552,7 +3639,7 @@ namespace CostumeFW
             // Item-data toggles: an OFF channel leaves the summary too, so the
             // readout matches what actually reaches the token/ability.
             if (!g_statArmorOff.contains(c)) {
-                armorSum += armo->GetArmorRating();
+                armorSum += armo->GetArmorRating() * TemperMultOf(c);  // tempered value
             }
             if (!g_statWeightOff.contains(c)) {
                 weightSum += armo->weight;
@@ -3806,6 +3893,113 @@ namespace CostumeFW
         return false;
     }
 
+    bool HealStoredInstanceData()
+    {
+        StoreLock lk;
+        // v1.6.1 (2game.info 2026-08-18): contents captured before tempering was
+        // snapshotted - or whose player-enchant snapshot lost the old capture
+        // race - are not data losses: the hidden store still holds the original
+        // item WITH its ExtraDataList. Recover the missing channels from it, so
+        // existing boxes heal on load with no re-capture. Post-load main thread
+        // (the co-save has restored this save's store id by then).
+        if (!g_storeFormId) {
+            return false;
+        }
+        auto* form = RE::TESForm::LookupByID(g_storeFormId);
+        auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
+        if (!store) {
+            return false;
+        }
+        std::unordered_map<std::uint32_t, std::string> wanted;
+        const auto want = [&wanted](const std::string& a_id) {
+            if (g_contentTemper.contains(a_id) && g_contentEnchants.contains(a_id)) {
+                return;  // both channels already snapshotted
+            }
+            if (const std::uint32_t formId = ResolveFormId(a_id)) {
+                wanted.emplace(formId, a_id);
+            }
+        };
+        for (const auto& b : g_boxes) {
+            for (const auto& c : b.contents) {
+                want(c);
+            }
+        }
+        for (const auto& c : PersistContents()) {
+            want(c);
+        }
+        if (wanted.empty()) {
+            return false;
+        }
+        bool changed = false;
+        // Target-only filter (the P1-2 lesson): only our own captured originals'
+        // entries are ever copied out of the store.
+        auto inv = store->GetInventory([&wanted](RE::TESBoundObject& a_obj) {
+            return wanted.contains(a_obj.GetFormID());
+        });
+        for (auto& [obj, data] : inv) {
+            const auto& [count, entry] = data;
+            if (!obj || count <= 0 || !entry || !entry->extraLists) {
+                continue;
+            }
+            const auto found = wanted.find(obj->GetFormID());
+            if (found == wanted.end()) {
+                continue;
+            }
+            const std::string& id = found->second;
+            if (!g_contentTemper.contains(id)) {
+                float health = 1.0f;
+                for (auto* x : *entry->extraLists) {
+                    if (!x) {
+                        continue;
+                    }
+                    if (const auto* xh = x->GetByType<RE::ExtraHealth>()) {
+                        health = std::max(health, xh->health);
+                    }
+                }
+                if (health > 1.0001f) {
+                    SKSE::log::info("heal: '{}' temper x{:.2f} recovered from the stored original",
+                        id, health);
+                    g_contentTemper[id] = health;
+                    changed = true;
+                }
+            }
+            if (!g_contentEnchants.contains(id)) {
+                RE::EnchantmentItem* ench = nullptr;
+                for (auto* x : *entry->extraLists) {
+                    if (!x) {
+                        continue;
+                    }
+                    // Instance (player) enchantment only - a base enchantment
+                    // already flows through the BuildEnchantSpell fallback.
+                    if (const auto* xe = x->GetByType<RE::ExtraEnchantment>();
+                        xe && xe->enchantment) {
+                        ench = xe->enchantment;
+                        break;
+                    }
+                }
+                std::vector<EnchEffect> effs;
+                if (ench) {
+                    for (auto* e : ench->effects) {
+                        if (e && e->baseEffect) {
+                            effs.push_back({ MakeColonId(e->baseEffect), e->effectItem.magnitude });
+                        }
+                    }
+                }
+                if (!effs.empty()) {
+                    SKSE::log::info(
+                        "heal: '{}' player enchant recovered from the stored original ({} effect(s))",
+                        id, effs.size());
+                    g_contentEnchants[id] = std::move(effs);
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            WriteJson();
+        }
+        return changed;
+    }
+
     int BoxCount()
     {
         StoreLock lk;
@@ -3984,6 +4178,7 @@ namespace CostumeFW
         g_contentShapes.erase(a_content);   // and its cached shape list
         g_showRealBody.erase(a_content);    // and its show-real-body opt-in
         g_contentEnchants.erase(a_content);  // and its captured enchantment
+        g_contentTemper.erase(a_content);    // and its captured temper multiplier
         WriteJson();
         SetTokenStats(box);  // recompute token armor/weight
         return true;
@@ -4038,7 +4233,7 @@ namespace CostumeFW
         }
         return std::format("{} | Weight {:.1f} | Armor {:.0f}",
             enchants.empty() ? "No enchantment" : enchants,
-            armo->weight, armo->GetArmorRating());
+            armo->weight, armo->GetArmorRating() * TemperMultOf(a_id));
     }
 
     namespace
@@ -4129,6 +4324,12 @@ namespace CostumeFW
     {
         StoreLock lk;
         return !g_statArmorOff.contains(a_id);
+    }
+
+    float ContentTemperMult(const std::string& a_id)
+    {
+        StoreLock lk;
+        return TemperMultOf(a_id);
     }
 
     bool SetStatArmorOn(const std::string& a_id, bool a_on)

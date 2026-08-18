@@ -1,9 +1,26 @@
 # Changelog
 
-## v1.6.1 (2026-08-05)
+## v1.6.1 (2026-08-18)
 
 ### Fixed
 
+- **Smithing improvements and player enchantments now pass through
+  reliably** (2game.info report). Three holes, one spot - the capture that
+  snapshots an item's instance data:
+  - The tempering multiplier was never captured: a Legendary iron cuirass
+    counted only its base 25 armor on the token. Capture now snapshots the
+    improvement, and every armor sum (worn token, published costumes, the
+    "Item data" readouts) scales by it - matching what the piece gave you
+    worn directly.
+  - A player-made enchantment captured while the costume's stat ability was
+    already built (always the case for persist entries, a timing race in the
+    MCM flow) silently sat out until the next game load. The capture now
+    rebuilds the ability itself, so the order the UI calls things in can no
+    longer matter.
+  - **Items you captured on older versions heal automatically**: the hidden
+    store still holds your original item with its tempering and enchantment
+    intact, so each save load recovers whatever snapshot is missing - no
+    need to re-capture anything.
 - **Costumes shown while you are invisible now go invisible too.** Skyrim's
   invisibility (and any effect shader) only treats the geometry that exists
   when the effect starts, so a CEF costume added or re-shown mid-effect kept

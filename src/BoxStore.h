@@ -440,6 +440,17 @@ namespace CostumeFW
     std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content);
     bool CaptureEnchant(const std::string& a_content);
 
+    // The content's captured tempering multiplier (ExtraHealth at capture; healed
+    // from the hidden store's original for older captures). 1.0 = untempered.
+    // Scales the base armorRating in every armor passthrough sum.
+    float ContentTemperMult(const std::string& a_id);
+
+    // Recover missing temper / player-enchant snapshots for already-captured
+    // contents from the hidden store's originals (they keep the full
+    // ExtraDataList). Returns true if anything was healed (JSON written) - the
+    // caller restamps publish tokens then. Post-load main thread.
+    bool HealStoredInstanceData();
+
     // Sync every box's abilities to the player: token worn -> AddSpell, else
     // RemoveSpell. Applies the AUTO-synthesized stat ability (contents' enchant +
     // armor + weight) plus any optional manual ability, AND the persist class's

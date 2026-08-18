@@ -117,7 +117,7 @@ namespace CostumeFW
                 if (!item) continue;
                 // Item-data toggles ride the global per-content settings, so a
                 // published costume follows the same ON/OFF decisions.
-                if (StatArmorOn(id)) armor += item->GetArmorRating();
+                if (StatArmorOn(id)) armor += item->GetArmorRating() * ContentTemperMult(id);
                 if (StatWeightOn(id)) weight += item->weight;
                 for (auto* keyword : item->GetKeywords()) {
                     if (!keyword) continue;
