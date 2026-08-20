@@ -7,11 +7,13 @@
 - **Smithing improvements and player enchantments now pass through
   reliably** (2game.info report). Three holes, one spot - the capture that
   snapshots an item's instance data:
-  - The tempering multiplier was never captured: a Legendary iron cuirass
-    counted only its base 25 armor on the token. Capture now snapshots the
-    improvement, and every armor sum (worn token, published costumes, the
-    "Item data" readouts) scales by it - matching what the piece gave you
-    worn directly.
+  - The tempering improvement was never captured: a Legendary iron cuirass
+    counted only its base 25 armor on the token. Capture now measures the
+    improvement with the engine's own item-card arithmetic (so the token
+    shows exactly what the piece showed worn directly - the bonus is NOT a
+    flat "x health" scale, and GMST-retuning mods are respected), and every
+    armor sum (worn token, published costumes, the "Item data" readouts)
+    carries it.
   - A player-made enchantment captured while the costume's stat ability was
     already built (always the case for persist entries, a timing race in the
     MCM flow) silently sat out until the next game load. The capture now

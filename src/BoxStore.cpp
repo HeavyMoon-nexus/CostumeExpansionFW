@@ -36,6 +36,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <format>
@@ -151,11 +152,14 @@ namespace CostumeFW
         };
         std::unordered_map<std::string, std::vector<EnchEffect>> g_contentEnchants;
 
-        // Captured tempering multiplier per content (ExtraHealth.health; absent =
-        // untempered). The base ARMO's armorRating misses the smithing improvement
-        // exactly like it misses the player enchantment (2game.info 2026-08-18),
-        // so it snapshots at the same capture spot and scales every armor
-        // passthrough sum. GLOBAL config, content-keyed.
+        // Captured tempering multiplier per content (absent = untempered). The
+        // base ARMO's armorRating misses the smithing improvement exactly like it
+        // misses the player enchantment (2game.info 2026-08-18), so it snapshots
+        // at the same capture spot and scales every armor passthrough sum. The
+        // value is the ENGINE-measured item-card ratio (GetArmorValue with/without
+        // the instance list - see MeasureTemperMult), not the raw ExtraHealth:
+        // the card bonus is a flat curve, not armorRating*health. GLOBAL config,
+        // content-keyed.
         std::unordered_map<std::string, float> g_contentTemper;
 
         float TemperMultOf(const std::string& a_id)
@@ -3405,26 +3409,64 @@ namespace CostumeFW
 
     namespace
     {
-        // The temper multiplier riding an inventory entry: ExtraHealth on the
-        // worn - else first - extra list, i.e. the SAME list CaptureItemToStore
-        // moves into the hidden store. 1.0 = untempered.
-        float EntryTemperHealth(const RE::InventoryEntryData* a_entry)
+        // The instance-data extra list riding an inventory entry: the worn -
+        // else first - list, i.e. the SAME one CaptureItemToStore moves into
+        // the hidden store.
+        RE::ExtraDataList* EntryInstanceList(const RE::InventoryEntryData* a_entry)
         {
             if (!a_entry || !a_entry->extraLists) {
-                return 1.0f;
+                return nullptr;
             }
-            RE::ExtraDataList* xlist = nullptr;
             for (auto* x : *a_entry->extraLists) {
                 if (x && (x->HasType<RE::ExtraWorn>() || x->HasType<RE::ExtraWornLeft>())) {
-                    xlist = x;
-                    break;
+                    return x;
                 }
             }
-            if (!xlist && !a_entry->extraLists->empty()) {
-                xlist = a_entry->extraLists->front();
+            return a_entry->extraLists->empty() ? nullptr : a_entry->extraLists->front();
+        }
+
+        // Engine-measured temper multiplier for one extra list on a base armor:
+        // GetArmorValue(with list) / GetArmorValue(bare). The item-card math is
+        // NOT armorRating*health - a Fine (1.10) 40-rated cuirass displays +2ish,
+        // not +4 (owner test 2026-08-18: real piece 45 vs naive token 47) - and
+        // mods retune it via GMSTs, so let the engine do the arithmetic. The
+        // ratio divides out the skill/perk multiplier, leaving exactly the factor
+        // the token's base rating must carry for the token card to match the
+        // real item's. Falls back to the raw health multiplier on VR (the
+        // GetArmorValue thunk is unverified against the VR address map) and
+        // wherever the engine value is unusable (zero-rated base).
+        float MeasureTemperMult(RE::TESObjectARMO* a_armo, RE::ExtraDataList* a_xlist, float a_health)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!a_armo || !a_xlist || !player || REL::Module::IsVR()) {
+                return a_health;
             }
-            const auto* health = xlist ? xlist->GetByType<RE::ExtraHealth>() : nullptr;
-            return health ? health->health : 1.0f;
+            // Stack entries only borrow a_xlist; ~InventoryEntryData deletes the
+            // list CONTAINER it allocated, never the ExtraDataList itself (the
+            // moreHUD GetActualArmorRating pattern).
+            RE::InventoryEntryData bare{ a_armo, 0 };
+            const float base = player->GetArmorValue(&bare);
+            RE::InventoryEntryData rated{ a_armo, 0 };
+            rated.AddExtraList(a_xlist);
+            const float withTemper = player->GetArmorValue(&rated);
+            if (base <= 0.01f || withTemper <= base) {
+                return a_health;
+            }
+            return withTemper / base;
+        }
+
+        // The temper multiplier to store for an inventory entry: 1.0 when the
+        // instance is untempered, else the engine-measured armor ratio.
+        float EntryTemperMult(const RE::InventoryEntryData* a_entry)
+        {
+            auto* xlist = EntryInstanceList(a_entry);
+            const auto* xh = xlist ? xlist->GetByType<RE::ExtraHealth>() : nullptr;
+            const float health = xh ? xh->health : 1.0f;
+            if (health <= 1.0001f) {
+                return 1.0f;
+            }
+            auto* armo = a_entry->object ? a_entry->object->As<RE::TESObjectARMO>() : nullptr;
+            return MeasureTemperMult(armo, xlist, health);
         }
     }
 
@@ -3478,13 +3520,13 @@ namespace CostumeFW
             }
             if (entry->IsWorn()) {
                 ench = entry->GetEnchantment();
-                temper = EntryTemperHealth(entry.get());
+                temper = EntryTemperMult(entry.get());
                 sawWorn = true;
                 break;
             }
             if (!carried) {
                 carried = entry->GetEnchantment();
-                carriedTemper = EntryTemperHealth(entry.get());
+                carriedTemper = EntryTemperMult(entry.get());
             }
         }
         if (!ench) {
@@ -3911,10 +3953,11 @@ namespace CostumeFW
             return false;
         }
         std::unordered_map<std::uint32_t, std::string> wanted;
+        // Every held content is scanned: a missing snapshot heals, and an
+        // existing temper entry RE-measures against the stored original (the
+        // capture model changed once - raw health -> engine ratio - and the
+        // engine's arithmetic itself can change under the user's GMST mods).
         const auto want = [&wanted](const std::string& a_id) {
-            if (g_contentTemper.contains(a_id) && g_contentEnchants.contains(a_id)) {
-                return;  // both channels already snapshotted
-            }
             if (const std::uint32_t formId = ResolveFormId(a_id)) {
                 wanted.emplace(formId, a_id);
             }
@@ -3946,20 +3989,21 @@ namespace CostumeFW
                 continue;
             }
             const std::string& id = found->second;
-            if (!g_contentTemper.contains(id)) {
-                float health = 1.0f;
-                for (auto* x : *entry->extraLists) {
-                    if (!x) {
-                        continue;
+            {
+                const float mult = EntryTemperMult(entry.get());
+                const auto prev = g_contentTemper.find(id);
+                if (mult > 1.0001f) {
+                    if (prev == g_contentTemper.end() ||
+                        std::abs(prev->second - mult) > 0.005f) {
+                        SKSE::log::info(
+                            "heal: '{}' temper x{:.3f} measured from the stored original", id, mult);
+                        g_contentTemper[id] = mult;
+                        changed = true;
                     }
-                    if (const auto* xh = x->GetByType<RE::ExtraHealth>()) {
-                        health = std::max(health, xh->health);
-                    }
-                }
-                if (health > 1.0001f) {
-                    SKSE::log::info("heal: '{}' temper x{:.2f} recovered from the stored original",
-                        id, health);
-                    g_contentTemper[id] = health;
+                } else if (prev != g_contentTemper.end()) {
+                    SKSE::log::info(
+                        "heal: '{}' stored original is untempered - dropping stale multiplier", id);
+                    g_contentTemper.erase(prev);
                     changed = true;
                 }
             }
