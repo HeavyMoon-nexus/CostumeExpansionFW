@@ -13,7 +13,9 @@
     shows exactly what the piece showed worn directly - the bonus is NOT a
     flat "x health" scale, and GMST-retuning mods are respected), and every
     armor sum (worn token, published costumes, the "Item data" readouts)
-    carries it.
+    carries it. SMF's armor readouts also switched to the item-card scale
+    (skill/perk-scaled), so the numbers you see in the menu match the
+    numbers on the item cards.
   - A player-made enchantment captured while the costume's stat ability was
     already built (always the case for persist entries, a timing race in the
     MCM flow) silently sat out until the next game load. The capture now

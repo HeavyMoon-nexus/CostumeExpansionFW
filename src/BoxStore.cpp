@@ -168,6 +168,29 @@ namespace CostumeFW
             return it == g_contentTemper.end() ? 1.0f : it->second;
         }
 
+        // The armor figure for UI READOUTS: the item-card value (skill/perk-
+        // scaled via the engine's own GetArmorValue), so SMF's numbers agree
+        // with every card the player compares them against (owner test
+        // 2026-08-20: summary said +42 while both cards said 45). Multiplied by
+        // the temper ratio it reproduces the real item's card exactly. Display
+        // only - SetTokenStats/StampSnapshotStats keep writing the raw base.
+        // Falls back to the raw rating on VR (GetArmorValue thunk unverified -
+        // same conservative branch as MeasureTemperMult) and when the engine
+        // value is unusable.
+        float CardArmorOf(RE::TESObjectARMO* a_armo)
+        {
+            if (!a_armo) {
+                return 0.0f;
+            }
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player || REL::Module::IsVR()) {
+                return static_cast<float>(a_armo->GetArmorRating());
+            }
+            RE::InventoryEntryData bare{ a_armo, 0 };
+            const float card = player->GetArmorValue(&bare);
+            return card > 0.0f ? card : static_cast<float>(a_armo->GetArmorRating());
+        }
+
         // Persist class's applied preset name ("" = manual). Mirrors a box's preset.
         std::string g_persistPreset;
 
@@ -3801,9 +3824,11 @@ namespace CostumeFW
                 continue;
             }
             // Item-data toggles: an OFF channel leaves the summary too, so the
-            // readout matches what actually reaches the token/ability.
+            // readout matches what actually reaches the token/ability. Armor is
+            // shown at item-card scale (CardArmorOf) so it agrees with the
+            // token's own card.
             if (!g_statArmorOff.contains(c)) {
-                armorSum += armo->GetArmorRating() * TemperMultOf(c);  // tempered value
+                armorSum += CardArmorOf(armo) * TemperMultOf(c);
             }
             if (!g_statWeightOff.contains(c)) {
                 weightSum += armo->weight;
@@ -4365,8 +4390,9 @@ namespace CostumeFW
 
     std::string ContentStatsSummary(const std::string& a_id)
     {
-        // Raw captured values (pre-toggle) so the user can see what each
-        // switch is worth: "Fortify Destruction 25 | Weight 8.0 | Armor 26".
+        // Captured values (pre-toggle) so the user can see what each switch is
+        // worth: "Fortify Destruction 25 | Weight 8.0 | Armor 45". Armor rides
+        // the item-card scale (see CardArmorOf); enchant/weight are raw.
         StoreLock lk;
         auto* armo = ResolveArmo(a_id);
         if (!armo) {
@@ -4397,9 +4423,11 @@ namespace CostumeFW
                 }
             }
         }
+        // Armor at item-card scale x temper ratio = exactly what the real
+        // piece's card shows, so the row is comparable at a glance.
         return std::format("{} | Weight {:.1f} | Armor {:.0f}",
             enchants.empty() ? "No enchantment" : enchants,
-            armo->weight, armo->GetArmorRating() * TemperMultOf(a_id));
+            armo->weight, CardArmorOf(armo) * TemperMultOf(a_id));
     }
 
     namespace
