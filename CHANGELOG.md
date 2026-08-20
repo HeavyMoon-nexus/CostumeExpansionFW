@@ -1,37 +1,41 @@
 # Changelog
 
-## v1.6.1 (2026-08-18)
+## v1.6.1 (2026-08-20)
 
 ### Fixed
 
-- **Smithing improvements and player enchantments now pass through
-  reliably** (2game.info report). Three holes, one spot - the capture that
-  snapshots an item's instance data:
+- **Smithing improvements and enchantments now pass through faithfully**
+  (2game.info report: a tempered piece counted only its base armor on the
+  token, and enchantments could go missing). Everything traced to the one
+  spot that captures an item's instance data:
   - The tempering improvement was never captured: a Legendary iron cuirass
-    counted only its base 25 armor on the token. Capture now measures the
-    improvement with the engine's own item-card arithmetic (so the token
-    shows exactly what the piece showed worn directly - the bonus is NOT a
-    flat "x health" scale, and GMST-retuning mods are respected), and every
-    armor sum (worn token, published costumes, the "Item data" readouts)
-    carries it. SMF's armor readouts also switched to the item-card scale
-    (skill/perk-scaled), so the numbers you see in the menu match the
-    numbers on the item cards.
-  - A player-made enchantment captured while the costume's stat ability was
-    already built (always the case for persist entries, a timing race in the
-    MCM flow) silently sat out until the next game load. The capture now
-    rebuilds the ability itself, so the order the UI calls things in can no
-    longer matter.
+    counted only its base 25 armor. Capture now measures the improvement
+    with the engine's own item-card arithmetic - the token gives exactly
+    what the piece gave worn directly, and mods that retune tempering are
+    respected - and every armor sum (worn token, published costumes, the
+    "Item data" readouts) carries it.
+  - A player-made enchantment captured while the costume's stat ability
+    was already built (always the case for persist entries, a timing race
+    in the MCM flow) silently sat out until the next game load. Capture
+    now rebuilds the ability itself, so the order the UI calls things in
+    can no longer matter.
   - **Conditional enchantments keep their conditions.** The synthesized
-    "Costume Stats" ability used to carry only effect magnitudes, so a mod
+    "Costume Stats" ability used to carry only effect strengths, so a mod
     enchant like "+30 stamina while sneaking" became always-on. It now
     copies the live enchantment's full effect data - conditions and
-    duration - whenever your original item is in CEF custody (base-enchanted
-    gear always; player-enchanted gear while the hidden store holds the
-    original). Published costumes keep the frozen snapshot by design.
-  - **Items you captured on older versions heal automatically**: the hidden
-    store still holds your original item with its tempering and enchantment
-    intact, so each save load recovers whatever snapshot is missing - no
-    need to re-capture anything.
+    duration - whenever your original item is in CEF custody
+    (base-enchanted gear always; player-enchanted gear while the hidden
+    store holds the original). Published costumes keep the frozen snapshot
+    by design.
+  - **Items you captured on older versions heal automatically**: the
+    hidden store still holds your original item with its tempering and
+    enchantment intact, so each save load recovers or refreshes whatever
+    snapshot is missing - no need to re-capture anything.
+- **Menu armor readouts now use the item-card scale** (your skill and
+  perks applied), so the number in the menu is the number on the card: a
+  box's Stats line matches its token's card, and each "Item data" row
+  matches the real piece's card. Previously the menu showed the raw
+  pre-skill rating and looked "wrong" next to the inventory.
 - **Costumes shown while you are invisible now go invisible too.** Skyrim's
   invisibility (and any effect shader) only treats the geometry that exists
   when the effect starts, so a CEF costume added or re-shown mid-effect kept
@@ -40,6 +44,19 @@
   for boxes, persist entries, substitute bodies, first and third person, and
   NPCs alike. It follows the effect ending just as faithfully, and a shape
   whose author gave it refraction of its own keeps it.
+
+### Notes
+
+- Armor rating only takes effect while the box's **armor class** is Light
+  or Heavy (a per-box setting; the engine gives Clothing no protection, so
+  the default - Clothing - shows Armor 0 on the token). If your costume
+  should protect you, flip the class once and the full tempered value
+  appears.
+- The enchantment passthrough is an ability ("Costume Stats"), so it shows
+  under **Active Effects**, not on the token's item card.
+- VR: tempering uses the raw improvement multiplier there (the exact
+  item-card measurement is not wired on VR) - values can read a touch
+  higher than on SE/AE.
 
 ## v1.6.0 (2026-08-05)
 
