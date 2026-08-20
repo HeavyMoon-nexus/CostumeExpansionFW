@@ -19,14 +19,6 @@
     in the MCM flow) silently sat out until the next game load. Capture
     now rebuilds the ability itself, so the order the UI calls things in
     can no longer matter.
-  - **Conditional enchantments keep their conditions.** The synthesized
-    "Costume Stats" ability used to carry only effect strengths, so a mod
-    enchant like "+30 stamina while sneaking" became always-on. It now
-    copies the live enchantment's full effect data - conditions and
-    duration - whenever your original item is in CEF custody
-    (base-enchanted gear always; player-enchanted gear while the hidden
-    store holds the original). Published costumes keep the frozen snapshot
-    by design.
   - **Items you captured on older versions heal automatically**: the
     hidden store still holds your original item with its tempering and
     enchantment intact, so each save load recovers or refreshes whatever
@@ -54,6 +46,12 @@
   appears.
 - The enchantment passthrough is an ability ("Costume Stats"), so it shows
   under **Active Effects**, not on the token's item card.
+- **Conditional enchantment effects are not supported** (bonuses that only
+  apply in certain situations - while sneaking, per set piece worn, and so
+  on). Gear implements these conditions in too many different ways for CEF
+  to reproduce them all faithfully, so a conditional enchant may apply
+  partially or not at all on a costume. Script-driven gear effects likewise
+  never run under CEF - you are warned at capture.
 - VR: tempering uses the raw improvement multiplier there (the exact
   item-card measurement is not wired on VR) - values can read a touch
   higher than on SE/AE.
