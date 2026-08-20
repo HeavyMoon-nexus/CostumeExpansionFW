@@ -3098,6 +3098,92 @@ namespace CostumeFW
             a_spell->effects.push_back(eff);
         }
 
+        // Deep-copy a condition chain so the synthesized spell OWNS its list.
+        // ~TESCondition deletes the whole chain, so SHARING nodes with the
+        // source form would hand the engine a double-free if it ever tears a
+        // dynamic spell down. Node data is plain (function index, params,
+        // flags); the param FORM pointers stay shared - forms outlive spells.
+        void CopyConditions(RE::TESCondition& a_dst, const RE::TESCondition& a_src)
+        {
+            RE::TESConditionItem** tail = &a_dst.head;
+            for (auto* cur = a_src.head; cur; cur = cur->next) {
+                auto* node = new RE::TESConditionItem();
+                node->data = cur->data;
+                node->next = nullptr;
+                *tail = node;
+                tail = &node->next;
+            }
+        }
+
+        // Full-fidelity copy of a live enchantment effect: magnitude AND the
+        // conditions/duration that gate it, so a conditional enchant ("while
+        // sneaking ...") does not become always-on on the token (2game.info
+        // follow-up 2026-08-20). The engine re-evaluates conditions on constant
+        // ability effects the same way it does on worn-enchant effects (the
+        // vanilla conditional-ability pattern), with the same subject. Flat
+        // AddEffect remains for snapshot-only contents.
+        void AddEffectFull(RE::SpellItem* a_spell, const RE::Effect* a_src)
+        {
+            if (!a_src || !a_src->baseEffect) {
+                return;
+            }
+            auto* eff = new RE::Effect();
+            eff->baseEffect = a_src->baseEffect;
+            eff->effectItem = a_src->effectItem;  // magnitude / area / duration
+            eff->cost = a_src->cost;
+            CopyConditions(eff->conditions, a_src->conditions);
+            a_spell->effects.push_back(eff);
+        }
+
+        // Whether the hidden store still holds a content's captured original,
+        // and that original's player/instance enchantment if it carries one.
+        // The live form has the full Effect data (conditions, durations) the
+        // flat snapshot cannot represent.
+        struct StoredEnchantLookup
+        {
+            bool inStore{ false };
+            RE::EnchantmentItem* instance{ nullptr };
+        };
+
+        StoredEnchantLookup FindStoredEnchant(const std::string& a_id)
+        {
+            StoredEnchantLookup out;
+            const std::uint32_t storeId = StoreFormId();
+            const std::uint32_t baseId = ResolveFormId(a_id);
+            if (!storeId || !baseId) {
+                return out;
+            }
+            auto* form = RE::TESForm::LookupByID(storeId);
+            auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
+            if (!store) {
+                return out;
+            }
+            auto inv = store->GetInventory([baseId](RE::TESBoundObject& a_obj) {
+                return a_obj.GetFormID() == baseId;
+            });
+            for (auto& [obj, data] : inv) {
+                const auto& [count, entry] = data;
+                if (count <= 0 || !entry) {
+                    continue;
+                }
+                out.inStore = true;
+                if (!entry->extraLists) {
+                    continue;
+                }
+                for (auto* x : *entry->extraLists) {
+                    if (!x) {
+                        continue;
+                    }
+                    if (const auto* xe = x->GetByType<RE::ExtraEnchantment>();
+                        xe && xe->enchantment) {
+                        out.instance = xe->enchantment;
+                        return out;
+                    }
+                }
+            }
+            return out;
+        }
+
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId)
         {
             const std::uint32_t formId = ResolveFormId(a_colonId);
@@ -3118,26 +3204,53 @@ namespace CostumeFW
         // nullptr if none of the contents contributes an effect.
         RE::SpellItem* BuildEnchantSpell(const std::vector<std::string>& a_contents, const char* a_name)
         {
-            std::vector<std::pair<RE::EffectSetting*, float>> effs;
+            // Per effect: either a LIVE source Effect (full fidelity: magnitude
+            // + duration + conditions) or a flat {mgef, magnitude} snapshot.
+            struct PendingEffect
+            {
+                RE::EffectSetting* mgef{ nullptr };
+                float magnitude{ 0.0f };
+                const RE::Effect* live{ nullptr };
+            };
+            std::vector<PendingEffect> effs;
+            const auto pushLive = [&effs](const RE::EnchantmentItem* a_ench) {
+                for (auto* e : a_ench->effects) {
+                    if (e && e->baseEffect) {
+                        effs.push_back({ nullptr, 0.0f, e });
+                    }
+                }
+            };
             // r3 (re-review P1-2): single ability choke - box AND persist
             // ability synthesis skip quarantined contents here.
             for (const auto& c : AdmittedContents(a_contents)) {
                 if (g_statEnchantOff.contains(c)) {
                     continue;  // item-data toggle: enchant passthrough OFF
                 }
+                // Source priority (2026-08-20 conditions fix): the stored
+                // original's instance enchantment, else - when the store
+                // verifiably holds the original, so no re-enchant replaced the
+                // base - the base form's enchantment, both at full fidelity.
+                // Then the flat snapshot (original unreachable: other-character
+                // persist, cross-save copy), and last the bare base form.
+                auto* armo = ResolveArmo(c);
+                const auto stored = FindStoredEnchant(c);
+                if (stored.instance) {
+                    pushLive(stored.instance);
+                    continue;
+                }
+                if (stored.inStore && armo && armo->formEnchanting) {
+                    pushLive(armo->formEnchanting);
+                    continue;
+                }
                 const auto snap = g_contentEnchants.find(c);
                 if (snap != g_contentEnchants.end()) {
                     for (const auto& e : snap->second) {
                         if (auto* mgef = ResolveMgef(e.mgef)) {
-                            effs.emplace_back(mgef, e.magnitude);
+                            effs.push_back({ mgef, e.magnitude, nullptr });
                         }
                     }
-                } else if (auto* armo = ResolveArmo(c); armo && armo->formEnchanting) {
-                    for (auto* e : armo->formEnchanting->effects) {
-                        if (e && e->baseEffect) {
-                            effs.emplace_back(e->baseEffect, e->effectItem.magnitude);
-                        }
-                    }
+                } else if (armo && armo->formEnchanting) {
+                    pushLive(armo->formEnchanting);
                 }
             }
             if (effs.empty()) {
@@ -3154,10 +3267,19 @@ namespace CostumeFW
             spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
             spell->data.costOverride = 0;
             spell->fullName = a_name;
-            for (auto& [mgef, mag] : effs) {
-                AddEffect(spell, mgef, mag);
+            int conditioned = 0;
+            for (const auto& pe : effs) {
+                if (pe.live) {
+                    AddEffectFull(spell, pe.live);
+                    if (pe.live->conditions) {
+                        ++conditioned;
+                    }
+                } else {
+                    AddEffect(spell, pe.mgef, pe.magnitude);
+                }
             }
-            SKSE::log::debug("boxes: synth enchant ability '{}' ({} effect(s))", a_name, effs.size());
+            SKSE::log::debug("boxes: synth enchant ability '{}' ({} effect(s), {} conditioned)",
+                a_name, effs.size(), conditioned);
             return spell;
         }
 

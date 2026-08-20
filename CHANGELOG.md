@@ -19,6 +19,13 @@
     MCM flow) silently sat out until the next game load. The capture now
     rebuilds the ability itself, so the order the UI calls things in can no
     longer matter.
+  - **Conditional enchantments keep their conditions.** The synthesized
+    "Costume Stats" ability used to carry only effect magnitudes, so a mod
+    enchant like "+30 stamina while sneaking" became always-on. It now
+    copies the live enchantment's full effect data - conditions and
+    duration - whenever your original item is in CEF custody (base-enchanted
+    gear always; player-enchanted gear while the hidden store holds the
+    original). Published costumes keep the frozen snapshot by design.
   - **Items you captured on older versions heal automatically**: the hidden
     store still holds your original item with its tempering and enchantment
     intact, so each save load recovers whatever snapshot is missing - no
