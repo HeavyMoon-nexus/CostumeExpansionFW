@@ -1,6 +1,8 @@
 Costume Expansion FW - NPC Token Add-on
 
-Install this archive alongside the same-version core Costume Expansion FW.
+Install this archive alongside a core Costume Expansion FW of the same
+version or newer. A release that changes nothing in the add-on leaves its
+file alone, so an add-on version lower than the core's is expected and fine.
 Enable CostumeFW_NPC.esp. It is a permanent separate ESL-flagged add-on and
 must never be merged into CostumeFW.esp.
 
