@@ -56,6 +56,15 @@
   item-card measurement is not wired on VR) - values can read a touch
   higher than on SE/AE.
 
+### Thanks
+
+- **baki** - for sustained crash-log diagnosis and field testing through
+  the v1.5.x line. The custom-race carrier failure fixed in v1.5.2 was
+  found and confirmed on their character, and the head-part teeth watchdog
+  got its first real-world run there. Named here at their request: the
+  thanks in v1.5.1 and v1.5.2 read as anonymous only because the display
+  name had not been settled yet.
+
 ## v1.6.0 (2026-08-05)
 
 ### Added

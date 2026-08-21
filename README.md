@@ -199,6 +199,9 @@ PapyrusCompiler CostumeFW_MCM -import="<SkyUI SDK + base scripts>" -output="Scri
 - **HDT-SMP family** (hydrogensaysHDT, aers, DaymareOn; FSMP / FlexSMP variants) — body physics that injected meshes inherit via standard bones.
 - **SkyUI** team — MCM framework.
 - Injection recipe adapted from skee's AttachMesh approach.
+- **baki** — sustained crash-log diagnosis and field testing across the v1.5.x line.
+  The custom-race carrier failure (v1.5.2) was found and confirmed on their character,
+  and the head-part teeth watchdog got its first real-world run there.
 
 ## License
 
