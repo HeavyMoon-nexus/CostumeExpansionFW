@@ -418,6 +418,65 @@ namespace CostumeFW::SmfUI
                 BodyMorph::Available() ? "OK" : "MISSING");
             ImGui::Text("CostumeFW.esp: %s", espOk ? "OK" : "MISSING");
 
+            // --- Recovery (v1.6.2) ------------------------------------------
+            // The net under the orphan sweep. The sweep hands back what the
+            // hidden store still holds; this covers what it cannot reach - the
+            // store ref lost with a save, a piece captured on another character,
+            // a box entry rolled back away. One row per item CEF has ever taken,
+            // because once the box entry is gone the id is the only handle left
+            // and the user has no way to know it.
+            {
+                const auto log = CustodyLog();
+                ImGui::SeparatorText(std::format("Recovery ({} item(s))", log.size()).c_str());
+                if (log.empty()) {
+                    ImGui::TextDisabled("Nothing captured yet.");
+                } else {
+                    ImGui::TextWrapped(
+                        "Every item CEF has taken into storage, newest first. Use this when a "
+                        "piece went missing. If it is still in storage you get the original "
+                        "back with its tempering and enchantment; if it is not, CEF recreates "
+                        "a plain copy, so recovering something you already have gives you two.");
+                    for (const auto& e : log) {
+                        ImGui::PushID(e.id.c_str());
+                        if (ImGui::Button("Recover")) {
+                            ImGui::OpenPopup("Recover this item?###cfwrec");
+                        }
+                        ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
+                        if (ImGui::BeginPopupModal("Recover this item?###cfwrec")) {
+                            ImGui::TextWrapped("%s", e.name.c_str());
+                            ImGui::TextDisabled("%s", e.id.c_str());
+                            ImGui::TextWrapped(
+                                "If this item is no longer in storage, CEF recreates it without "
+                                "its tempering or player enchantment. Only do this for a piece "
+                                "you have actually lost.");
+                            if (ImGui::Button("Recover##go")) {
+                                const std::string id = e.id;
+                                SKSE::GetTaskInterface()->AddTask([id] {
+                                    if (RecoverContentItem(id)) {
+                                        RE::DebugNotification(
+                                            ("CostumeFW: recovered " + ItemDisplayName(id)).c_str());
+                                    } else {
+                                        RE::DebugNotification(
+                                            "CostumeFW: that item could not be resolved - see the log");
+                                    }
+                                });
+                                ImGui::CloseCurrentPopup();
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Cancel##no")) {
+                                ImGui::CloseCurrentPopup();
+                            }
+                            ImGui::EndPopup();
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("%s", e.name.c_str());
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%s  %s", e.event.c_str(), e.when.c_str());
+                        ImGui::PopID();
+                    }
+                }
+            }
+
             ImGui::SeparatorText("Maintenance");
             if (ImGui::Button("Prepare for uninstall##cfwun")) {
                 ImGui::OpenPopup("Prepare for uninstall?###cfwunp");

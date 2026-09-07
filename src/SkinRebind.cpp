@@ -49,6 +49,8 @@
 #include <string_view>
 #include <vector>
 
+#include <Windows.h>  // GetModuleHandleA (Bone Limit Extender presence check)
+
 namespace CostumeFW
 {
     namespace
@@ -996,6 +998,11 @@ namespace CostumeFW
         // reported next to it are a different axis entirely.
         std::uint32_t g_maxShapeBones = 0;
         std::unordered_set<std::string> g_staticDiagReported;
+        // Contents already warned about the 80-bone ceiling this session. The
+        // Diagnostics page has reported this all along, but a user only looks
+        // there once something has already gone wrong - and what goes wrong here
+        // is a crash. Say it on screen, once per item, when it is injected.
+        std::unordered_set<std::string> g_boneLimitWarned;
 
         std::atomic<int> g_rebindRetryBudget{ 0 };
         std::atomic<bool> g_rebindRetryQueued{ false };
@@ -1806,6 +1813,23 @@ namespace CostumeFW
                 slot->fsmpBones = g_rebind3pFsmp;
                 slot->staticBones = g_rebind3pRemap;
                 slot->maxShapeBones = g_maxShapeBones;
+            }
+            // Bone Limit Extender guard: this shape asks for more bones than the
+            // vanilla GPU skinning buffer holds, and nothing is lifting the limit.
+            // The count is already measured here, so the check is free - and this
+            // is the moment the item goes on, which is the moment before the
+            // crash. Once per content per session, never mid-load spam.
+            if (g_maxShapeBones > kVanillaShapeBoneLimit &&
+                !GetModuleHandleA("skyrimbonelimitfix.dll") &&
+                g_boneLimitWarned.insert(a_item.id).second) {
+                SKSE::log::warn(
+                    "bone limit: '{}' has a {}-bone shape and Bone Limit Extender is not "
+                    "loaded (vanilla ceiling {}) - this crashes when the shape is skinned",
+                    a_item.id, g_maxShapeBones, kVanillaShapeBoneLimit);
+                RE::DebugNotification(
+                    ("CostumeFW: " + ItemDisplayName(a_item.id) +
+                        " needs Bone Limit Extender (Nexus 177636) - it can crash without it")
+                        .c_str());
             }
             if (g_injectStatic3p) {
                 RequestRebindRetry(a_state, a_item.id);

@@ -78,19 +78,14 @@ namespace CostumeFW
         // orphaned. False on a parse/field error and on "no settings file yet".
         bool g_settingsLoadOk = false;
 
-        // Custody history (v1.6.2): a small ring of what happened to captured
-        // items, so a support log - and later a Recovery UI - can say where a
-        // piece went. The orphan sweep writes to it; capture/return join later.
-        struct CustodyEvent
-        {
-            std::string id;
-            std::string name;
-            std::string event;
-            int count{ 0 };
-            std::string when;
-        };
-        std::vector<CustodyEvent> g_custodyLog;
-        constexpr std::size_t kCustodyLogMax = 64;
+        // Custody history (v1.6.2): ONE row per content id CEF has ever taken
+        // custody of, holding what last happened to it. Keyed by id on purpose,
+        // not an event stream: the case it exists for is "a piece vanished and I
+        // have no idea what it was", and there the id is the only thing that can
+        // bring it back - it is gone from every box, so nothing else records it.
+        // One row per id also means a bulk return can't flood out the history.
+        std::unordered_map<std::string, CustodyLogEntry> g_custody;
+        constexpr std::size_t kCustodyMax = 256;
 
         // Persist content (colon-form ARMA ids): always-injected, token-less. Phase 1
         // stores + injects these; worn-capture UI and seed retirement come in the MCM
@@ -385,10 +380,9 @@ namespace CostumeFW
             }
             doc["tempers"] = std::move(tempers);
 
-            auto custody = nlohmann::json::array();
-            for (const auto& e : g_custodyLog) {
-                custody.push_back({ { "id", e.id }, { "name", e.name },
-                    { "event", e.event }, { "count", e.count }, { "when", e.when } });
+            auto custody = nlohmann::json::object();
+            for (const auto& [id, e] : g_custody) {
+                custody[id] = { { "name", e.name }, { "event", e.event }, { "when", e.when } };
             }
             doc["custodyLog"] = std::move(custody);
             EmitPublishJson(doc);
@@ -535,6 +529,7 @@ namespace CostumeFW
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
         void ReapplyStatsForContent(const std::string& a_id);          // fwd (defined below)
+        void RecordCustody(const std::string& a_id, const char* a_event);  // fwd (below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
         // Inputs for tools/nifcarrier `sync`: per box, the resolved worn-NIF path
@@ -1370,7 +1365,7 @@ namespace CostumeFW
         g_contentEnchants.clear();
         g_contentTemper.clear();
         g_persistPreset.clear();
-        g_custodyLog.clear();
+        g_custody.clear();
         PublishPolicy({});
         g_cefEnabled = true;
         g_settingsLoadOk = false;  // set only on the clean path below
@@ -1645,23 +1640,23 @@ namespace CostumeFW
                 g_contentTemper[std::move(key)] = mult;
             }
         }
-        for (const auto& e : doc.value("custodyLog", nlohmann::json::array())) {
-            if (!e.is_object()) {
+        const auto custody = doc.value("custodyLog", nlohmann::json::object());
+        for (auto it = custody.begin(); it != custody.end(); ++it) {
+            if (!it.value().is_object()) {
                 continue;
             }
-            CustodyEvent ev;
-            ev.id = e.value("id", std::string{});
-            ev.name = e.value("name", std::string{});
-            ev.event = e.value("event", std::string{});
-            ev.count = e.value("count", 0);
-            ev.when = e.value("when", std::string{});
-            if (!ev.id.empty()) {
-                g_custodyLog.push_back(std::move(ev));
+            std::string key = it.key();
+            healed |= MigrateLegacyColonId(key);
+            healed |= CanonicalizeColonId(key);  // ROOT D
+            if (key.empty()) {
+                continue;
             }
-        }
-        if (g_custodyLog.size() > kCustodyLogMax) {
-            g_custodyLog.erase(g_custodyLog.begin(),
-                g_custodyLog.end() - static_cast<std::ptrdiff_t>(kCustodyLogMax));
+            CustodyLogEntry ev;
+            ev.id = key;
+            ev.name = it.value().value("name", std::string{});
+            ev.event = it.value().value("event", std::string{});
+            ev.when = it.value().value("when", std::string{});
+            g_custody[std::move(key)] = std::move(ev);
         }
         ParsePublishJson(doc);
         } catch (const std::exception& e) {
@@ -1681,7 +1676,7 @@ namespace CostumeFW
             g_contentEnchants.clear();
             g_contentTemper.clear();
             g_persistPreset.clear();
-            g_custodyLog.clear();
+            g_custody.clear();
             PublishPolicy({});
             g_cefEnabled = true;
             return;  // g_settingsLoadOk stays false: the orphan sweep must not run
@@ -4115,6 +4110,10 @@ namespace CostumeFW
         }
         player->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, xlist, store);
         SKSE::log::info("custody: captured 1x '{}' into the hidden store", a_id);
+        // The custody row starts here. This is the ONLY moment the id is
+        // guaranteed to be recorded somewhere the user can reach later: if the
+        // box entry is rolled back away, the row is all that is left of it.
+        RecordCustody(a_id, "captured");
         return true;
     }
 
@@ -4185,6 +4184,7 @@ namespace CostumeFW
                 if (it != counts.end() && it->second > 0) {
                     store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
                     SKSE::log::info("custody: returned stored '{}' to player", a_id);
+                    RecordCustody(a_id, "returned");
                     return true;
                 }
             }
@@ -4192,6 +4192,7 @@ namespace CostumeFW
         if (a_fabricate) {
             player->AddObjectToContainer(obj, nullptr, 1, nullptr);
             SKSE::log::info("custody: fabricated 1x '{}' (none stored on this save)", a_id);
+            RecordCustody(a_id, "recreated");
             return true;
         }
         return false;
@@ -4204,6 +4205,7 @@ namespace CostumeFW
         // so recovering a still-stored item no longer mints a second copy.
         if (ReturnStoredItem(a_id, true)) {
             SKSE::log::info("recover: granted 1x '{}' ({})", ItemDisplayName(a_id), a_id);
+            WriteJson(false);  // console / Recovery UI callers do not persist otherwise
             return true;
         }
         SKSE::log::warn("recover: '{}' does not resolve to an inventory item", a_id);
@@ -4331,13 +4333,31 @@ namespace CostumeFW
             return buf;
         }
 
-        void AppendCustodyLog(const std::string& a_id, const char* a_event, int a_count)
+        // Overwrites the id's row: what matters is what happened LAST. The name is
+        // re-read each time so a row keeps working after the item's plugin moved.
+        // Does not write the json itself - every custody flow already persists, and
+        // the paths that don't write once at their own end.
+        void RecordCustody(const std::string& a_id, const char* a_event)
         {
-            g_custodyLog.push_back(
-                { a_id, ItemDisplayName(a_id), a_event, a_count, NowStamp() });
-            if (g_custodyLog.size() > kCustodyLogMax) {
-                g_custodyLog.erase(g_custodyLog.begin());
+            if (a_id.empty()) {
+                return;
             }
+            auto& row = g_custody[a_id];
+            row.id = a_id;
+            row.name = ItemDisplayName(a_id);
+            row.event = a_event;
+            row.when = NowStamp();
+            if (g_custody.size() <= kCustodyMax) {
+                return;
+            }
+            // Over the cap: drop the oldest row. Stamps are sortable strings.
+            auto oldest = g_custody.begin();
+            for (auto it = g_custody.begin(); it != g_custody.end(); ++it) {
+                if (it->second.when < oldest->second.when) {
+                    oldest = it;
+                }
+            }
+            g_custody.erase(oldest);
         }
 
         // Every content id something still holds. The sweep returns what is NOT
@@ -4386,6 +4406,19 @@ namespace CostumeFW
         // held set look empty would otherwise empty the whole store in one go;
         // the rest simply waits for the next load.
         constexpr int kSweepCap = 64;
+    }
+
+    std::vector<CustodyLogEntry> CustodyLog()
+    {
+        StoreLock lk;
+        std::vector<CustodyLogEntry> out;
+        out.reserve(g_custody.size());
+        for (const auto& [id, e] : g_custody) {
+            out.push_back(e);
+        }
+        std::sort(out.begin(), out.end(),
+            [](const CustodyLogEntry& a, const CustodyLogEntry& b) { return a.when > b.when; });
+        return out;
     }
 
     int SweepOrphanedStoredItems()
@@ -4455,7 +4488,7 @@ namespace CostumeFW
                 nullptr, player);
             SKSE::log::info("sweep: returned {}x '{}' ({}) - held by nothing",
                 o.count, ItemDisplayName(o.id), o.id);
-            AppendCustodyLog(o.id, "returned-orphan", o.count);
+            RecordCustody(o.id, "returned-orphan");
             returned += o.count;
             ++items;
         }

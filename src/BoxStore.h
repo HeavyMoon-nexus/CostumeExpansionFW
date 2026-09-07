@@ -466,6 +466,19 @@ namespace CostumeFW
     // change). Main thread.
     void RebuildBoxAbility(const std::string& a_token);
 
+    // Custody history: one row per content id CEF has ever taken custody of, with
+    // what last happened to it. The id is the only handle on a piece whose box
+    // entry is gone, so this is what makes such a piece recoverable at all.
+    struct CustodyLogEntry
+    {
+        std::string id;
+        std::string name;
+        std::string event;  // captured / returned / returned-orphan / recovered
+        std::string when;   // local ISO-ish stamp, sortable
+    };
+    // Newest first. Main thread / VM thread (takes the store lock).
+    std::vector<CustodyLogEntry> CustodyLog();
+
     // Hand back captured items the hidden store still holds but nothing owns any
     // more - the loss direction of a save rollback (take a piece out of a box, quit
     // without saving, load the older save: the global json says nobody owns it while
