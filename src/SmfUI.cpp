@@ -433,11 +433,25 @@ namespace CostumeFW::SmfUI
                 } else {
                     ImGui::TextWrapped(
                         "Every item CEF has taken into storage, newest first. Use this when a "
-                        "piece went missing. If it is still in storage you get the original "
-                        "back with its tempering and enchantment; if it is not, CEF recreates "
-                        "a plain copy, so recovering something you already have gives you two.");
+                        "piece went missing. An item a box still holds is not missing - take it "
+                        "out of the box instead; those rows say where they are. For the rest, "
+                        "if the item is still in storage you get the original back with its "
+                        "tempering and enchantment, and if it is not, CEF recreates a plain "
+                        "copy - so recovering something you already have gives you two.");
                     for (const auto& e : log) {
                         ImGui::PushID(e.id.c_str());
+                        // A held item is reachable the normal way, and recovering
+                        // it drains storage while the box goes on claiming it -
+                        // which then hands out a plain copy on the next remove.
+                        // Don't offer the footgun; say where the item is.
+                        const std::string held = CustodyHolderLabel(e.id);
+                        if (!held.empty()) {
+                            ImGui::TextDisabled("in %s", held.c_str());
+                            ImGui::SameLine();
+                            ImGui::Text("%s", e.name.c_str());
+                            ImGui::PopID();
+                            continue;
+                        }
                         if (ImGui::Button("Recover")) {
                             ImGui::OpenPopup("Recover this item?###cfwrec");
                         }

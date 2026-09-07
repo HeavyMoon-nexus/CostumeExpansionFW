@@ -479,6 +479,17 @@ namespace CostumeFW
     // Newest first. Main thread / VM thread (takes the store lock).
     std::vector<CustodyLogEntry> CustodyLog();
 
+    // Who currently holds a content id - "box 'X'" / "persist" / "published 'Y'" /
+    // "NPC persist" - or "" when nothing does. Same four sources the orphan sweep
+    // judges by, so the Recovery list and the sweep can never disagree.
+    std::string CustodyHolderLabel(const std::string& a_id);
+
+    // Give every currently held content id a custody row if it has none, so an
+    // existing user's Recovery list is not empty of everything captured before
+    // the history existed. Returns how many rows were added; never overwrites a
+    // real event. Post-load main thread, with the NPC/publish state restored.
+    int BackfillCustodyRows();
+
     // What is actually inside the hidden store right now: one line per stack, with
     // who holds it (box / persist / published / NPC persist) or ORPHAN, plus the
     // tempering and enchantment a returned original carries and a recreated copy

@@ -4476,6 +4476,86 @@ namespace CostumeFW
         return out;
     }
 
+    namespace
+    {
+        // Who holds each content id, by resolved FormID - the same four sources
+        // the sweep judges by, but keeping WHO rather than yes/no. One builder so
+        // the store listing, the sweep and the Recovery list can never disagree
+        // about what "held" means.
+        std::unordered_map<std::uint32_t, std::string> BuildHolderLabels()
+        {
+            std::unordered_map<std::uint32_t, std::string> holder;
+            const auto mark = [&holder](const std::string& a_id, const std::string& a_who) {
+                if (const std::uint32_t formId = ResolveFormId(a_id)) {
+                    holder.emplace(formId, a_who);
+                }
+            };
+            for (const auto& b : g_boxes) {
+                for (const auto& c : b.contents) {
+                    mark(c, "box '" + (b.label.empty() ? b.token : b.label) + "'");
+                }
+            }
+            for (const auto& c : PersistContents()) {
+                mark(c, "persist");
+            }
+            for (const auto& snap : PublishedSnapshot()) {
+                for (const auto& c : snap.contents) {
+                    mark(c, "published '" + snap.label + "'");
+                }
+            }
+            for (const auto& npr : NprAssignmentsForSave()) {
+                for (const auto& c : npr.contents) {
+                    mark(c, "NPC persist");
+                }
+            }
+            return holder;
+        }
+    }
+
+    std::string CustodyHolderLabel(const std::string& a_id)
+    {
+        StoreLock lk;
+        const std::uint32_t formId = ResolveFormId(a_id);
+        if (!formId) {
+            return {};
+        }
+        const auto holder = BuildHolderLabels();
+        const auto it = holder.find(formId);
+        return it == holder.end() ? std::string{} : it->second;
+    }
+
+    int BackfillCustodyRows()
+    {
+        StoreLock lk;
+        // The history only started recording at v1.6.2, so an existing user's
+        // Recovery list would show nothing but the handful of items they have
+        // moved since - useless for the one job it has, naming a piece that went
+        // missing. Everything CEF holds today is something it took custody of at
+        // some point, so give each one a row now, while it is still reachable.
+        // A row cannot be created after the item is lost; that is the whole point.
+        if (!g_settingsLoadOk) {
+            return 0;
+        }
+        int added = 0;
+        for (const auto& [formId, who] : BuildHolderLabels()) {
+            auto* form = RE::TESForm::LookupByID(formId);
+            if (!form) {
+                continue;
+            }
+            const std::string id = MakeColonId(form);
+            if (id.empty() || g_custody.contains(id)) {
+                continue;  // already recorded - never overwrite a real event
+            }
+            RecordCustody(id, "held");
+            ++added;
+        }
+        if (added > 0) {
+            SKSE::log::info("custody: recorded {} item(s) already held (history backfill)", added);
+            WriteJson(false);
+        }
+        return added;
+    }
+
     std::vector<std::string> StoreDiagLines()
     {
         StoreLock lk;
@@ -4491,32 +4571,7 @@ namespace CostumeFW
                 "[CEF] hidden store {:08X} does not resolve on this save", g_storeFormId));
             return out;
         }
-        // Same four sources the sweep judges by, but keeping WHO holds each id -
-        // so this listing answers the question the sweep only answers yes/no.
-        std::unordered_map<std::uint32_t, std::string> holder;
-        const auto mark = [&holder](const std::string& a_id, const std::string& a_who) {
-            if (const std::uint32_t formId = ResolveFormId(a_id)) {
-                holder.emplace(formId, a_who);
-            }
-        };
-        for (const auto& b : g_boxes) {
-            for (const auto& c : b.contents) {
-                mark(c, "box '" + (b.label.empty() ? b.token : b.label) + "'");
-            }
-        }
-        for (const auto& c : PersistContents()) {
-            mark(c, "persist");
-        }
-        for (const auto& snap : PublishedSnapshot()) {
-            for (const auto& c : snap.contents) {
-                mark(c, "published '" + snap.label + "'");
-            }
-        }
-        for (const auto& npr : NprAssignmentsForSave()) {
-            for (const auto& c : npr.contents) {
-                mark(c, "NPC persist");
-            }
-        }
+        const auto holder = BuildHolderLabels();
         auto inv = store->GetInventory();
         int items = 0;
         int orphans = 0;

@@ -408,6 +408,11 @@ namespace
                 // both need this save's restored store id, and the sweep's held
                 // set needs the publish / NPC-persist state the co-save restored.
                 CostumeFW::SweepOrphanedStoredItems();
+                // Then give anything still held a custody row if it has none, so
+                // the Recovery list covers items captured before the history
+                // existed. After the sweep: what it just returned is no longer
+                // held, and its own row is the more accurate one.
+                CostumeFW::BackfillCustodyRows();
                 CostumeFW::ReapplyBoxes();
                 CostumeFW::ApplyCarrierOverrides(false);
                 CostumeFW::Reconcile();
