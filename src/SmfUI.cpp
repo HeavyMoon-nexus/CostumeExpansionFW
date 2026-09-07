@@ -49,6 +49,7 @@ namespace CostumeFW::SmfUI
         std::string s_selContent;         // content id shown in the detail block
         char s_invFilter[64] = "";        // "+ Add from inventory" name filter
         char s_catFilter[64] = "";        // Persist page: catalog row filter (X-SCROLL)
+        char s_recFilter[64] = "";        // Recovery page: row filter (X-SCROLL)
         char s_hideSlots[64] = "";        // hide-when-worn slot list edit buffer
         std::string s_hideSlotsFor;       // which content the buffer was loaded for
         char s_exportName[64] = "";       // "Export as preset" name buffer
@@ -417,79 +418,6 @@ namespace CostumeFW::SmfUI
             ImGui::Text("RaceMenu / skee (body morph): %s",
                 BodyMorph::Available() ? "OK" : "MISSING");
             ImGui::Text("CostumeFW.esp: %s", espOk ? "OK" : "MISSING");
-
-            // --- Recovery (v1.6.2) ------------------------------------------
-            // The net under the orphan sweep. The sweep hands back what the
-            // hidden store still holds; this covers what it cannot reach - the
-            // store ref lost with a save, a piece captured on another character,
-            // a box entry rolled back away. One row per item CEF has ever taken,
-            // because once the box entry is gone the id is the only handle left
-            // and the user has no way to know it.
-            {
-                const auto log = CustodyLog();
-                ImGui::SeparatorText(std::format("Recovery ({} item(s))", log.size()).c_str());
-                if (log.empty()) {
-                    ImGui::TextDisabled("Nothing captured yet.");
-                } else {
-                    ImGui::TextWrapped(
-                        "Every item CEF has taken into storage, newest first. Use this when a "
-                        "piece went missing. An item a box still holds is not missing - take it "
-                        "out of the box instead; those rows say where they are. For the rest, "
-                        "if the item is still in storage you get the original back with its "
-                        "tempering and enchantment, and if it is not, CEF recreates a plain "
-                        "copy - so recovering something you already have gives you two.");
-                    for (const auto& e : log) {
-                        ImGui::PushID(e.id.c_str());
-                        // A held item is reachable the normal way, and recovering
-                        // it drains storage while the box goes on claiming it -
-                        // which then hands out a plain copy on the next remove.
-                        // Don't offer the footgun; say where the item is.
-                        const std::string held = CustodyHolderLabel(e.id);
-                        if (!held.empty()) {
-                            ImGui::TextDisabled("in %s", held.c_str());
-                            ImGui::SameLine();
-                            ImGui::Text("%s", e.name.c_str());
-                            ImGui::PopID();
-                            continue;
-                        }
-                        if (ImGui::Button("Recover")) {
-                            ImGui::OpenPopup("Recover this item?###cfwrec");
-                        }
-                        ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
-                        if (ImGui::BeginPopupModal("Recover this item?###cfwrec")) {
-                            ImGui::TextWrapped("%s", e.name.c_str());
-                            ImGui::TextDisabled("%s", e.id.c_str());
-                            ImGui::TextWrapped(
-                                "If this item is no longer in storage, CEF recreates it without "
-                                "its tempering or player enchantment. Only do this for a piece "
-                                "you have actually lost.");
-                            if (ImGui::Button("Recover##go")) {
-                                const std::string id = e.id;
-                                SKSE::GetTaskInterface()->AddTask([id] {
-                                    if (RecoverContentItem(id)) {
-                                        RE::DebugNotification(
-                                            ("CostumeFW: recovered " + ItemDisplayName(id)).c_str());
-                                    } else {
-                                        RE::DebugNotification(
-                                            "CostumeFW: that item could not be resolved - see the log");
-                                    }
-                                });
-                                ImGui::CloseCurrentPopup();
-                            }
-                            ImGui::SameLine();
-                            if (ImGui::Button("Cancel##no")) {
-                                ImGui::CloseCurrentPopup();
-                            }
-                            ImGui::EndPopup();
-                        }
-                        ImGui::SameLine();
-                        ImGui::Text("%s", e.name.c_str());
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("%s  %s", e.event.c_str(), e.when.c_str());
-                        ImGui::PopID();
-                    }
-                }
-            }
 
             ImGui::SeparatorText("Maintenance");
             if (ImGui::Button("Prepare for uninstall##cfwun")) {
@@ -1456,6 +1384,104 @@ namespace CostumeFW::SmfUI
             }
         }
 
+        // --- Recovery (v1.6.2) ------------------------------------------------
+        // Its own page, not a fold on Main: this lists EVERY item CEF has ever
+        // taken into storage, which on a real setup is dozens of rows - enough to
+        // push the page's own controls out of reach if it shared one.
+        //
+        // The net under the orphan sweep. The sweep hands back what the hidden
+        // store still holds; this covers what it cannot reach - the store ref lost
+        // with a save, a piece captured on another character, a box entry rolled
+        // back away. One row per item, because once the box entry is gone the id
+        // is the only handle left and the user has no way to know it.
+        void __stdcall RenderRecovery()
+        {
+            const auto log = CustodyLog();
+            ImGui::TextWrapped(
+                "Every item CEF has taken into storage, newest first. Use this when a piece "
+                "went missing. An item a box still holds is not missing - take it out of the "
+                "box instead; those rows say where they are. For the rest, if the item is "
+                "still in storage you get the original back with its tempering and "
+                "enchantment, and if it is not, CEF recreates a plain copy - so recovering "
+                "something you already have gives you two.");
+            if (log.empty()) {
+                ImGui::TextDisabled("Nothing captured yet.");
+                return;
+            }
+            ImGui::InputText("Filter##recf", s_recFilter, sizeof(s_recFilter));
+            // Rows that can be acted on come first: on a full setup almost every
+            // row is held and has no button, and a handful of recoverable ones at
+            // the bottom of eighty is the same as not showing them.
+            std::vector<std::pair<CustodyLogEntry, std::string>> rows;  // entry, holder
+            rows.reserve(log.size());
+            std::size_t loose = 0;
+            for (const auto& e : log) {
+                if (!RowMatches(e.name, s_recFilter) && !RowMatches(e.id, s_recFilter)) {
+                    continue;
+                }
+                std::string held = CustodyHolderLabel(e.id);
+                if (held.empty()) {
+                    ++loose;
+                }
+                rows.emplace_back(e, std::move(held));
+            }
+            std::stable_sort(rows.begin(), rows.end(),
+                [](const auto& a, const auto& b) { return a.second.empty() && !b.second.empty(); });
+            ImGui::Text("%d shown, %d not held by anything",
+                static_cast<int>(rows.size()), static_cast<int>(loose));
+            BeginScrollList("##reclist");
+            for (const auto& [e, held] : rows) {
+                ImGui::PushID(e.id.c_str());
+                // A held item is reachable the normal way, and recovering it
+                // drains storage while the box goes on claiming it - which then
+                // hands out a plain copy on the next remove. Don't offer the
+                // footgun; say where the item is.
+                if (!held.empty()) {
+                    ImGui::TextDisabled("in %s", held.c_str());
+                    ImGui::SameLine();
+                    ImGui::Text("%s", e.name.c_str());
+                    ImGui::PopID();
+                    continue;
+                }
+                if (ImGui::Button("Recover")) {
+                    ImGui::OpenPopup("Recover this item?###cfwrec");
+                }
+                ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
+                if (ImGui::BeginPopupModal("Recover this item?###cfwrec")) {
+                    ImGui::TextWrapped("%s", e.name.c_str());
+                    ImGui::TextDisabled("%s", e.id.c_str());
+                    ImGui::TextWrapped(
+                        "If this item is no longer in storage, CEF recreates it without its "
+                        "tempering or player enchantment. Only do this for a piece you have "
+                        "actually lost.");
+                    if (ImGui::Button("Recover##go")) {
+                        const std::string id = e.id;
+                        SKSE::GetTaskInterface()->AddTask([id] {
+                            if (RecoverContentItem(id)) {
+                                RE::DebugNotification(
+                                    ("CostumeFW: recovered " + ItemDisplayName(id)).c_str());
+                            } else {
+                                RE::DebugNotification(
+                                    "CostumeFW: that item could not be resolved - see the log");
+                            }
+                        });
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel##no")) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", e.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s  %s", e.event.c_str(), e.when.c_str());
+                ImGui::PopID();
+            }
+            EndScrollList();
+        }
+
         void __stdcall RenderDiagnostics()
         {
             // Two-tier logging switch (persist-CTD instrumentation). Session-only
@@ -1640,6 +1666,7 @@ namespace CostumeFW::SmfUI
         SKSEMenuFramework::AddSectionItem("NPC", RenderNpc);
         SKSEMenuFramework::AddSectionItem("Presets", RenderPresets);
         SKSEMenuFramework::AddSectionItem("Blocked", RenderBlocked);  // v1.3.2 capture blacklist
+        SKSEMenuFramework::AddSectionItem("Recovery", RenderRecovery);
         SKSEMenuFramework::AddSectionItem("Diagnostics", RenderDiagnostics);
         SKSE::log::info("SMF: registered section 'Costume Expansion FW' (6 pages)");
     }
