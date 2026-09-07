@@ -466,6 +466,17 @@ namespace CostumeFW
     // change). Main thread.
     void RebuildBoxAbility(const std::string& a_token);
 
+    // Hand back captured items the hidden store still holds but nothing owns any
+    // more - the loss direction of a save rollback (take a piece out of a box, quit
+    // without saving, load the older save: the global json says nobody owns it while
+    // the item stays in the save's store, reachable only through `cef recover`).
+    // Returns the number of items handed back. RETURNS ONLY: never deletes from the
+    // store, never edits the json, and refuses to run at all unless the settings
+    // load completed cleanly. Post-load main thread, after HealStoredInstanceData
+    // (it needs this save's store id, and the co-save must have restored the publish
+    // and NPC-persist state its held set reads).
+    int SweepOrphanedStoredItems();
+
     // Take every synthesized ability back off the player and mark them stale (call
     // on game load, before the boxes of the loaded save are applied). The forms are
     // KEPT: a save restores an ability by form id, so a form we forget is one that

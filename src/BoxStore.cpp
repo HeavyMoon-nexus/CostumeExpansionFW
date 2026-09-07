@@ -36,6 +36,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
@@ -71,6 +72,25 @@ namespace CostumeFW
 
         // Master CEF on/off (Main page). Persisted in CEF_settings.json.
         bool g_cefEnabled = true;
+        // Whether the last settings load finished cleanly. The orphan sweep
+        // refuses to run without it: a failed or partial load leaves every held
+        // set empty, and an empty held set makes the WHOLE hidden store look
+        // orphaned. False on a parse/field error and on "no settings file yet".
+        bool g_settingsLoadOk = false;
+
+        // Custody history (v1.6.2): a small ring of what happened to captured
+        // items, so a support log - and later a Recovery UI - can say where a
+        // piece went. The orphan sweep writes to it; capture/return join later.
+        struct CustodyEvent
+        {
+            std::string id;
+            std::string name;
+            std::string event;
+            int count{ 0 };
+            std::string when;
+        };
+        std::vector<CustodyEvent> g_custodyLog;
+        constexpr std::size_t kCustodyLogMax = 64;
 
         // Persist content (colon-form ARMA ids): always-injected, token-less. Phase 1
         // stores + injects these; worn-capture UI and seed retirement come in the MCM
@@ -364,6 +384,13 @@ namespace CostumeFW
                 tempers[id] = mult;
             }
             doc["tempers"] = std::move(tempers);
+
+            auto custody = nlohmann::json::array();
+            for (const auto& e : g_custodyLog) {
+                custody.push_back({ { "id", e.id }, { "name", e.name },
+                    { "event", e.event }, { "count", e.count }, { "when", e.when } });
+            }
+            doc["custodyLog"] = std::move(custody);
             EmitPublishJson(doc);
 
             if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
@@ -1343,8 +1370,10 @@ namespace CostumeFW
         g_contentEnchants.clear();
         g_contentTemper.clear();
         g_persistPreset.clear();
+        g_custodyLog.clear();
         PublishPolicy({});
         g_cefEnabled = true;
+        g_settingsLoadOk = false;  // set only on the clean path below
 
         // Read CEF_settings.json; fall back to the legacy costume_boxes.json once
         // (migration) and rewrite into the new file at the end of load.
@@ -1616,6 +1645,24 @@ namespace CostumeFW
                 g_contentTemper[std::move(key)] = mult;
             }
         }
+        for (const auto& e : doc.value("custodyLog", nlohmann::json::array())) {
+            if (!e.is_object()) {
+                continue;
+            }
+            CustodyEvent ev;
+            ev.id = e.value("id", std::string{});
+            ev.name = e.value("name", std::string{});
+            ev.event = e.value("event", std::string{});
+            ev.count = e.value("count", 0);
+            ev.when = e.value("when", std::string{});
+            if (!ev.id.empty()) {
+                g_custodyLog.push_back(std::move(ev));
+            }
+        }
+        if (g_custodyLog.size() > kCustodyLogMax) {
+            g_custodyLog.erase(g_custodyLog.begin(),
+                g_custodyLog.end() - static_cast<std::ptrdiff_t>(kCustodyLogMax));
+        }
         ParsePublishJson(doc);
         } catch (const std::exception& e) {
             // ROOT B: a wrong-typed field threw mid-extraction. Discard the partial
@@ -1634,10 +1681,13 @@ namespace CostumeFW
             g_contentEnchants.clear();
             g_contentTemper.clear();
             g_persistPreset.clear();
+            g_custodyLog.clear();
             PublishPolicy({});
             g_cefEnabled = true;
-            return;
+            return;  // g_settingsLoadOk stays false: the orphan sweep must not run
         }
+        // Clean, fully validated load - the held sets are now trustworthy.
+        g_settingsLoadOk = true;
         // ROOT B: snapshot the last-known-good backup only AFTER a clean, fully
         // validated load (previously taken before the field reads, so a file that
         // parsed but had a bad field could clobber the good .bak).
@@ -4267,6 +4317,161 @@ namespace CostumeFW
             WriteJson();
         }
         return changed;
+    }
+
+    namespace
+    {
+        std::string NowStamp()
+        {
+            const auto now = std::time(nullptr);
+            std::tm tm{};
+            localtime_s(&tm, &now);
+            char buf[32]{};
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+            return buf;
+        }
+
+        void AppendCustodyLog(const std::string& a_id, const char* a_event, int a_count)
+        {
+            g_custodyLog.push_back(
+                { a_id, ItemDisplayName(a_id), a_event, a_count, NowStamp() });
+            if (g_custodyLog.size() > kCustodyLogMax) {
+                g_custodyLog.erase(g_custodyLog.begin());
+            }
+        }
+
+        // Every content id something still holds. The sweep returns what is NOT
+        // in here, so a forgotten source means handing back a costume that is
+        // still in use - all four are load-bearing:
+        //   box contents / persist catalog / PUBLISHED snapshots / NPC-persist.
+        // The last two are the easy ones to miss: their items sit in the same
+        // hidden store while an NPC wears them. NPC assignments must include the
+        // UNRESOLVED ones - at load the actor's cell usually is not loaded yet -
+        // which is why this reads NprAssignmentsForSave() and not the live list.
+        // The persist CATALOG (not this save's active set) is deliberate: it is
+        // the wider set, and a wider held set can only mean returning less.
+        //
+        // Keyed by resolved FormID rather than colon-id string, so no spelling
+        // difference between sources can make a held item look orphaned.
+        std::unordered_set<std::uint32_t> BuildHeldFormIds()
+        {
+            std::unordered_set<std::uint32_t> held;
+            const auto add = [&held](const std::string& a_id) {
+                if (const std::uint32_t formId = ResolveFormId(a_id)) {
+                    held.insert(formId);
+                }
+            };
+            for (const auto& b : g_boxes) {
+                for (const auto& c : b.contents) {
+                    add(c);
+                }
+            }
+            for (const auto& c : PersistContents()) {
+                add(c);
+            }
+            for (const auto& snap : PublishedSnapshot()) {
+                for (const auto& c : snap.contents) {
+                    add(c);
+                }
+            }
+            for (const auto& npr : NprAssignmentsForSave()) {
+                for (const auto& c : npr.contents) {
+                    add(c);
+                }
+            }
+            return held;
+        }
+
+        // One load may hand back at most this many items. A bug that made the
+        // held set look empty would otherwise empty the whole store in one go;
+        // the rest simply waits for the next load.
+        constexpr int kSweepCap = 64;
+    }
+
+    int SweepOrphanedStoredItems()
+    {
+        StoreLock lk;
+        // The loss direction of the two-layer rollback (CEF_STATE_SCOPE.md §4):
+        // box definitions live in a GLOBAL json written immediately, the captured
+        // items live in a hidden store INSIDE the save. Take a piece out of a box,
+        // quit without saving, load the older save, and the json says "nobody owns
+        // it" while the item is still sitting in the store - reachable only by
+        // `cef recover <id>`, which needs an id the user has no way to know.
+        //
+        // This hands those back. It only ever RETURNS: it never deletes from the
+        // store and never edits the json. After a rollback the json can legitimately
+        // be the NEWER of the two, so treating it as the truth and destroying items
+        // to match would turn a recoverable mismatch into real data loss. Returning
+        // a duplicate is the worst this can do.
+        if (!g_settingsLoadOk) {
+            SKSE::log::warn("sweep: skipped - the settings load did not complete cleanly");
+            return 0;
+        }
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !g_storeFormId) {
+            return 0;
+        }
+        auto* form = RE::TESForm::LookupByID(g_storeFormId);
+        auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
+        if (!store) {
+            SKSE::log::debug("sweep: no hidden store on this save");
+            return 0;
+        }
+        const auto held = BuildHeldFormIds();
+
+        struct Orphan
+        {
+            RE::TESBoundObject* obj{ nullptr };
+            std::string id;
+            std::int32_t count{ 0 };
+        };
+        std::vector<Orphan> orphans;
+        auto inv = store->GetInventory([&held](RE::TESBoundObject& a_obj) {
+            // CEF's own tokens are never contents; they can legitimately sit here.
+            return !held.contains(a_obj.GetFormID()) && !IsCefToken(a_obj.GetFormID());
+        });
+        for (auto& [obj, data] : inv) {
+            const auto& [count, entry] = data;
+            if (!obj || count <= 0) {
+                continue;
+            }
+            orphans.push_back({ obj, MakeColonId(obj), count });
+        }
+        if (orphans.empty()) {
+            SKSE::log::debug("sweep: nothing orphaned ({} held id(s))", held.size());
+            return 0;
+        }
+        int returned = 0;
+        int items = 0;
+        for (const auto& o : orphans) {
+            if (returned >= kSweepCap) {
+                SKSE::log::warn("sweep: cap reached - {} more item(s) wait for the next load",
+                    static_cast<int>(orphans.size()) - items);
+                break;
+            }
+            // Container move, not fabricate: the original travels back WITH its
+            // instance data (tempering, a player enchantment).
+            store->RemoveItem(o.obj, o.count, RE::ITEM_REMOVE_REASON::kStoreInContainer,
+                nullptr, player);
+            SKSE::log::info("sweep: returned {}x '{}' ({}) - held by nothing",
+                o.count, ItemDisplayName(o.id), o.id);
+            AppendCustodyLog(o.id, "returned-orphan", o.count);
+            returned += o.count;
+            ++items;
+        }
+        WriteJson(false);  // persist the custody log; no box changed, so no manifest
+        if (items == 1) {
+            RE::DebugNotification(
+                ("CostumeFW: returned " + ItemDisplayName(orphans.front().id) +
+                    " - it was left in storage")
+                    .c_str());
+        } else if (items > 1) {
+            RE::DebugNotification(
+                ("CostumeFW: returned " + std::to_string(items) +
+                    " items left in storage")
+                    .c_str());
+        }
+        return returned;
     }
 
     int BoxCount()

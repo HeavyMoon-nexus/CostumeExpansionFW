@@ -402,6 +402,12 @@ namespace
                 if (CostumeFW::HealStoredInstanceData()) {
                     CostumeFW::StampAllPublishTokens();
                 }
+                // v1.6.2: hand back items the store still holds but no box,
+                // persist entry, published costume or NPC assignment owns - the
+                // loss direction of a save rollback. Runs right after the heal:
+                // both need this save's restored store id, and the sweep's held
+                // set needs the publish / NPC-persist state the co-save restored.
+                CostumeFW::SweepOrphanedStoredItems();
                 CostumeFW::ReapplyBoxes();
                 CostumeFW::ApplyCarrierOverrides(false);
                 CostumeFW::Reconcile();
