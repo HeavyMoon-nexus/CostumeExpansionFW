@@ -4490,16 +4490,19 @@ namespace CostumeFW
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !g_storeFormId) {
-            // Every other exit says why; this one used to be silent, which made a
-            // sweep that did nothing indistinguishable from a sweep that never ran.
-            SKSE::log::debug("sweep: no {} - nothing to sweep",
+            // Every exit reports, at info: this feature exists because the user
+            // cannot see what happened to their items, and a support log that
+            // says nothing about the sweep cannot tell "decided to do nothing"
+            // from "never ran". One line per save load is worth that.
+            SKSE::log::info("sweep: no {} - nothing to sweep",
                 player ? "hidden store on this save" : "player");
             return 0;
         }
         auto* form = RE::TESForm::LookupByID(g_storeFormId);
         auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
         if (!store) {
-            SKSE::log::debug("sweep: no hidden store on this save");
+            SKSE::log::info("sweep: this save's store ref {:08X} no longer resolves",
+                g_storeFormId);
             return 0;
         }
         const auto held = BuildHeldFormIds();
@@ -4523,7 +4526,7 @@ namespace CostumeFW
             orphans.push_back({ obj, MakeColonId(obj), count });
         }
         if (orphans.empty()) {
-            SKSE::log::debug("sweep: nothing orphaned ({} held id(s))", held.size());
+            SKSE::log::info("sweep: nothing orphaned ({} held id(s))", held.size());
             return 0;
         }
         int returned = 0;
