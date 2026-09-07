@@ -4490,6 +4490,10 @@ namespace CostumeFW
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !g_storeFormId) {
+            // Every other exit says why; this one used to be silent, which made a
+            // sweep that did nothing indistinguishable from a sweep that never ran.
+            SKSE::log::debug("sweep: no {} - nothing to sweep",
+                player ? "hidden store on this save" : "player");
             return 0;
         }
         auto* form = RE::TESForm::LookupByID(g_storeFormId);
