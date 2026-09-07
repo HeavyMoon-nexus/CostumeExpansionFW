@@ -77,6 +77,14 @@ namespace CostumeFW
         // set empty, and an empty held set makes the WHOLE hidden store look
         // orphaned. False on a parse/field error and on "no settings file yet".
         bool g_settingsLoadOk = false;
+        // Stronger than !g_settingsLoadOk: the settings file EXISTS but could not
+        // be loaded. Then CEF is holding empty state that is NOT the truth, and
+        // writing it back destroys the user's real one. Every WriteJson refuses
+        // while this is set, so a bad file (hand-edited, or a schema mistake of
+        // ours - 2026-09-08) costs a session, not the data. Cleared by the next
+        // clean load; a fresh install with no file at all is NOT this case and
+        // writes normally.
+        bool g_settingsUnreadable = false;
 
         // Custody history (v1.6.2): ONE row per content id CEF has ever taken
         // custody of, holding what last happened to it. Keyed by id on purpose,
@@ -280,6 +288,16 @@ namespace CostumeFW
 
         void WriteJson(bool a_writeManifest = true)
         {
+            if (g_settingsUnreadable) {
+                // One line per attempt: the user needs to know their edits are
+                // not sticking, and why, without a log dive.
+                SKSE::log::error(
+                    "settings: REFUSING to write - {} exists but did not load. The file on "
+                    "disk is your real data and is left alone; fix or remove it (a "
+                    "last-known-good copy is at {}), then restart the game.",
+                    kSettingsPath, kSettingsBakPath);
+                return;
+            }
             nlohmann::json doc;
             doc["schema"] = kSchema;
             doc["enabled"] = g_cefEnabled;
@@ -1373,10 +1391,16 @@ namespace CostumeFW
         // Read CEF_settings.json; fall back to the legacy costume_boxes.json once
         // (migration) and rewrite into the new file at the end of load.
         bool migrated = false;
+        g_settingsUnreadable = false;  // re-decided by this load
         std::ifstream f(kSettingsPath);
         if (!f) {
             std::ifstream old(kOldBoxesPath);
             if (!old) {
+                // No file at all: a fresh install, not a failure - writing must
+                // work (g_settingsUnreadable stays false). But the sweep still
+                // stays out: a settings file that went missing while the save
+                // still holds a full store is the case we know LEAST about, and
+                // an empty held set there would hand back everything at once.
                 SKSE::log::info("settings: no {} (no settings yet)", kSettingsPath);
                 return;
             }
@@ -1391,6 +1415,7 @@ namespace CostumeFW
         } catch (const std::exception& e) {
             SKSE::log::error("settings: JSON parse error: {}", e.what());
             if (migrated) {
+                g_settingsUnreadable = true;
                 return;  // legacy file was corrupt; nothing else to try
             }
             // Corrupt main file: fall back to the last-known-good backup taken at
@@ -1399,12 +1424,14 @@ namespace CostumeFW
             // loss permanent (Codex review 2026-07-05 A-1).
             std::ifstream bak(kSettingsBakPath);
             if (!bak) {
+                g_settingsUnreadable = true;
                 return;
             }
             try {
                 bak >> doc;
             } catch (const std::exception& e2) {
                 SKSE::log::error("settings: backup parse error: {}", e2.what());
+                g_settingsUnreadable = true;
                 return;
             }
             fromBackup = true;
@@ -1640,7 +1667,23 @@ namespace CostumeFW
                 g_contentTemper[std::move(key)] = mult;
             }
         }
-        const auto custody = doc.value("custodyLog", nlohmann::json::object());
+        // Shape-tolerant: the row-per-id object is the current form, but a build
+        // between the sweep and the Recovery UI wrote an event ARRAY here. A
+        // settings file is a user's data - never make one unreadable over a
+        // schema change of ours (this exact mismatch threw and emptied the whole
+        // store into the ROOT B path, 2026-09-08). Anything else is ignored.
+        nlohmann::json custody = nlohmann::json::object();
+        if (const auto node = doc.find("custodyLog"); node != doc.end()) {
+            if (node->is_object()) {
+                custody = *node;
+            } else if (node->is_array()) {
+                for (const auto& e : *node) {
+                    if (e.is_object() && e.contains("id") && e["id"].is_string()) {
+                        custody[e["id"].get<std::string>()] = e;
+                    }
+                }
+            }
+        }
         for (auto it = custody.begin(); it != custody.end(); ++it) {
             if (!it.value().is_object()) {
                 continue;
@@ -1679,7 +1722,12 @@ namespace CostumeFW
             g_custody.clear();
             PublishPolicy({});
             g_cefEnabled = true;
-            return;  // g_settingsLoadOk stays false: the orphan sweep must not run
+            // g_settingsLoadOk stays false: the orphan sweep must not run - and the
+            // empty state we are holding must never reach the file (this is the
+            // path a schema mistake of ours took on 2026-09-08, and only the .bak
+            // saved the user's boxes).
+            g_settingsUnreadable = true;
+            return;
         }
         // Clean, fully validated load - the held sets are now trustworthy.
         g_settingsLoadOk = true;
