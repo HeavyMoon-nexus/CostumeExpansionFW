@@ -2260,6 +2260,13 @@ namespace CostumeFW
             out.push_back("head parts registered: " + std::to_string(reg) + "/" +
                           std::to_string(pool.size()));
         }
+        // Custody at a glance; `cef store` prints the full listing.
+        {
+            out.push_back("# Hidden store");
+            const auto lines = StoreDiagLines();
+            out.push_back(lines.empty() ? "(unavailable)" : lines.front().substr(6));
+            out.push_back("full listing: console `cef store`");
+        }
         const auto npc = NpcDiagLines();
         out.insert(out.end(), npc.begin(), npc.end());
         out.push_back("# Churn (this session)");
@@ -4466,6 +4473,89 @@ namespace CostumeFW
         }
         std::sort(out.begin(), out.end(),
             [](const CustodyLogEntry& a, const CustodyLogEntry& b) { return a.when > b.when; });
+        return out;
+    }
+
+    std::vector<std::string> StoreDiagLines()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        if (!g_storeFormId) {
+            out.push_back("[CEF] no hidden store on this save (nothing captured yet)");
+            return out;
+        }
+        auto* form = RE::TESForm::LookupByID(g_storeFormId);
+        auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
+        if (!store) {
+            out.push_back(std::format(
+                "[CEF] hidden store {:08X} does not resolve on this save", g_storeFormId));
+            return out;
+        }
+        // Same four sources the sweep judges by, but keeping WHO holds each id -
+        // so this listing answers the question the sweep only answers yes/no.
+        std::unordered_map<std::uint32_t, std::string> holder;
+        const auto mark = [&holder](const std::string& a_id, const std::string& a_who) {
+            if (const std::uint32_t formId = ResolveFormId(a_id)) {
+                holder.emplace(formId, a_who);
+            }
+        };
+        for (const auto& b : g_boxes) {
+            for (const auto& c : b.contents) {
+                mark(c, "box '" + (b.label.empty() ? b.token : b.label) + "'");
+            }
+        }
+        for (const auto& c : PersistContents()) {
+            mark(c, "persist");
+        }
+        for (const auto& snap : PublishedSnapshot()) {
+            for (const auto& c : snap.contents) {
+                mark(c, "published '" + snap.label + "'");
+            }
+        }
+        for (const auto& npr : NprAssignmentsForSave()) {
+            for (const auto& c : npr.contents) {
+                mark(c, "NPC persist");
+            }
+        }
+        auto inv = store->GetInventory();
+        int items = 0;
+        int orphans = 0;
+        std::vector<std::string> rows;
+        for (auto& [obj, data] : inv) {
+            const auto& [count, entry] = data;
+            if (!obj || count <= 0) {
+                continue;
+            }
+            ++items;
+            const std::string id = MakeColonId(obj);
+            std::string row = std::format("  {} x{}  {}", id, count, ItemDisplayName(id));
+            if (const auto it = holder.find(obj->GetFormID()); it != holder.end()) {
+                row += "  [held by " + it->second + "]";
+            } else if (IsCefToken(obj->GetFormID())) {
+                row += "  [CEF token - not a content]";
+            } else {
+                row += "  [ORPHAN - nothing holds this]";
+                ++orphans;
+            }
+            // The two channels a returned original carries and a recreated copy
+            // does not - the difference the Recovery confirmation warns about.
+            if (entry) {
+                if (const float mult = EntryTemperMult(entry.get()); mult > 1.0001f) {
+                    row += std::format("  temper x{:.2f}", mult);
+                }
+                if (entry->GetEnchantment()) {
+                    row += "  enchanted";
+                }
+            }
+            rows.push_back(std::move(row));
+        }
+        std::sort(rows.begin(), rows.end());
+        out.push_back(std::format("[CEF] hidden store {:08X}: {} item stack(s), {} orphaned",
+            g_storeFormId, items, orphans));
+        out.insert(out.end(), rows.begin(), rows.end());
+        if (items == 0) {
+            out.push_back("  (empty)");
+        }
         return out;
     }
 

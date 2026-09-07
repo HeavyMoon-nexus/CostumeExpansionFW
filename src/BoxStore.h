@@ -479,6 +479,13 @@ namespace CostumeFW
     // Newest first. Main thread / VM thread (takes the store lock).
     std::vector<CustodyLogEntry> CustodyLog();
 
+    // What is actually inside the hidden store right now: one line per stack, with
+    // who holds it (box / persist / published / NPC persist) or ORPHAN, plus the
+    // tempering and enchantment a returned original carries and a recreated copy
+    // does not. The only way to see the store's contents - it is a disabled
+    // container the player cannot open. Console `cef store`.
+    std::vector<std::string> StoreDiagLines();
+
     // Hand back captured items the hidden store still holds but nothing owns any
     // more - the loss direction of a save rollback (take a piece out of a box, quit
     // without saving, load the older save: the global json says nobody owns it while

@@ -116,7 +116,7 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | repair | persist | "
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
                   "slottest | invisdiag");
             return;
@@ -201,6 +201,14 @@ namespace CostumeFW
             });
         } else if (sub == "list") {
             SKSE::GetTaskInterface()->AddTask([] { ListActive(); });
+        } else if (sub == "store") {
+            // The hidden store is a disabled container - there is no in-game way
+            // to open it, so this is the only view of what CEF is holding.
+            SKSE::GetTaskInterface()->AddTask([] {
+                for (const auto& line : StoreDiagLines()) {
+                    Print(line.c_str());
+                }
+            });
         } else if (sub == "persist") {
             // Stage 3b persist head-carrier levers:
             //   cef persist          - status (pool registration + carriers.json entry)
@@ -536,7 +544,7 @@ namespace CostumeFW
                 }
             });
         } else {
-            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | repair | persist | "
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
                   "slottest | invisdiag");
         }
