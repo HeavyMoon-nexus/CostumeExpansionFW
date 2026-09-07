@@ -1,6 +1,34 @@
 # Changelog
 
-## v1.6.1.1 (2026-09-07)
+## v1.6.2 (2026-09-08)
+
+### Added
+
+- **Items left in storage now come back on their own.** CEF keeps box
+  definitions in a settings file it writes immediately, and the captured items
+  themselves inside your save. Loading an older save can put those two out of
+  step: take a piece out of a box, quit without saving, load the earlier save,
+  and the settings say nobody owns it while the item is still sitting in
+  storage. It was recoverable only by console with an ID you had no way to
+  know, so in practice the piece was gone. CEF now checks storage on every save
+  load and hands back anything no box, persist entry, published costume or NPC
+  assignment owns, with its tempering and enchantment intact. It only ever
+  hands items back - it never deletes anything from storage and never edits
+  your settings.
+
+- **Recovery list on the Main page.** Every item CEF has ever taken into
+  storage, newest first, with what last happened to it. Use it when a piece
+  goes missing and the automatic pass cannot reach it - a storage reference
+  lost with a save, an item captured on another character. If the item is
+  still in storage you get the original back; if it is not, CEF recreates a
+  plain copy, so recovering something you still have gives you two. The
+  confirmation says so before you commit.
+
+- **A warning before the bone-limit crash.** A costume with more than 80 bones
+  on a single shape crashes Skyrim unless Bone Limit Extender is installed.
+  CEF has always measured this on the Diagnostics page, which people read
+  after the crash. It now says so on screen when the costume goes on, naming
+  the item, once per item per session.
 
 ### Fixed
 
@@ -35,6 +63,14 @@
 - Costume armor rating, weight, tempering and keywords were audited for the
   same class of fault and are clean - each is recomputed from scratch and
   assigned, never added onto what was there before.
+
+- **A settings file that fails to load is no longer overwritten.** If
+  `CEF_settings.json` exists but cannot be read - a hand edit gone wrong, or a
+  format change on our side - CEF used to hold empty state and write it back
+  over your real file at the next change. It now refuses to write at all until
+  the file loads cleanly, and says so in the log along with the path of the
+  last-known-good copy it keeps beside it. A bad file costs a session, not your
+  boxes.
 
 ## v1.6.1 (2026-08-20)
 
