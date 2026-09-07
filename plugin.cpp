@@ -384,8 +384,9 @@ namespace
         case SKSE::MessagingInterface::kNewGame:
             // Save loaded: a co-save revert wiped the registry, so re-register the
             // global boxes, then re-apply everything (belt-and-suspenders to Load3D).
-            // Synthesized stat abilities are dynamic forms dropped by the save, so
-            // forget the cache and rebuild them fresh. The carrier pass re-repoints
+            // Synthesized stat abilities are taken back off the player and refilled
+            // for THIS save's boxes (their forms are kept - the save restores an
+            // ability by form id). The carrier pass re-repoints
             // AND reconciles the persist head-part registration against the loaded
             // save (a CTD rollback can predate the registration - C §9-18); it
             // rebuilds the head only when something actually changed.
@@ -394,7 +395,7 @@ namespace
                 // clears the per-save store id at load START, LoadCallback restores
                 // THIS save's (ROOT A protection preserved). Clearing it here ran
                 // AFTER the restore and wiped it.
-                CostumeFW::ClearBoxSpellCache();
+                CostumeFW::InvalidateStatAbilities();
                 // v1.6.1: recover temper/enchant snapshots missing on older
                 // captures from the stored originals BEFORE stats reapply; a
                 // heal also restamps publish tokens (their armor sums live).

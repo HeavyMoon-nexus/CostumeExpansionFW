@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.6.1.1 (2026-09-07)
+
+### Fixed
+
+- **A box's enchantment could stack, permanently, every time you reloaded
+  without restarting the game** (Nexus report). Dying and reloading, or any
+  quickload, added one more copy of the box's "Costume Stats" ability - so a
+  Fortify One-handed costume kept raising one-handed damage on *every* weapon
+  you own, the extra copies could not be taken off by removing the box, and
+  they stayed even with CEF disabled.
+
+  CEF grants a box's captured enchantments as a hidden ability it builds at
+  runtime. That ability is written into your save, but CEF assumed the save
+  drops it and threw away its handle on every load. It does not: reloading
+  without restarting the game restores the ability, which CEF then no longer
+  recognised - and granted a second one on top. CEF now keeps one ability per
+  box (and per persist set, and per published costume) for the whole session,
+  takes it back off before rebuilding it, and can therefore always remove it
+  again. The same leak on NPCs wearing a published costume is fixed with it.
+
+- **If your save already has stacked "Costume Stats", quit Skyrim completely
+  and start it again before loading** - the extras disappear on their own
+  (confirmed). Only reloading from inside a running game carries them over.
+  If any survive, dispel them by FormID from the console (More Informative
+  Console shows it); do not use `forceav`/`setav` on a skill.
+
+- Costume armor rating, weight, tempering and keywords were audited for the
+  same class of fault and are clean - each is recomputed from scratch and
+  assigned, never added onto what was there before.
+
 ## v1.6.1 (2026-08-20)
 
 ### Fixed

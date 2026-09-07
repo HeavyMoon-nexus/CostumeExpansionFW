@@ -98,7 +98,7 @@ namespace CostumeFW
         std::unordered_set<std::string> g_bodyMorphOn;
         // Item-data passthrough opt-OUTs (PLAN_2026-08-04): default is ON
         // (= current behavior), so the sets hold the ids a user switched OFF.
-        // statEnchant gates BuildEnchantSpell (box AND persist single choke);
+        // statEnchant gates FillEnchantSpell (box AND persist single choke);
         // statWeight/statArmor gate SetTokenStats' per-content sums.
         std::unordered_set<std::string> g_statEnchantOff;
         std::unordered_set<std::string> g_statWeightOff;
@@ -2595,16 +2595,16 @@ namespace CostumeFW
     namespace
     {
         // r4 (re-review P1-2): policy mutation is a main-thread transaction.
-        // Settings were already persisted WITHOUT a manifest. Remove every
-        // live box spell before erasing its cache (ClearBoxSpellCache alone is
-        // load-only and would strand the old ability on the player), then use
+        // Settings were already persisted WITHOUT a manifest. Take every live
+        // box ability back off the player before the contents behind it change
+        // (an ability may not be refilled while it is applied), then use
         // the established reload primitive to detach/re-register configured
         // contents and preserve uncataloged M2 persist actives. Only after all
         // derived state is rebuilt do we emit one admitted-only manifest.
         void ReevaluateContentAdmissions()
         {
             for (const auto& box : g_boxes) {
-                RebuildBoxAbility(box.token);  // remove old SpellItem, then cache erase
+                RebuildBoxAbility(box.token);  // take it off the player, mark it stale
             }
             // X-MAN: the manifest emit moved INTO ReloadSettingsFromDisk's tail
             // (same position in the sequence, but now every reload path gets it).
@@ -3097,16 +3097,35 @@ namespace CostumeFW
         // applies them naturally (real armor scaling, real carried weight). This
         // is correct where a CarryWeight magic effect was NOT (the AV is max
         // capacity, not the item's own weight). See SetTokenStats below.
-        // Enchantment effects are still aggregated into a RUNTIME ability spell
-        // (dynamic forms aren't serialized -> rebuilt on load, no stacking).
-
-        // token -> synthesized enchant ability (nullptr = built but none). Process-
-        // global; cleared on game load (ClearBoxSpellCache).
-        std::unordered_map<std::string, RE::SpellItem*> g_boxSpells;
+        // Enchantment effects are still aggregated into a runtime ability spell.
+        //
+        // ONE ability form per holder, created once and MUTATED IN PLACE. It must
+        // never be re-created per rebuild: AddSpell writes the form's id into the
+        // SAVE (the player's added-spell list), and a load that does NOT restart
+        // the process - dying and reloading, a quickload - resolves that id back
+        // to the still-live form. The old code dropped its pointer at load
+        // (ClearBoxSpellCache) on the assumption that the save drops the ability
+        // too; it does not, so the restored ability stayed on the player with
+        // nobody tracking it and the rebuilt one was granted ON TOP: one more
+        // "Costume Stats" per reload, unremovable even with CEF off, its fortify
+        // baked into the actor value (v1.6.1.1, Nexus report 2026-09-07).
+        // A stable form makes the restored ability the one we already own, so
+        // HasSpell / RemoveSpell keep working across in-process loads. Forms are
+        // process-lived; a fresh process leaves the save's dangling 0xFF id
+        // unresolved, which is the only case the old clear was written for - and
+        // that case needs no clearing at all, since the map starts empty.
+        struct StatAbility
+        {
+            RE::SpellItem* spell{ nullptr };  // created once; id stable for the process
+            bool hasEffects{ false };         // false = built, but nothing to grant
+            bool dirty{ true };               // effects need a refill before granting
+        };
+        // token -> synthesized enchant ability. Process-global; entries are kept
+        // (not erased) so a token always maps to the same form.
+        std::unordered_map<std::string, StatAbility> g_boxSpells;
         // The persist class's aggregate enchant ability (persist has no token, so
         // it's kept separately and granted while CEF is enabled).
-        RE::SpellItem* g_persistSpell = nullptr;
-        bool g_persistSpellBuilt = false;
+        StatAbility g_persistAbility;
 
         void AddEffect(RE::SpellItem* a_spell, RE::EffectSetting* a_mgef, float a_magnitude)
         {
@@ -3221,11 +3240,27 @@ namespace CostumeFW
             return form ? form->As<RE::EffectSetting>() : nullptr;
         }
 
-        // Build a constant-effect self ability from a content list's enchantments.
+        // Retire the current effect list. The Effect objects are deliberately NOT
+        // freed: RemoveSpell only FLAGS an active effect, whose teardown runs on a
+        // later magic-target update and still reads its Effect*. Freeing here would
+        // hand that pass dangling memory. They leak - a few dozen bytes per rebuild,
+        // strictly less than the pre-1.6.1.1 code, which leaked the whole spell.
+        void RetireSynthEffects(RE::SpellItem* a_spell)
+        {
+            a_spell->effects.clear();
+        }
+
+        // (Re)fill a synthesized ability with a content list's enchantment effects.
         // Per content, uses the CAPTURED snapshot (covers player/instance
         // enchantments) if present, else the base ARMO's own enchantment. Returns
-        // nullptr if none of the contents contributes an effect.
-        RE::SpellItem* BuildEnchantSpell(const std::vector<std::string>& a_contents, const char* a_name)
+        // false if none of the contents contributes an effect (the form stays, with
+        // an empty list, and simply is not granted).
+        //
+        // The caller MUST have removed the ability from every actor first: the
+        // engine holds the Effect pointers of a live ability, so rewriting the list
+        // under it would leave dangling active effects.
+        bool FillEnchantSpell(RE::SpellItem* a_spell, const std::vector<std::string>& a_contents,
+            const char* a_name)
         {
             // Per effect: either a LIVE source Effect (full fidelity: magnitude
             // + duration + conditions) or a flat {mgef, magnitude} snapshot.
@@ -3276,8 +3311,34 @@ namespace CostumeFW
                     pushLive(armo->formEnchanting);
                 }
             }
+            RetireSynthEffects(a_spell);
             if (effs.empty()) {
-                return nullptr;
+                SKSE::log::debug("boxes: synth enchant ability '{}' - no effects", a_name);
+                return false;
+            }
+            int conditioned = 0;
+            for (const auto& pe : effs) {
+                if (pe.live) {
+                    AddEffectFull(a_spell, pe.live);
+                    if (pe.live->conditions) {
+                        ++conditioned;
+                    }
+                } else {
+                    AddEffect(a_spell, pe.mgef, pe.magnitude);
+                }
+            }
+            SKSE::log::debug("boxes: synth enchant ability '{}' ({} effect(s), {} conditioned)",
+                a_name, effs.size(), conditioned);
+            return true;
+        }
+
+        // The one ability form for a holder, created on first use. Never freed and
+        // never replaced: a factory form is registered in the form table, so
+        // deleting it would leave a dangling id a save could still resolve.
+        RE::SpellItem* EnsureSynthSpell(StatAbility& a_ability, const char* a_name)
+        {
+            if (a_ability.spell) {
+                return a_ability.spell;
             }
             auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
             auto* spell = factory ? factory->Create() : nullptr;
@@ -3290,27 +3351,22 @@ namespace CostumeFW
             spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
             spell->data.costOverride = 0;
             spell->fullName = a_name;
-            int conditioned = 0;
-            for (const auto& pe : effs) {
-                if (pe.live) {
-                    AddEffectFull(spell, pe.live);
-                    if (pe.live->conditions) {
-                        ++conditioned;
-                    }
-                } else {
-                    AddEffect(spell, pe.mgef, pe.magnitude);
-                }
-            }
-            SKSE::log::debug("boxes: synth enchant ability '{}' ({} effect(s), {} conditioned)",
-                a_name, effs.size(), conditioned);
+            a_ability.spell = spell;
+            a_ability.dirty = true;
+            SKSE::log::info("boxes: synth ability form '{}' = {:08X}", a_name, spell->GetFormID());
             return spell;
         }
 
-        // Build the aggregate ENCHANT ability for a box. Armor + weight are handled
-        // separately on the token's own fields (SetTokenStats).
-        RE::SpellItem* BuildBoxAbility(const BoxDefInfo& a_box)
+        // Take the ability off an actor if it holds it. Refilling effects under a
+        // live ability is what leaves orphaned actor-value modifiers behind, so
+        // every mutation path goes through here first.
+        bool DropAbilityFrom(RE::Actor* a_actor, const StatAbility& a_ability)
         {
-            return BuildEnchantSpell(a_box.contents, "Costume Stats");
+            if (!a_actor || !a_ability.spell || !a_actor->HasSpell(a_ability.spell)) {
+                return false;
+            }
+            a_actor->RemoveSpell(a_ability.spell);
+            return true;
         }
 
         // --- Keyword passthrough -------------------------------------------------
@@ -3463,16 +3519,17 @@ namespace CostumeFW
             ClearTokenKeywords(a_token, token);  // strip our passthrough keywords
         }
 
-        // Get (build + cache) the synthesized ability for a token, or nullptr.
-        RE::SpellItem* BoxAbilityFor(const BoxDefInfo& a_box)
+        // Bring a holder's ability up to date with its contents: create the form
+        // once, and refill its effects only while it is on nobody.
+        void EnsureAbilityBuilt(RE::Actor* a_player, StatAbility& a_ability,
+            const std::vector<std::string>& a_contents, const char* a_name)
         {
-            auto it = g_boxSpells.find(a_box.token);
-            if (it != g_boxSpells.end()) {
-                return it->second;
+            if (!EnsureSynthSpell(a_ability, a_name) || !a_ability.dirty) {
+                return;
             }
-            RE::SpellItem* spell = BuildBoxAbility(a_box);
-            g_boxSpells[a_box.token] = spell;
-            return spell;
+            DropAbilityFrom(a_player, a_ability);
+            a_ability.hasEffects = FillEnchantSpell(a_ability.spell, a_contents, a_name);
+            a_ability.dirty = false;
         }
     }
 
@@ -3730,17 +3787,24 @@ namespace CostumeFW
             }
         }
 
-        // Get (build + cache) the persist class's aggregate enchant ability.
-        // Built from THIS SAVE'S ACTIVE set, not the shared catalog (M2) - a
-        // non-active entry another character cataloged must not grant effects
-        // here. Activation changes invalidate via RebuildPersistAbility().
-        RE::SpellItem* PersistAbilityFor()
+        // Converge one synthesized ability: refill it if its contents changed,
+        // then grant or take it back. Unlike SyncSpell this ALWAYS runs the
+        // removal branch, so an ability can never be stranded on the player -
+        // not by a load, not by the master switch, not by an emptied box.
+        void SyncAbility(RE::Actor* a_player, StatAbility& a_ability,
+            const std::vector<std::string>& a_contents, const char* a_name, bool a_want)
         {
-            if (!g_persistSpellBuilt) {
-                g_persistSpell = BuildEnchantSpell(ActivePersistIds(), "Costume Stats (Persist)");
-                g_persistSpellBuilt = true;
+            EnsureAbilityBuilt(a_player, a_ability, a_contents, a_name);
+            if (!a_ability.spell) {
+                return;
             }
-            return g_persistSpell;
+            const bool has = a_player->HasSpell(a_ability.spell);
+            const bool grant = a_want && a_ability.hasEffects;
+            if (grant && !has) {
+                a_player->AddSpell(a_ability.spell);
+            } else if (!grant && has) {
+                a_player->RemoveSpell(a_ability.spell);
+            }
         }
     }
 
@@ -3758,15 +3822,25 @@ namespace CostumeFW
             // gated before - border audit [2161]).
             const bool worn = cefOn && TokenWorn(b.token);
             // Synthesized ENCHANT ability (armor/weight are on the token's fields).
-            SyncSpell(player, BoxAbilityFor(b), worn);
+            SyncAbility(player, g_boxSpells[b.token], b.contents, "Costume Stats", worn);
             // Optional manual extra ability (dormant unless set in json).
             if (!b.ability.empty()) {
                 SyncSpell(player, ResolveSpell(b.ability), worn);
             }
         }
+        // Abilities whose box is gone (deleted, or its token handed to a publish
+        // slot): the form is kept for reuse, but it must not stay on the player.
+        for (auto& [token, ability] : g_boxSpells) {
+            if (FindBox(token) < 0 && DropAbilityFrom(player, ability)) {
+                SKSE::log::info("boxes: dropped the stat ability of freed box '{}'", token);
+            }
+        }
         // Persist class: no token, always shown while CEF is enabled -> grant its
-        // aggregate enchant ability whenever CEF is on.
-        SyncSpell(player, PersistAbilityFor(), CefEnabled());
+        // aggregate enchant ability whenever CEF is on. Built from THIS SAVE'S
+        // ACTIVE set, not the shared catalog (M2) - a non-active entry another
+        // character cataloged must not grant effects here.
+        SyncAbility(player, g_persistAbility, ActivePersistIds(),
+            "Costume Stats (Persist)", cefOn);
         // Publish bindings (NPC wearers + the player wearing a publish token)
         // follow the same master-switch contract - converge them in the same
         // pass so a master toggle can never strand spells on an NPC (§7.6).
@@ -3780,32 +3854,36 @@ namespace CostumeFW
         if (it == g_boxSpells.end()) {
             return;  // not built yet; ApplyBoxAbilities builds it fresh
         }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (it->second && player && player->HasSpell(it->second)) {
-            player->RemoveSpell(it->second);
-        }
-        g_boxSpells.erase(it);  // next ApplyBoxAbilities rebuilds + reapplies
+        // Take it off NOW - the refill must not run under a live ability - and
+        // mark it stale. The FORM stays: it is the same one the save may hold.
+        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), it->second);
+        it->second.dirty = true;  // next ApplyBoxAbilities refills + reapplies
     }
 
     void RebuildPersistAbility()
     {
         StoreLock lk;
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (g_persistSpell && player && player->HasSpell(g_persistSpell)) {
-            player->RemoveSpell(g_persistSpell);
-        }
-        g_persistSpell = nullptr;
-        g_persistSpellBuilt = false;  // next ApplyBoxAbilities rebuilds + reapplies
+        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), g_persistAbility);
+        g_persistAbility.dirty = true;  // next ApplyBoxAbilities refills + reapplies
     }
 
-    void ClearBoxSpellCache()
+    void InvalidateStatAbilities()
     {
         StoreLock lk;
-        // Dynamic ability forms aren't serialized; a save/load drops them from the
-        // actor. Just forget our cache so the next apply rebuilds from scratch.
-        g_boxSpells.clear();
-        g_persistSpell = nullptr;
-        g_persistSpellBuilt = false;
+        // A load brings in ANOTHER save's boxes, so every ability's effects are
+        // stale. Take ours back off the player and mark them for a refill - but
+        // KEEP the forms. Forgetting them here is what stacked a "Costume Stats"
+        // per in-process reload: the save restores the ability by form id, and a
+        // forgotten form is one nobody can ever remove again (v1.6.1.1).
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        int dropped = 0;
+        for (auto& [token, ability] : g_boxSpells) {
+            ability.dirty = true;
+            dropped += DropAbilityFrom(player, ability) ? 1 : 0;
+        }
+        g_persistAbility.dirty = true;
+        dropped += DropAbilityFrom(player, g_persistAbility) ? 1 : 0;
+        SKSE::log::info("boxes: stat abilities invalidated for load ({} taken back)", dropped);
     }
 
     std::string BoxStatsSummary(int a_index)
@@ -3836,7 +3914,7 @@ namespace CostumeFW
             if (g_statEnchantOff.contains(c)) {
                 continue;  // enchant OFF: skip the effect listing below
             }
-            // Same priority as the synthesized ability (BuildEnchantSpell):
+            // Same priority as the synthesized ability (FillEnchantSpell):
             // the captured player-enchant snapshot beats the base enchantment.
             // Showing only the base made a captured enchant look unapplied
             // (review 2026-07-07 P3).
@@ -4161,7 +4239,7 @@ namespace CostumeFW
                         continue;
                     }
                     // Instance (player) enchantment only - a base enchantment
-                    // already flows through the BuildEnchantSpell fallback.
+                    // already flows through the FillEnchantSpell fallback.
                     if (const auto* xe = x->GetByType<RE::ExtraEnchantment>();
                         xe && xe->enchantment) {
                         ench = xe->enchantment;

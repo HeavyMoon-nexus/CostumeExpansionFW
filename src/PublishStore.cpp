@@ -51,7 +51,20 @@ namespace CostumeFW
         std::unordered_set<RE::FormID> g_nprForms;
         int g_maxNpcInjected = 8;
         std::unordered_map<int, std::vector<RE::BGSKeyword*>> g_pubKeywords;
-        std::unordered_map<int, RE::SpellItem*> g_pubEnchantSpells;
+        // One ability FORM per publish slot, created once and refilled in place -
+        // same contract as BoxStore's StatAbility, and for the same reason: the
+        // form id is written into the save (the wearer's added-spell list), an
+        // in-process load restores the ability from it, and a pointer we drop is
+        // an ability nobody can ever remove again. Here the wearer is usually an
+        // NPC, so it would stack on THEM (v1.6.1.1).
+        struct PubAbility
+        {
+            RE::SpellItem* spell{ nullptr };
+            bool hasEffects{ false };
+            bool dirty{ true };
+        };
+        std::unordered_map<int, PubAbility> g_pubEnchantSpells;
+        void DropPubAbility(int a_slot, PubAbility& a_ability);  // fwd (defined below)
 
         RE::Actor* ResolveActor(PubBinding& a_binding)
         {
@@ -153,20 +166,55 @@ namespace CostumeFW
                 for (auto* addon : token->armorAddons)
                     if (addon) addon->bipedModelData.bipedObjectSlots = mask;
             }
-            g_pubEnchantSpells.erase(a_slot);
+            // Unpublished: take the ability off its wearers and mark it stale.
+            // The FORM is kept - erasing the entry would strand the ability on
+            // anyone still holding it (v1.6.1.1).
+            if (auto it = g_pubEnchantSpells.find(a_slot); it != g_pubEnchantSpells.end()) {
+                DropPubAbility(a_slot, it->second);
+                it->second.hasEffects = false;
+                it->second.dirty = true;
+            }
             g_hidden.erase(a_slot);
         }
 
-        RE::SpellItem* PublishedEnchantAbility(const PubSnapshot& a_snap)
+        // Take a slot's ability off everyone who could hold it. The effect list
+        // may not be rewritten under a live ability, and a slot that goes empty
+        // must not leave its old effects applied.
+        void DropPubAbility(int a_slot, PubAbility& a_ability)
         {
-            if (const auto it = g_pubEnchantSpells.find(a_snap.pubSlot);
-                it != g_pubEnchantSpells.end()) return it->second;
-            auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
-            auto* spell = factory ? factory->Create() : nullptr;
-            if (!spell) {
-                g_pubEnchantSpells[a_snap.pubSlot] = nullptr;
-                return nullptr;
+            if (!a_ability.spell) return;
+            for (auto& binding : g_bindings) {
+                if (binding.pubSlot != a_slot) continue;
+                if (auto* actor = ResolveActor(binding))
+                    if (actor->HasSpell(a_ability.spell)) actor->RemoveSpell(a_ability.spell);
             }
+            if (auto* player = RE::PlayerCharacter::GetSingleton();
+                player && player->HasSpell(a_ability.spell))
+                player->RemoveSpell(a_ability.spell);
+        }
+
+        // The slot's ability form, refilled from the frozen snapshot when stale.
+        // Never freed and never replaced: a factory form is registered in the
+        // form table, so deleting it would leave a dangling id.
+        PubAbility& EnsurePubAbility(const PubSnapshot& a_snap)
+        {
+            auto& ability = g_pubEnchantSpells[a_snap.pubSlot];
+            if (!ability.spell) {
+                auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
+                ability.spell = factory ? factory->Create() : nullptr;
+                if (!ability.spell) return ability;
+                ability.spell->data.spellType = RE::MagicSystem::SpellType::kAbility;
+                ability.spell->data.castingType = RE::MagicSystem::CastingType::kConstantEffect;
+                ability.spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
+                ability.spell->data.costOverride = 0;
+                ability.dirty = true;
+            }
+            if (!ability.dirty) return ability;
+            ability.spell->fullName = ("Costume Stats: " + a_snap.label).c_str();
+            DropPubAbility(a_snap.pubSlot, ability);
+            // Retired, not freed: RemoveSpell only flags an active effect, and its
+            // later teardown still reads the Effect* (see RetireSynthEffects).
+            ability.spell->effects.clear();
             for (const auto& [id, effects] : a_snap.enchants) {
                 if (!StatEnchantOn(id)) continue;  // item-data toggle
                 for (const auto& frozen : effects) {
@@ -177,21 +225,12 @@ namespace CostumeFW
                     effect->effectItem.magnitude = frozen.magnitude;
                     effect->effectItem.area = 0;
                     effect->effectItem.duration = 0;
-                    spell->effects.push_back(effect);
+                    ability.spell->effects.push_back(effect);
                 }
             }
-            if (spell->effects.empty()) {
-                delete spell;
-                spell = nullptr;
-            } else {
-                spell->data.spellType = RE::MagicSystem::SpellType::kAbility;
-                spell->data.castingType = RE::MagicSystem::CastingType::kConstantEffect;
-                spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
-                spell->data.costOverride = 0;
-                spell->fullName = ("Costume Stats: " + a_snap.label).c_str();
-            }
-            g_pubEnchantSpells[a_snap.pubSlot] = spell;
-            return spell;
+            ability.hasEffects = !ability.spell->effects.empty();
+            ability.dirty = false;
+            return ability;
         }
 
         void ApplyManualAbility(RE::Actor* a_actor, const PubSnapshot& a_snap, bool a_equip)
@@ -203,10 +242,14 @@ namespace CostumeFW
                     else a_actor->RemoveSpell(spell);
                 }
             }
-            if (auto* spell = PublishedEnchantAbility(a_snap)) {
-                if (a_equip) a_actor->AddSpell(spell);
-                else a_actor->RemoveSpell(spell);
-            }
+            // Always run the removal branch (as BoxStore's SyncAbility does), so a
+            // wearer can never be left holding an ability CEF has stopped granting.
+            auto& ability = EnsurePubAbility(a_snap);
+            if (!ability.spell) return;
+            const bool has = a_actor->HasSpell(ability.spell);
+            const bool grant = a_equip && ability.hasEffects;
+            if (grant && !has) a_actor->AddSpell(ability.spell);
+            else if (!grant && has) a_actor->RemoveSpell(ability.spell);
         }
 
         std::shared_ptr<PubSnapshot> SharedBySlot(int a_slot)
@@ -433,7 +476,14 @@ namespace CostumeFW
     void ParsePublishJson(const nlohmann::json& a_doc)
     {
         g_published.clear();
-        g_pubEnchantSpells.clear();
+        // Snapshots are being replaced, so every slot ability is stale - but the
+        // FORMS stay, and each comes off its wearers here rather than being
+        // forgotten while still applied (v1.6.1.1).
+        for (auto& [slot, ability] : g_pubEnchantSpells) {
+            DropPubAbility(slot, ability);
+            ability.hasEffects = false;
+            ability.dirty = true;
+        }
         g_maxNpcInjected = std::clamp(a_doc.value("npcConfig", nlohmann::json::object())
             .value("maxNpcInjected", 8), 1, 64);
         std::unordered_set<int> slots;

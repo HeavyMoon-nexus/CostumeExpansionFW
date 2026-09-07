@@ -457,17 +457,21 @@ namespace CostumeFW
     // aggregate enchant ability (granted while CEF is enabled). Idempotent. Main thread.
     void ApplyBoxAbilities();
 
-    // Drop + forget the persist class's synthesized enchant ability so the next
-    // ApplyBoxAbilities rebuilds it (call after persist contents change). Main thread.
+    // Take the persist class's synthesized enchant ability off the player and mark
+    // it stale so the next ApplyBoxAbilities refills it (call after persist
+    // contents change). The ability FORM is kept and reused. Main thread.
     void RebuildPersistAbility();
 
-    // Drop + forget a box's synthesized stat ability so the next ApplyBoxAbilities
-    // rebuilds it (call after its contents change). Main thread.
+    // Same for one box's synthesized stat ability (call after its contents
+    // change). Main thread.
     void RebuildBoxAbility(const std::string& a_token);
 
-    // Forget all synthesized abilities (call on game load; dynamic forms are
-    // dropped by save/load, so just clear the cache and rebuild). Main thread.
-    void ClearBoxSpellCache();
+    // Take every synthesized ability back off the player and mark them stale (call
+    // on game load, before the boxes of the loaded save are applied). The forms are
+    // KEPT: a save restores an ability by form id, so a form we forget is one that
+    // can never be removed again - that is what stacked one "Costume Stats" per
+    // in-process reload before v1.6.1.1. Main thread.
+    void InvalidateStatAbilities();
 
     // Human-readable summary of a box's aggregated stats (for the MCM display).
     std::string BoxStatsSummary(int a_index);
