@@ -20,11 +20,17 @@
   takes it back off before rebuilding it, and can therefore always remove it
   again. The same leak on NPCs wearing a published costume is fixed with it.
 
-- **If your save already has stacked "Costume Stats", quit Skyrim completely
-  and start it again before loading** - the extras disappear on their own
-  (confirmed). Only reloading from inside a running game carries them over.
-  If any survive, dispel them by FormID from the console (More Informative
-  Console shows it); do not use `forceav`/`setav` on a skill.
+- **If your save already stacked "Costume Stats", the leftover has to be
+  cancelled by hand.** Restarting Skyrim removes the duplicate entries, but
+  *not* the increase they had already applied: the copies vanish with nobody
+  left to take their bonus back off, so the number stays baked into your
+  character. To undo it, take the box off and remove the enchanted piece from
+  it, so CEF is granting nothing, then read the actor value the enchantment
+  fortifies - e.g. `player.getavinfo onehandedmod`. With nothing active it
+  should be 0; whatever it reads instead is the leftover, and
+  `player.modav onehandedmod -<that number>` cancels it. Check any other value
+  the enchantment touches the same way. **Do not use `forceav` or `setav` on a
+  skill** - that overwrites the base value and breaks skill progression.
 
 - Costume armor rating, weight, tempering and keywords were audited for the
   same class of fault and are clean - each is recomputed from scratch and
