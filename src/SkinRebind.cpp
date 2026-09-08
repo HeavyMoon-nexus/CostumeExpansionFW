@@ -43,10 +43,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>  // the one delayed-call timer thread
 #include <fstream>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <Windows.h>  // GetModuleHandleA (Bone Limit Extender presence check)
@@ -1044,23 +1049,80 @@ namespace CostumeFW
 
         // Reconcile is declared in the public header and is safe to call from delayed retries.
 
+        // One pending delayed call. std::priority_queue hands out only a CONST
+        // top(), so the payload sits behind a shared_ptr to be movable out of it.
+        struct DelayedCall
+        {
+            std::chrono::steady_clock::time_point due;
+            std::shared_ptr<std::function<void()>> fn;
+            // priority_queue is a MAX heap and we want the SOONEST deadline on
+            // top, so this compares backwards on purpose.
+            bool operator<(const DelayedCall& a_rhs) const { return due > a_rhs.due; }
+        };
+        std::priority_queue<DelayedCall> g_delayQueue;
+        std::mutex g_delayMutex;
+        std::condition_variable g_delayCv;
+
+        // Wait until due, then hand the payload to the SKSE task queue ONCE. It
+        // must NOT re-queue itself through the task pump until due: the pump is
+        // frame-bound in gameplay (the rebind retry ran that way for days), but
+        // the EARLY loading-screen pump drains tasks INCLUSIVELY, so an un-due
+        // requeue re-ran forever and froze the load at the exact moment a chain
+        // started there (in-game 2026-07-04 17:35, the bind watchdog's first tick
+        // scheduled from the kDataLoaded Reconcile). AddTask is thread-safe.
+        //
+        // The waiting is done by ONE timer thread, not one thread per call.
+        // Load3D schedules a 4000ms retry for every NPC that builds 3D, so a busy
+        // cell was creating and tearing down an OS thread several times a second
+        // (measured 2026-09-09: 544 created, 546 exited in 3 minutes). They cost
+        // almost no CPU - they sleep - but a thread apiece to hold a deadline is
+        // a stack and a kernel object for nothing.
+        //
+        // A heap rather than a queue because a call made later can be due EARLIER
+        // (a 500ms rebind retry queued behind a 4000ms Load3D settle), so the wait
+        // target is re-decided on every insert - which is what notifying the
+        // condition variable makes wait_until do.
+        //
+        // Lock order: a caller may hold StoreLock while pushing here (RunAfterDelayMs
+        // takes it), and the timer thread takes ONLY g_delayMutex and dispatches
+        // outside it, so the two can never wait on each other.
         void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
         {
-            // Sleep on a background thread, then hand the payload to the SKSE
-            // task queue ONCE. The previous implementation re-queued itself
-            // through the task pump every cycle until due - safe while the
-            // pump is frame-bound (rebind retry ran that way for days), but
-            // the EARLY loading-screen pump drains tasks INCLUSIVELY, so an
-            // un-due requeue re-ran forever and froze the load at the exact
-            // moment a chain started there (in-game 2026-07-04 17:35, the
-            // bind watchdog's first tick scheduled from the kDataLoaded
-            // Reconcile). AddTask is thread-safe by design.
-            std::thread([a_due, fn = std::move(a_fn)]() mutable {
-                std::this_thread::sleep_until(a_due);
-                if (auto* tasks = SKSE::GetTaskInterface()) {
-                    tasks->AddTask(std::move(fn));
-                }
-            }).detach();
+            // Started by the first caller, then runs for the life of the process -
+            // same contract as the bind watchdog, and detached for the same reason:
+            // there is no shutdown hook to join it from.
+            static std::once_flag s_timerStarted;
+            std::call_once(s_timerStarted, [] {
+                std::thread([] {
+                    for (;;) {
+                        std::function<void()> ready;
+                        {
+                            std::unique_lock lk(g_delayMutex);
+                            g_delayCv.wait(lk, [] { return !g_delayQueue.empty(); });
+                            const auto next = g_delayQueue.top().due;
+                            if (std::chrono::steady_clock::now() < next) {
+                                // A sooner call arriving wakes this; the top is
+                                // then re-read. A spurious wake costs one loop.
+                                g_delayCv.wait_until(lk, next);
+                                continue;
+                            }
+                            ready = std::move(*g_delayQueue.top().fn);
+                            g_delayQueue.pop();
+                        }
+                        // Outside the lock: no caller should ever block behind a
+                        // dispatch, and AddTask is thread-safe by design.
+                        if (auto* tasks = SKSE::GetTaskInterface()) {
+                            tasks->AddTask(std::move(ready));
+                        }
+                    }
+                }).detach();
+            });
+            {
+                std::scoped_lock lk(g_delayMutex);
+                g_delayQueue.push(
+                    { a_due, std::make_shared<std::function<void()>>(std::move(a_fn)) });
+            }
+            g_delayCv.notify_one();
         }
 
         // X-DIAG: the budget is spent and this item is STILL binding static.
