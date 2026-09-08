@@ -1394,9 +1394,49 @@ namespace CostumeFW::SmfUI
         // with a save, a piece captured on another character, a box entry rolled
         // back away. One row per item, because once the box entry is gone the id
         // is the only handle left and the user has no way to know it.
+        // Row cache, same contract as the NPC page and Diagnostics: CustodyRows()
+        // resolves live forms and reads the lock-free PublishStore vectors, so it
+        // runs ON THE MAIN THREAD via the task pump and reaches the renderer as a
+        // mutex-guarded copy. Building it on the render thread was the same
+        // use-after-free class those two already fixed - and rebuilding it per
+        // frame was pure waste on a page that only changes when a button is
+        // pressed. Half a second of staleness is invisible here.
+        std::vector<CustodyRow> g_recoveryRows;
+        bool g_recoveryValid = false;
+        std::mutex g_recoveryMutex;
+        std::atomic<bool> g_recoveryRefreshQueued{ false };
+        std::chrono::steady_clock::time_point g_recoveryStamp{};
+
+        void QueueRecoveryRefresh()
+        {
+            if (g_recoveryRefreshQueued.exchange(true)) {
+                return;
+            }
+            SKSE::GetTaskInterface()->AddTask([] {
+                auto fresh = CustodyRows();
+                {
+                    std::scoped_lock lk(g_recoveryMutex);
+                    g_recoveryRows = std::move(fresh);
+                    g_recoveryValid = true;
+                    g_recoveryStamp = std::chrono::steady_clock::now();
+                }
+                g_recoveryRefreshQueued.store(false);
+            });
+        }
+
         void __stdcall RenderRecovery()
         {
-            const auto log = CustodyLog();
+            std::vector<CustodyRow> log;
+            bool valid = false;
+            {
+                std::scoped_lock lk(g_recoveryMutex);
+                log = g_recoveryRows;
+                valid = g_recoveryValid;
+                const auto age = std::chrono::steady_clock::now() - g_recoveryStamp;
+                if (!valid || age > std::chrono::milliseconds(500)) {
+                    QueueRecoveryRefresh();
+                }
+            }
             ImGui::TextWrapped(
                 "Every item CEF has taken into storage, newest first. Use this when a piece "
                 "went missing. An item a box still holds is not missing - take it out of the "
@@ -1404,6 +1444,10 @@ namespace CostumeFW::SmfUI
                 "still in storage you get the original back with its tempering and "
                 "enchantment, and if it is not, CEF recreates a plain copy - so recovering "
                 "something you already have gives you two.");
+            if (!valid) {
+                ImGui::TextDisabled("(loading...)");
+                return;
+            }
             if (log.empty()) {
                 ImGui::TextDisabled("Nothing captured yet.");
                 return;
@@ -1411,26 +1455,31 @@ namespace CostumeFW::SmfUI
             ImGui::InputText("Filter##recf", s_recFilter, sizeof(s_recFilter));
             // Rows that can be acted on come first: on a full setup almost every
             // row is held and has no button, and a handful of recoverable ones at
-            // the bottom of eighty is the same as not showing them.
-            std::vector<std::pair<CustodyLogEntry, std::string>> rows;  // entry, holder
+            // the bottom of eighty is the same as not showing them. Pointers into
+            // the snapshot above - it outlives the loop.
+            std::vector<const CustodyRow*> rows;
             rows.reserve(log.size());
             std::size_t loose = 0;
-            for (const auto& e : log) {
-                if (!RowMatches(e.name, s_recFilter) && !RowMatches(e.id, s_recFilter)) {
+            for (const auto& r : log) {
+                if (!RowMatches(r.entry.name, s_recFilter) &&
+                    !RowMatches(r.entry.id, s_recFilter)) {
                     continue;
                 }
-                std::string held = CustodyHolderLabel(e.id);
-                if (held.empty()) {
+                if (r.holder.empty()) {
                     ++loose;
                 }
-                rows.emplace_back(e, std::move(held));
+                rows.push_back(&r);
             }
             std::stable_sort(rows.begin(), rows.end(),
-                [](const auto& a, const auto& b) { return a.second.empty() && !b.second.empty(); });
+                [](const CustodyRow* a, const CustodyRow* b) {
+                    return a->holder.empty() && !b->holder.empty();
+                });
             ImGui::Text("%d shown, %d not held by anything",
                 static_cast<int>(rows.size()), static_cast<int>(loose));
             BeginScrollList("##reclist");
-            for (const auto& [e, held] : rows) {
+            for (const auto* row : rows) {
+                const auto& e = row->entry;
+                const auto& held = row->holder;
                 ImGui::PushID(e.id.c_str());
                 // A held item is reachable the normal way, and recovering it
                 // drains storage while the box goes on claiming it - which then

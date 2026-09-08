@@ -476,13 +476,22 @@ namespace CostumeFW
         std::string event;  // captured / returned / returned-orphan / recovered
         std::string when;   // local ISO-ish stamp, sortable
     };
-    // Newest first. Main thread / VM thread (takes the store lock).
-    std::vector<CustodyLogEntry> CustodyLog();
-
-    // Who currently holds a content id - "box 'X'" / "persist" / "published 'Y'" /
-    // "NPC persist" - or "" when nothing does. Same four sources the orphan sweep
-    // judges by, so the Recovery list and the sweep can never disagree.
-    std::string CustodyHolderLabel(const std::string& a_id);
+    // One Recovery-page row: a custody entry plus who holds that item right now -
+    // "box 'X'" / "persist" / "published 'Y'" / "NPC persist", or "" when nothing
+    // does. The holder comes from the same four sources the orphan sweep judges
+    // by, so the Recovery list and the sweep can never disagree.
+    struct CustodyRow
+    {
+        CustodyLogEntry entry;
+        std::string holder;  // "" = nothing holds it, so it is recoverable
+    };
+    // Every row, newest first, joined against ONE holder scan. The join lives
+    // here and not in the caller because that scan walks every box, persist,
+    // published and NPC-persist content: asking it per row made the Recovery
+    // page an O(rows x contents) sweep on every frame it was open.
+    // MAIN THREAD ONLY - the scan reads the lock-free PublishStore vectors and
+    // resolves live forms, the same rule DiagLines and the NPC page follow.
+    std::vector<CustodyRow> CustodyRows();
 
     // Give every currently held content id a custody row if it has none, so an
     // existing user's Recovery list is not empty of everything captured before

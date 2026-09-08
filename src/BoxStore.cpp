@@ -4463,19 +4463,6 @@ namespace CostumeFW
         constexpr int kSweepCap = 64;
     }
 
-    std::vector<CustodyLogEntry> CustodyLog()
-    {
-        StoreLock lk;
-        std::vector<CustodyLogEntry> out;
-        out.reserve(g_custody.size());
-        for (const auto& [id, e] : g_custody) {
-            out.push_back(e);
-        }
-        std::sort(out.begin(), out.end(),
-            [](const CustodyLogEntry& a, const CustodyLogEntry& b) { return a.when > b.when; });
-        return out;
-    }
-
     namespace
     {
         // Who holds each content id, by resolved FormID - the same four sources
@@ -4512,16 +4499,30 @@ namespace CostumeFW
         }
     }
 
-    std::string CustodyHolderLabel(const std::string& a_id)
+    std::vector<CustodyRow> CustodyRows()
     {
         StoreLock lk;
-        const std::uint32_t formId = ResolveFormId(a_id);
-        if (!formId) {
-            return {};
-        }
+        // ONE holder scan for the whole list. The per-id form of this used to be
+        // called once per row from the render callback, which rebuilt this map -
+        // every box, persist, published and NPC-persist content, each resolved
+        // and each label freshly allocated - for every row, every frame.
         const auto holder = BuildHolderLabels();
-        const auto it = holder.find(formId);
-        return it == holder.end() ? std::string{} : it->second;
+        std::vector<CustodyRow> out;
+        out.reserve(g_custody.size());
+        for (const auto& [id, e] : g_custody) {
+            CustodyRow row;
+            row.entry = e;
+            if (const std::uint32_t formId = ResolveFormId(id)) {
+                if (const auto it = holder.find(formId); it != holder.end()) {
+                    row.holder = it->second;
+                }
+            }
+            out.push_back(std::move(row));
+        }
+        std::sort(out.begin(), out.end(), [](const CustodyRow& a, const CustodyRow& b) {
+            return a.entry.when > b.entry.when;
+        });
+        return out;
     }
 
     int BackfillCustodyRows()
