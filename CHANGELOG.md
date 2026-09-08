@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.6.2.1 (2026-09-09)
+
+Two performance fixes. Nothing behaves differently.
+
+### Fixed
+
+- **The Recovery page cost frames while it was open.** For every row on the
+  list it rebuilt the whole "who holds this" scan - every box, persist entry,
+  published costume and NPC assignment - and it did that again on every single
+  frame. On a setup with dozens of captured items that is thousands of lookups
+  per frame for a page that only changes when you press a button. It now takes
+  one snapshot and refreshes it twice a second, the same way the NPC and
+  Diagnostics pages already did. Building that snapshot also moved onto the
+  main thread, which closes the same read-while-it-is-being-changed hazard
+  those two pages were fixed for earlier.
+
+- **A short-lived OS thread was created for every delayed retry.** CEF
+  schedules one whenever an NPC builds its 3D, so a busy cell was creating and
+  tearing down several threads a second (measured: 544 in three minutes). They
+  used almost no CPU - they only sleep until their turn - but they are now all
+  served by a single timer thread.
+
+If you came here looking for high CPU usage: check your framerate limiter
+first. CEF's per-frame work is a fixed cost *per frame*, so an uncapped
+framerate multiplies it - and an empty interior, where nothing throttles the
+frame rate, is where that shows up worst.
+
 ## v1.6.2 (2026-09-08)
 
 ### Added
@@ -16,7 +43,7 @@
   hands items back - it never deletes anything from storage and never edits
   your settings.
 
-- **Recovery list on the Main page.** Every item CEF has ever taken into
+- **Recovery list, on a page of its own.** Every item CEF has ever taken into
   storage, newest first, with what last happened to it. Use it when a piece
   goes missing and the automatic pass cannot reach it - a storage reference
   lost with a save, an item captured on another character. If the item is
