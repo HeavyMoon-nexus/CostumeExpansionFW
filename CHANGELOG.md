@@ -2,9 +2,37 @@
 
 ## v1.6.2.1 (2026-09-09)
 
-Two performance fixes. Nothing behaves differently.
+Two preset fixes and two performance fixes.
+
+**This is the last release with MCM support.** From 1.6.3 the MCM is removed and
+SKSE Menu Framework becomes the UI. The MCM has been behind for a while: NPC
+distribution, the capture blacklist, the Recovery page, box renaming and the
+per-item passthrough toggles were never added to it, and keeping two UIs in step
+was costing more than the second UI was worth. Nothing you have set up changes -
+the settings, the boxes and the presets are the same either way, only the menu
+you open them from. If you are on VR, SKSE Menu Framework needs
+[ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
 
 ### Fixed
+
+- **A preset with a wrong field type could take the game down.** Presets are
+  files you install and share, so a hand-edited or third-party `CEFP_*.json`
+  can be valid JSON with the wrong types in it - a number where the name goes,
+  an array where the hide rules go. CEF caught a broken *file*, but not a
+  broken *field*: the read threw from inside the preset list, which is not a
+  place that expected to fail. One bad preset in the folder was enough. Bad
+  fields are now ignored, the preset is dropped from the list, and the log says
+  which file and why.
+
+- **Re-exporting a preset under a name you already used made it unpickable.**
+  The second export writes `CEFP_Name_1.json`, but both files still say "Name"
+  inside, and CEF identified a preset by that display name. So the new one
+  looked like the one already on the box: clicking it did nothing, and it could
+  not be assigned to a second box either. Presets are now identified by their
+  file, so two presets sharing a name are two presets. Where the name alone
+  would be ambiguous, the list shows the file next to it. Existing assignments
+  are matched to their file on the first load; if that preset file is gone, the
+  box keeps showing the name it had.
 
 - **The Recovery page cost frames while it was open.** For every row on the
   list it rebuilt the whole "who holds this" scan - every box, persist entry,

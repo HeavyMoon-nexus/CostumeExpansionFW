@@ -29,7 +29,9 @@ worn gear.
 - [SKSE64](https://skse.silverlock.org/)
 - [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
 - [RaceMenu](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee — required for body-morph follow and the SkyUI MCM SDK)
-- SkyUI (MCM)
+- SkyUI (MCM) — **1.6.2.1 is the last release with an MCM.** From 1.6.3 the UI is
+  [SKSE Menu Framework](https://www.nexusmods.com/skyrimspecialedition/mods/120352)
+  only; see "Which UI" below
 - `CostumeFW.esp` (ships with the mod — ESL-flagged, no load-order slot; box
   tokens, persist head-part pool, MCM quest)
 - *(optional)* [Faster HDT-SMP (FSMP)](https://www.nexusmods.com/skyrimspecialedition/mods/57339)
@@ -55,6 +57,19 @@ VR support is community-tested (no VR rig here); `CEF_DISABLE.txt` (see
 "Disabling CEF from outside the game") makes the plugin fully inert if anything
 misbehaves, and the log's first lines (`runtime: Skyrim VR 1.4.15.0` + build
 stamp) identify the build in reports.
+
+## Which UI
+
+CEF has two menus that read the same settings: the SkyUI MCM and the SKSE Menu
+Framework (SMF) section, both named "Costume Expansion FW". **The MCM is going
+away in 1.6.3** — 1.6.2.1 is its last release. It is also already behind: NPC
+distribution, the capture blacklist (**Blocked**), the **Recovery** page, box
+renaming, the per-item passthrough toggles and the verbose-logging switch exist
+only in SMF. Use SMF unless you have a reason not to. On VR, SMF needs
+[ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
+
+Nothing about your setup is tied to either menu: boxes, presets and settings
+live in `CEF_settings.json` and your save, so switching menus changes nothing.
 
 ## Usage (MCM: "Costume Expansion FW")
 
