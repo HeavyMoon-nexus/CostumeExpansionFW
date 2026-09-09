@@ -32,33 +32,66 @@ namespace CostumeFW::Preset
             return a_s;
         }
 
+        // Typed field access: a member of the wrong type reads as "absent"
+        // rather than throwing out of the iteration below.
+        const nlohmann::json& Array(const nlohmann::json& a_doc, const char* a_key)
+        {
+            static const nlohmann::json kEmpty = nlohmann::json::array();
+            const auto it = a_doc.find(a_key);
+            return it != a_doc.end() && it->is_array() ? *it : kEmpty;
+        }
+
+        const nlohmann::json& Object(const nlohmann::json& a_doc, const char* a_key)
+        {
+            static const nlohmann::json kEmpty = nlohmann::json::object();
+            const auto it = a_doc.find(a_key);
+            return it != a_doc.end() && it->is_object() ? *it : kEmpty;
+        }
+
         PresetInfo Parse(const nlohmann::json& a_doc, const std::string& a_file)
         {
             PresetInfo p;
             p.file = a_file;
+            // A preset is a user-distributed file: a hand-edited or third-party
+            // CEFP_*.json can be syntactically valid JSON with the wrong TYPES.
+            // A non-object root would throw type_error.306 out of every value()
+            // below, so it is refused before the first read.
+            if (!a_doc.is_object()) {
+                SKSE::log::error("preset: {} root is not an object - skipped", a_file);
+                return p;
+            }
             // display name: explicit "name", else filename stem.
-            p.name = a_doc.value("name", std::string{});
+            if (const auto it = a_doc.find("name"); it != a_doc.end() && it->is_string()) {
+                p.name = it->get<std::string>();
+            }
             if (p.name.empty()) {
                 p.name = a_file;
                 if (auto dot = p.name.rfind(".json"); dot != std::string::npos) {
                     p.name.erase(dot);
                 }
             }
-            p.author = a_doc.value("author", std::string{});
-            p.description = a_doc.value("description", std::string{});
-            for (const auto& c : a_doc.value("requiredPlugins", nlohmann::json::array())) {
+            if (const auto it = a_doc.find("author"); it != a_doc.end() && it->is_string()) {
+                p.author = it->get<std::string>();
+            }
+            if (const auto it = a_doc.find("description"); it != a_doc.end() && it->is_string()) {
+                p.description = it->get<std::string>();
+            }
+            for (const auto& c : Array(a_doc, "requiredPlugins")) {
                 if (c.is_string()) {
                     p.requiredPlugins.push_back(c.get<std::string>());
                 }
             }
-            for (const auto& c : a_doc.value("contents", nlohmann::json::array())) {
+            for (const auto& c : Array(a_doc, "contents")) {
                 if (c.is_string()) {
                     p.contents.push_back(c.get<std::string>());
                 }
             }
-            const auto rules = a_doc.value("hideRules", nlohmann::json::object());
+            const auto& rules = Object(a_doc, "hideRules");
             for (auto it = rules.begin(); it != rules.end(); ++it) {
                 std::vector<int> slots;
+                if (!it.value().is_array()) {
+                    continue;
+                }
                 for (const auto& s : it.value()) {
                     if (s.is_number_integer()) {
                         slots.push_back(s.get<int>());
@@ -68,7 +101,7 @@ namespace CostumeFW::Preset
                     p.hideRules[it.key()] = std::move(slots);
                 }
             }
-            const auto genders = a_doc.value("genderModes", nlohmann::json::object());
+            const auto& genders = Object(a_doc, "genderModes");
             for (auto it = genders.begin(); it != genders.end(); ++it) {
                 if (it.value().is_number_integer()) {
                     const int m = it.value().get<int>();
@@ -133,7 +166,16 @@ namespace CostumeFW::Preset
             SKSE::log::error("preset: JSON parse error in {}: {}", a_file, e.what());
             return p;
         }
-        return Parse(doc, a_file);
+        // Parse is type-checked field by field, but it is the ONLY reader of a
+        // file CEF did not write - keep the catch so a shape nobody anticipated
+        // drops one preset from the list instead of terminating in the SMF
+        // render callback or a Papyrus native (BoxStore ROOT B, same reasoning).
+        try {
+            return Parse(doc, a_file);
+        } catch (const std::exception& e) {
+            SKSE::log::error("preset: field type error in {} ({}) - skipped", a_file, e.what());
+            return p;
+        }
     }
 
     std::string Export(const std::string& a_name, const std::vector<std::string>& a_contents,
