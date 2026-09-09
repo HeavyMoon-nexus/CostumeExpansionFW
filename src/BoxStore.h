@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "CapturePolicy.h"
@@ -28,7 +29,12 @@ namespace CostumeFW
         bool enabled{ true };  // distribute the token to the player? off = removed (conflict escape)
         int armorType{ 0 };    // token armor class: 0=Clothing, 1=Light, 2=Heavy (armorRating
                                // only counts toward DR for Light/Heavy, not Clothing)
-        std::string preset;    // applied preset name (CEFP_ suffix), "" = manual contents
+        // Applied preset. The FILE is the identity (two presets can carry the
+        // same display name - a re-export writes CEFP_X_1.json but leaves the
+        // json's "name" alone, and distributed presets collide freely), the
+        // name is what the UI shows. "" = manual contents.
+        std::string preset;      // preset file, e.g. "CEFP_MyOutfit_1.json"
+        std::string presetName;  // display name for the UI
         bool uiVisible{ true };  // show this box in the MCM box list
         bool wear{ false };      // desired default Wear (show contents) state
     };
@@ -48,8 +54,9 @@ namespace CostumeFW
     // assigned to persist cannot also be on a box, and vice versa). Assigning
     // REPLACES the persist contents with the preset's. "persist" is the sentinel
     // PresetAssignedTo() returns when persist holds a preset.
-    std::string PersistPreset();  // applied preset name ("" if manual)
-    bool AssignPresetToPersist(const std::string& a_presetName,
+    std::string PersistPreset();      // applied preset FILE ("" if manual)
+    std::string PersistPresetName();  // its display name ("" if manual)
+    bool AssignPresetToPersist(const std::string& a_file, const std::string& a_presetName,
         const std::vector<std::string>& a_contents);  // def + json (exclusivity)
     bool ClearPersistPreset();  // back to manual (keeps current contents); def + json
 
@@ -130,18 +137,31 @@ namespace CostumeFW
     std::string LoreBoxContentsForSlot(int a_slot);
 
     // --- Presets (assignment; def + json only, exclusivity-checked) ----------
-    // The token of the box currently using a_presetName, "" if none (exclusivity).
-    std::string PresetAssignedTo(const std::string& a_presetName);
-    // This box's applied preset name ("" if manual contents).
+    // The token of the box currently using preset FILE a_file, "" if none
+    // ("persist" = the persist class holds it). The file is the identity.
+    std::string PresetAssignedTo(const std::string& a_file);
+    // Same lookup by DISPLAY NAME. Only for the legacy MCM native, which has no
+    // file to hand in; ambiguous when two presets share a name (first match).
+    std::string PresetAssignedToName(const std::string& a_presetName);
+    // This box's applied preset FILE / display name ("" if manual contents).
     std::string BoxPreset(const std::string& a_token);
-    // Assign a_presetName (with its already-read a_contents) to a box: replaces the
-    // box's contents with the preset's. Rejected (false) if another box already uses
-    // a_presetName (1 preset <-> 1 box). def + json only; the caller re-registers the
-    // scene (detach old content, register new, Reconcile) on the main thread.
-    bool AssignPreset(const std::string& a_token, const std::string& a_presetName,
-        const std::vector<std::string>& a_contents);
+    std::string BoxPresetName(const std::string& a_token);
+    // Assign preset file a_file (display name a_presetName, contents already read)
+    // to a box: replaces the box's contents with the preset's. Rejected (false) if
+    // another box already uses that FILE (1 preset <-> 1 box). def + json only; the
+    // caller re-registers the scene (detach old, register new, Reconcile) on the
+    // main thread.
+    bool AssignPreset(const std::string& a_token, const std::string& a_file,
+        const std::string& a_presetName, const std::vector<std::string>& a_contents);
     // Detach the preset from a box (back to manual; keeps the current contents). def+json.
     bool ClearPreset(const std::string& a_token);
+
+    // Settings written before v1.6.2.1 stored the display NAME where the file
+    // now lives. Those load with a name and no file: UnresolvedPresetNames()
+    // lists them, and ResolvePresetFiles() takes the name->file mapping back
+    // (Preset.cpp owns the folder scan, so the resolution happens there).
+    std::vector<std::string> UnresolvedPresetNames();
+    void ResolvePresetFiles(const std::unordered_map<std::string, std::string>& a_nameToFile);
 
     // Load costume_boxes.json into the in-memory box store and register every
     // content for worn-token-gated injection. Call once on kDataLoaded. The

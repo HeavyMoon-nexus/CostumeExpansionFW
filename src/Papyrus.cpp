@@ -509,7 +509,8 @@ namespace CostumeFW
                     preset.name, missing.size());
             }
             const auto oldContents = BoxContents(token);  // before reassign
-            if (!AssignPreset(token, preset.name, ok)) {  // sync def + json (exclusivity)
+            // The FILE identifies the preset; the name is carried for display.
+            if (!AssignPreset(token, preset.file, preset.name, ok)) {  // sync def + json
                 return false;
             }
             // Restore the preset's hide rules + gender modes for its resolvable
@@ -535,16 +536,27 @@ namespace CostumeFW
             return ClearPreset(a_token.c_str());  // contents remain (manual)
         }
 
+        // The MCM prints this straight into the "Preset" option, so it is the
+        // DISPLAY name, not the file that identifies the assignment.
         RE::BSFixedString GetBoxPreset(RE::StaticFunctionTag*, RE::BSFixedString a_token)
         {
-            return BoxPreset(a_token.c_str());
+            return BoxPresetName(a_token.c_str());
         }
 
         // The token of the box currently using this preset ("" if free) - for the
-        // MCM to gray out an already-assigned preset.
+        // MCM to gray out an already-assigned preset. The MCM passes a display
+        // name (it has no file at that point), so fall back to the name lookup;
+        // that is ambiguous between two presets sharing a name, which is why the
+        // file is the identity everywhere else.
         RE::BSFixedString GetPresetAssignedTo(RE::StaticFunctionTag*, RE::BSFixedString a_name)
         {
-            return PresetAssignedTo(a_name.c_str());
+            const std::string key = a_name.c_str();
+            // Tolerate either, so a caller holding a file name still works.
+            auto holder = PresetAssignedTo(key);
+            if (holder.empty()) {
+                holder = PresetAssignedToName(key);
+            }
+            return holder;
         }
 
         // --- Persist (token-less, worn-capture; mirrors box capture) ----------
@@ -841,7 +853,7 @@ namespace CostumeFW
 
         RE::BSFixedString GetPersistPresetNative(RE::StaticFunctionTag*)
         {
-            return PersistPreset();
+            return PersistPresetName();  // display name (the MCM prints it)
         }
 
         RE::BSFixedString ExportPersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_name)
@@ -866,7 +878,7 @@ namespace CostumeFW
                     preset.name, missing.size());
             }
             const auto oldContents = PersistContents();  // before reassign
-            if (!AssignPresetToPersist(preset.name, ok)) {  // sync def + json (exclusivity)
+            if (!AssignPresetToPersist(preset.file, preset.name, ok)) {  // sync def + json
                 return false;
             }
             RestorePresetMaps(preset, ok);

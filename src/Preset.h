@@ -45,6 +45,12 @@ namespace CostumeFW::Preset
         const std::unordered_map<std::string, int>& a_genderModes = {},
         const std::string& a_author = {}, const std::string& a_description = {});
 
+    // Resolve preset assignments that settings written before v1.6.2.1 stored as
+    // a display NAME into the preset FILE that now identifies them (BoxStore
+    // hands out the pending names; the folder scan lives here). Call once after
+    // the settings load. A name no CEFP file carries is left alone.
+    void MigrateAssignments();
+
     // Split contents into resolvable vs missing (FormID/plugin not loaded) so an
     // import can skip + report the missing ones instead of silently failing.
     void Validate(const std::vector<std::string>& a_contents,

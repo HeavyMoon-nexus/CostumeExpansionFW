@@ -12,6 +12,7 @@
 #include "Diag.h"
 #include "LoreBox.h"
 #include "Papyrus.h"
+#include "Preset.h"
 #include "SkinRebind.h"
 #include "PublishStore.h"
 #include "SmfUI.h"
@@ -373,6 +374,10 @@ namespace
             // Load the GLOBAL box definitions (costume_boxes.json) once.
             SKSE::GetTaskInterface()->AddTask([] {
                 CostumeFW::LoadBoxes();
+                // Settings older than v1.6.2.1 name their preset assignments by
+                // display name; resolve those to the file that now identifies a
+                // preset. Needs the loaded boxes, so it runs right after.
+                CostumeFW::Preset::MigrateAssignments();
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
                 LogRegistryRollCall("data-loaded");

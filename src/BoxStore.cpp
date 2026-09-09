@@ -2,6 +2,7 @@
 #include "BodyMorph.h"
 #include "SkinRebind.h"
 #include "PublishStore.h"
+#include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
 #include "StoreLock.h"
 #include "nifcarrier/NifCarrierCore.h"
 
@@ -214,8 +215,18 @@ namespace CostumeFW
             return card > 0.0f ? card : static_cast<float>(a_armo->GetArmorRating());
         }
 
-        // Persist class's applied preset name ("" = manual). Mirrors a box's preset.
+        // Persist class's applied preset ("" = manual). Mirrors a box's preset:
+        // the FILE is the identity, the name is for display.
         std::string g_persistPreset;
+        std::string g_persistPresetName;
+
+        // A preset value read from settings written before v1.6.2.1 is a display
+        // name, not a file. Everything CEF writes ends in .json, so the suffix
+        // tells the two apart without a folder scan.
+        bool LooksLikePresetFile(const std::string& a_value)
+        {
+            return a_value.ends_with(".json");
+        }
 
         int FindBox(const std::string& a_token)
         {
@@ -310,7 +321,8 @@ namespace CostumeFW
                 jb["ability"] = b.ability;
                 jb["enabled"] = b.enabled;
                 jb["armorType"] = b.armorType;
-                jb["preset"] = b.preset;
+                jb["preset"] = b.preset;          // file = identity
+                jb["presetName"] = b.presetName;  // display only
                 jb["uiVisible"] = b.uiVisible;
                 jb["wear"] = b.wear;
                 arr.push_back(std::move(jb));
@@ -318,6 +330,7 @@ namespace CostumeFW
             doc["boxes"] = std::move(arr);
             doc["persist"]["contents"] = g_persist;
             doc["persist"]["preset"] = g_persistPreset;
+            doc["persist"]["presetName"] = g_persistPresetName;
 
             auto rules = nlohmann::json::object();
             for (const auto& [id, slots] : g_hideRules) {
@@ -1383,6 +1396,7 @@ namespace CostumeFW
         g_contentEnchants.clear();
         g_contentTemper.clear();
         g_persistPreset.clear();
+        g_persistPresetName.clear();
         g_custody.clear();
         PublishPolicy({});
         g_cefEnabled = true;
@@ -1507,6 +1521,15 @@ namespace CostumeFW
             b.enabled = jb.value("enabled", true);
             b.armorType = std::clamp(jb.value("armorType", 0), 0, 2);  // ROOT B: valid class only
             b.preset = jb.value("preset", std::string{});
+            b.presetName = jb.value("presetName", std::string{});
+            // Pre-1.6.2.1: "preset" carried the display NAME. Park it as the name
+            // and leave the file empty - Preset::MigrateAssignments() resolves it.
+            if (!b.preset.empty() && !LooksLikePresetFile(b.preset)) {
+                b.presetName = b.preset;
+                b.preset.clear();
+            } else if (b.presetName.empty()) {
+                b.presetName = b.preset;  // file-only row: show something
+            }
             b.uiVisible = jb.value("uiVisible", true);
             b.wear = jb.value("wear", false);
             g_boxes.push_back(std::move(b));
@@ -1532,6 +1555,13 @@ namespace CostumeFW
             }
         }
         g_persistPreset = persist.value("preset", std::string{});
+        g_persistPresetName = persist.value("presetName", std::string{});
+        if (!g_persistPreset.empty() && !LooksLikePresetFile(g_persistPreset)) {
+            g_persistPresetName = g_persistPreset;
+            g_persistPreset.clear();
+        } else if (g_persistPresetName.empty()) {
+            g_persistPresetName = g_persistPreset;
+        }
         const auto rules = doc.value("hideRules", nlohmann::json::object());
         for (auto it = rules.begin(); it != rules.end(); ++it) {
             std::vector<int> slots;
@@ -1719,6 +1749,7 @@ namespace CostumeFW
             g_contentEnchants.clear();
             g_contentTemper.clear();
             g_persistPreset.clear();
+            g_persistPresetName.clear();
             g_custody.clear();
             PublishPolicy({});
             g_cefEnabled = true;
@@ -1957,6 +1988,7 @@ namespace CostumeFW
         // persist pool); the re-reconcile below re-registers - both requests
         // coalesce into ONE debounced head rebuild.
         LoadBoxes();
+        Preset::MigrateAssignments();  // same pre-1.6.2.1 fixup the startup load runs
         // Re-register EVERY snapshot active - including entries no longer in
         // the reloaded catalog. Uncataloged actives are a supported M2 state
         // ("another character removed the entry; this save keeps showing it
@@ -5061,19 +5093,36 @@ namespace CostumeFW
         return true;
     }
 
-    std::string PresetAssignedTo(const std::string& a_presetName)
+    std::string PresetAssignedTo(const std::string& a_file)
+    {
+        StoreLock lk;
+        if (a_file.empty()) {
+            return {};
+        }
+        for (const auto& b : g_boxes) {
+            if (b.preset == a_file) {
+                return b.token;
+            }
+        }
+        if (g_persistPreset == a_file) {
+            return "persist";  // sentinel: held by the persist class
+        }
+        return {};
+    }
+
+    std::string PresetAssignedToName(const std::string& a_presetName)
     {
         StoreLock lk;
         if (a_presetName.empty()) {
             return {};
         }
         for (const auto& b : g_boxes) {
-            if (b.preset == a_presetName) {
+            if (b.presetName == a_presetName) {
                 return b.token;
             }
         }
-        if (g_persistPreset == a_presetName) {
-            return "persist";  // sentinel: held by the persist class
+        if (g_persistPresetName == a_presetName) {
+            return "persist";
         }
         return {};
     }
@@ -5084,15 +5133,66 @@ namespace CostumeFW
         return g_persistPreset;
     }
 
-    bool AssignPresetToPersist(const std::string& a_presetName,
+    std::string PersistPresetName()
+    {
+        StoreLock lk;
+        return g_persistPresetName;
+    }
+
+    std::vector<std::string> UnresolvedPresetNames()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        for (const auto& b : g_boxes) {
+            if (b.preset.empty() && !b.presetName.empty()) {
+                out.push_back(b.presetName);
+            }
+        }
+        if (g_persistPreset.empty() && !g_persistPresetName.empty()) {
+            out.push_back(g_persistPresetName);
+        }
+        return out;
+    }
+
+    void ResolvePresetFiles(const std::unordered_map<std::string, std::string>& a_nameToFile)
+    {
+        StoreLock lk;
+        bool changed = false;
+        const auto adopt = [&](const std::string& name, std::string& file) {
+            if (!file.empty() || name.empty()) {
+                return;
+            }
+            const auto it = a_nameToFile.find(name);
+            if (it == a_nameToFile.end()) {
+                // The preset file is gone. Keep the name so the UI still says
+                // which preset the box came from; it is simply no longer part of
+                // the exclusivity pool - the same as before this migration.
+                SKSE::log::warn("preset: '{}' assigned but no CEFP file carries that name", name);
+                return;
+            }
+            file = it->second;
+            changed = true;
+            SKSE::log::info("preset: migrated assignment '{}' -> {}", name, file);
+        };
+        for (auto& b : g_boxes) {
+            adopt(b.presetName, b.preset);
+        }
+        adopt(g_persistPresetName, g_persistPreset);
+        if (changed) {
+            WriteJson();
+        }
+    }
+
+    bool AssignPresetToPersist(const std::string& a_file, const std::string& a_presetName,
         const std::vector<std::string>& a_contents)
     {
         StoreLock lk;
-        if (a_presetName.empty()) {
+        if (a_file.empty()) {
             return false;
         }
-        // Shared exclusivity pool with boxes: reject if a box already holds it.
-        const std::string holder = PresetAssignedTo(a_presetName);
+        // Shared exclusivity pool with boxes, keyed by FILE: reject if a box
+        // already holds this preset.
+        const std::string holder = PresetAssignedTo(a_file);
         if (!holder.empty() && holder != "persist") {
             SKSE::log::warn("preset: '{}' already assigned to box {}", a_presetName, holder);
             return false;
@@ -5109,7 +5209,8 @@ namespace CostumeFW
             }
         }
         g_persist = a_contents;  // persist mirrors the preset's contents
-        g_persistPreset = a_presetName;
+        g_persistPreset = a_file;
+        g_persistPresetName = a_presetName;
         WriteJson();
         SKSE::log::info("preset: assigned '{}' to persist ({} content)",
             a_presetName, a_contents.size());
@@ -5120,6 +5221,7 @@ namespace CostumeFW
     {
         StoreLock lk;
         g_persistPreset.clear();  // contents remain (now manual)
+        g_persistPresetName.clear();
         WriteJson();
         return true;
     }
@@ -5131,16 +5233,26 @@ namespace CostumeFW
         return idx < 0 ? std::string{} : g_boxes[idx].preset;
     }
 
-    bool AssignPreset(const std::string& a_token, const std::string& a_presetName,
-        const std::vector<std::string>& a_contents)
+    std::string BoxPresetName(const std::string& a_token)
     {
         StoreLock lk;
         const int idx = FindBox(a_token);
-        if (idx < 0 || a_presetName.empty()) {
+        return idx < 0 ? std::string{} : g_boxes[idx].presetName;
+    }
+
+    bool AssignPreset(const std::string& a_token, const std::string& a_file,
+        const std::string& a_presetName, const std::vector<std::string>& a_contents)
+    {
+        StoreLock lk;
+        const int idx = FindBox(a_token);
+        if (idx < 0 || a_file.empty()) {
             return false;
         }
-        // Exclusivity: a preset may be assigned to only one box at a time.
-        const std::string holder = PresetAssignedTo(a_presetName);
+        // Exclusivity: a preset FILE may be assigned to only one box at a time.
+        // Two files that happen to share a display name are separate presets and
+        // do not collide (they did until v1.6.2.1, which made a same-name
+        // re-export unassignable).
+        const std::string holder = PresetAssignedTo(a_file);
         if (!holder.empty() && holder != a_token) {
             SKSE::log::warn("preset: '{}' already assigned to box {}", a_presetName, holder);
             return false;
@@ -5158,7 +5270,8 @@ namespace CostumeFW
                 return false;
             }
         }
-        g_boxes[idx].preset = a_presetName;
+        g_boxes[idx].preset = a_file;
+        g_boxes[idx].presetName = a_presetName;
         g_boxes[idx].contents = a_contents;  // box mirrors the preset's contents
         WriteJson();
         SetTokenStats(g_boxes[idx]);  // recompute token armor/weight/keywords for new contents
@@ -5175,6 +5288,7 @@ namespace CostumeFW
             return false;
         }
         g_boxes[idx].preset.clear();  // contents remain (now manual)
+        g_boxes[idx].presetName.clear();
         WriteJson();
         return true;
     }

@@ -150,6 +150,29 @@ namespace CostumeFW::Preset
         return out;
     }
 
+    void MigrateAssignments()
+    {
+        const auto pending = UnresolvedPresetNames();
+        if (pending.empty()) {
+            return;
+        }
+        // One folder scan covers every pending name. A name shared by two files is
+        // ambiguous by construction - the assignment predates the file being the
+        // identity, so there is nothing left to tell them apart. Take the first
+        // in List()'s order (name, then folder order) and say so.
+        std::unordered_map<std::string, std::string> nameToFile;
+        for (const auto& p : List()) {
+            const auto [it, inserted] = nameToFile.emplace(p.name, p.file);
+            if (!inserted) {
+                SKSE::log::warn(
+                    "preset: '{}' is the display name of both {} and {} - a pre-1.6.2.1 "
+                    "assignment to it resolves to {}",
+                    p.name, it->second, p.file, it->second);
+            }
+        }
+        ResolvePresetFiles(nameToFile);
+    }
+
     PresetInfo Read(const std::string& a_file)
     {
         PresetInfo p;

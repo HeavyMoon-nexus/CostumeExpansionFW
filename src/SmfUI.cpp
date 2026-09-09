@@ -237,6 +237,23 @@ namespace CostumeFW::SmfUI
         // Box preset assign + A-4 custody: preset-dropped BOX contents return
         // STORE-ONLY (a preset lists references; fabricating would mint a free
         // item on every swap - MCM ReturnDroppedContents, aPersist=false).
+        // Two presets can carry the same display name: a re-export writes
+        // CEFP_X_1.json but leaves the json's "name" alone, and distributed
+        // presets collide freely. The file is the identity, so a name shared by
+        // more than one entry gets its file appended - otherwise the list shows
+        // two identical rows and there is no way to tell which one you picked.
+        std::string PresetPickLabel(const std::vector<Preset::PresetInfo>& a_list,
+            const Preset::PresetInfo& a_p)
+        {
+            std::size_t same = 0;
+            for (const auto& other : a_list) {
+                if (other.name == a_p.name && ++same > 1) {
+                    return std::format("{}  ({})", a_p.name, a_p.file);
+                }
+            }
+            return a_p.name;
+        }
+
         void QueueAssignPreset(const std::string& a_token, const std::string& a_file)
         {
             const std::string token = a_token;
@@ -550,22 +567,29 @@ namespace CostumeFW::SmfUI
                     ImGui::EndCombo();
                 }
 
-                const std::string preset = BoxPreset(token);
+                const std::string preset = BoxPreset(token);          // file = identity
+                const std::string presetName = BoxPresetName(token);  // what to show
                 if (ImGui::BeginCombo(std::format("Preset##pr{}", slot).c_str(),
-                        preset.empty() ? "(manual)" : preset.c_str())) {
+                        presetName.empty() ? "(manual)" : presetName.c_str())) {
                     // Snapshot on combo OPEN, not per frame (List() scans the
                     // presets folder; a combo renders every frame while open).
                     static std::vector<Preset::PresetInfo> s_presets;
                     if (ImGui::IsWindowAppearing()) {
                         s_presets = Preset::List();
                     }
-                    if (ImGui::Selectable("(manual)", preset.empty()) && !preset.empty()) {
+                    // Keyed on the NAME, not the file: an assignment whose
+                    // preset file was deleted keeps the name and no file, and
+                    // it still has to be clearable back to manual.
+                    if (ImGui::Selectable("(manual)", presetName.empty()) &&
+                        !presetName.empty()) {
                         UiOps::ClearPreset(token);
                     }
                     for (const auto& p : s_presets) {
-                        if (ImGui::Selectable(std::format("{}##pf{}", p.name, p.file).c_str(),
-                                p.name == preset) &&
-                            p.name != preset) {
+                        if (ImGui::Selectable(
+                                std::format("{}##pf{}", PresetPickLabel(s_presets, p), p.file)
+                                    .c_str(),
+                                p.file == preset) &&
+                            p.file != preset) {
                             QueueAssignPreset(token, p.file);
                         }
                     }
@@ -719,19 +743,22 @@ namespace CostumeFW::SmfUI
             }
             ImGui::InputText("Inventory filter##pif", s_invFilter, sizeof(s_invFilter));
 
-            const std::string ppreset = PersistPreset();
-            if (ImGui::BeginCombo("Preset##ppr", ppreset.empty() ? "(manual)" : ppreset.c_str())) {
+            const std::string ppreset = PersistPreset();          // file = identity
+            const std::string ppresetName = PersistPresetName();  // what to show
+            if (ImGui::BeginCombo("Preset##ppr",
+                    ppresetName.empty() ? "(manual)" : ppresetName.c_str())) {
                 static std::vector<Preset::PresetInfo> s_presets;
                 if (ImGui::IsWindowAppearing()) {
                     s_presets = Preset::List();
                 }
-                if (ImGui::Selectable("(manual)", ppreset.empty()) && !ppreset.empty()) {
+                if (ImGui::Selectable("(manual)", ppresetName.empty()) && !ppresetName.empty()) {
                     UiOps::ClearPersistPreset();
                 }
                 for (const auto& p : s_presets) {
-                    if (ImGui::Selectable(std::format("{}##ppf{}", p.name, p.file).c_str(),
-                            p.name == ppreset) &&
-                        p.name != ppreset) {
+                    if (ImGui::Selectable(
+                            std::format("{}##ppf{}", PresetPickLabel(s_presets, p), p.file).c_str(),
+                            p.file == ppreset) &&
+                        p.file != ppreset) {
                         QueueAssignPersistPreset(p.file);
                     }
                 }
@@ -912,7 +939,7 @@ namespace CostumeFW::SmfUI
             }
             BeginScrollList("##cfwpresetlist");
             for (const auto& p : s_list) {
-                const std::string assigned = PresetAssignedTo(p.name);
+                const std::string assigned = PresetAssignedTo(p.file);
                 const std::string stat = assigned.empty()
                     ? "free"
                     : (assigned == "persist"
