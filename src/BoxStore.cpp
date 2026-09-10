@@ -3987,6 +3987,13 @@ namespace CostumeFW
         it->second.dirty = true;  // next ApplyBoxAbilities refills + reapplies
     }
 
+    bool FillContentEnchantSpell(RE::SpellItem* a_spell,
+        const std::vector<std::string>& a_contents, const char* a_name)
+    {
+        StoreLock lk;  // reads g_contentEnchants / g_statEnchantOff
+        return a_spell ? FillEnchantSpell(a_spell, a_contents, a_name) : false;
+    }
+
     void RebuildPersistAbility()
     {
         StoreLock lk;

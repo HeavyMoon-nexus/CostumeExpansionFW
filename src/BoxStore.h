@@ -10,6 +10,7 @@
 
 namespace RE
 {
+    class SpellItem;
     class TESObjectARMO;
     class TESObjectREFR;
 }
@@ -485,6 +486,25 @@ namespace CostumeFW
     // Same for one box's synthesized stat ability (call after its contents
     // change). Main thread.
     void RebuildBoxAbility(const std::string& a_token);
+
+    // (Re)fill a synthesized constant-effect ability from a content list, at the
+    // fidelity the normal box path uses: the stored original's instance
+    // enchantment or the base form's, copied WHOLE - magnitude, area, duration
+    // and the conditions that gate it - and only falling back to the flat
+    // {mgef, magnitude} capture snapshot when neither is reachable. Skips
+    // quarantined contents and honors the per-content enchant toggle.
+    //
+    // Exported so the PUBLISH path shares it. Its own rebuild kept only
+    // mgef+magnitude and zeroed area/duration with no conditions, which quietly
+    // undid the v1.6.1 conditional-enchant fix for any published costume
+    // (review 2026-09-09 F14) - a "while sneaking" effect became always-on the
+    // moment the same outfit was published.
+    //
+    // The caller MUST have removed the ability from every actor first: the
+    // engine holds the Effect pointers of a live ability. Returns false when no
+    // content contributes an effect (the form stays, with an empty list).
+    bool FillContentEnchantSpell(RE::SpellItem* a_spell,
+        const std::vector<std::string>& a_contents, const char* a_name);
 
     // Custody history: one row per content id CEF has ever taken custody of, with
     // what last happened to it. The id is the only handle on a piece whose box

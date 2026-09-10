@@ -210,25 +210,41 @@ namespace CostumeFW
                 ability.dirty = true;
             }
             if (!ability.dirty) return ability;
-            ability.spell->fullName = ("Costume Stats: " + a_snap.label).c_str();
+            const std::string label = "Costume Stats: " + a_snap.label;
+            ability.spell->fullName = label.c_str();
             DropPubAbility(a_snap.pubSlot, ability);
-            // Retired, not freed: RemoveSpell only flags an active effect, and its
-            // later teardown still reads the Effect* (see RetireSynthEffects).
-            ability.spell->effects.clear();
-            for (const auto& [id, effects] : a_snap.enchants) {
-                if (!StatEnchantOn(id)) continue;  // item-data toggle
-                for (const auto& frozen : effects) {
-                    auto* mgef = ResolveColonForm<RE::EffectSetting>(frozen.mgef);
-                    if (!mgef) continue;
-                    auto* effect = new RE::Effect();
-                    effect->baseEffect = mgef;
-                    effect->effectItem.magnitude = frozen.magnitude;
-                    effect->effectItem.area = 0;
-                    effect->effectItem.duration = 0;
-                    ability.spell->effects.push_back(effect);
+            // The SAME filler a normal box uses (review 2026-09-09 F14). The
+            // rebuild that used to live here kept only {mgef, magnitude} and
+            // zeroed area/duration with no conditions, so publishing an outfit
+            // quietly undid the v1.6.1 conditional-enchant fix - a "while
+            // sneaking" effect became always-on. It clears the old effect list
+            // itself, honors the per-content enchant toggle, and skips
+            // quarantined contents.
+            ability.hasEffects =
+                FillContentEnchantSpell(ability.spell, a_snap.contents, label.c_str());
+            if (!ability.hasEffects) {
+                // Nothing reachable (the contents' plugin is gone, or the global
+                // capture snapshot was pruned) - fall back to the costume's own
+                // frozen list so a published costume never loses its stats
+                // outright. Flat by construction: this is all the snapshot has.
+                // Retired, not freed: RemoveSpell only flags an active effect,
+                // and its later teardown still reads the Effect*.
+                ability.spell->effects.clear();
+                for (const auto& [id, effects] : a_snap.enchants) {
+                    if (!StatEnchantOn(id)) continue;  // item-data toggle
+                    for (const auto& frozen : effects) {
+                        auto* mgef = ResolveColonForm<RE::EffectSetting>(frozen.mgef);
+                        if (!mgef) continue;
+                        auto* effect = new RE::Effect();
+                        effect->baseEffect = mgef;
+                        effect->effectItem.magnitude = frozen.magnitude;
+                        effect->effectItem.area = 0;
+                        effect->effectItem.duration = 0;
+                        ability.spell->effects.push_back(effect);
+                    }
                 }
+                ability.hasEffects = !ability.spell->effects.empty();
             }
-            ability.hasEffects = !ability.spell->effects.empty();
             ability.dirty = false;
             return ability;
         }
