@@ -90,6 +90,15 @@ namespace CostumeFW
     const PubSnapshot* PubByTokenForm(RE::FormID a_form);
     std::vector<PubSnapshot> PublishedSnapshot();
 
+    // Ownership probes for ContentHolder: which published slot / NPC-persist
+    // pool slot holds this content id, or -1. Separate from PublishedSnapshot()
+    // on purpose - that one DEEP-COPIES every snapshot (settings + enchant maps),
+    // and ContentHolder is called once per id inside the capture, preset and
+    // side-map guards, which is exactly the per-row copy c439633 had to take
+    // back out of the Recovery page.
+    int PublishedSlotHolding(const std::string& a_content);
+    int NpcPersistSlotHolding(const std::string& a_content);
+
     void EmitPublishJson(nlohmann::json& a_doc);
     void ParsePublishJson(const nlohmann::json& a_doc);
     void SaveGlobalSettings();

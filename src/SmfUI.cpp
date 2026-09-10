@@ -157,6 +157,17 @@ namespace CostumeFW::SmfUI
             if (a_holder == "persist") {
                 return "Persist";
             }
+            // Sentinel holders (review F03/F06/F08): not token colon-ids, so they
+            // must not reach ItemDisplayName/TokenSlot - that would print the raw
+            // "publish:2" instead of telling the user where their item actually is.
+            if (a_holder.starts_with("publish:")) {
+                // 1-based, like the `cef pub` listing and the NPC page.
+                const int slot = std::atoi(a_holder.c_str() + std::string_view("publish:").size());
+                return std::format("published costume #{}", slot + 1);
+            }
+            if (a_holder.starts_with("npr:")) {
+                return "an NPC (persist)";
+            }
             return std::format("{} ({})", ItemDisplayName(a_holder), SlotName(TokenSlot(a_holder)));
         }
 
@@ -1367,7 +1378,16 @@ namespace CostumeFW::SmfUI
                     ImGui::TextWrapped("Restore this frozen snapshot as a normal box and free the published slot?");
                     if (ImGui::Button("Unpublish")) {
                         const int slot = snap.pubSlot;
-                        SKSE::GetTaskInterface()->AddTask([slot] { UnpublishToBox(slot); });
+                        // Report the refusal (review F03 / U06): unpublish can
+                        // decline - no free box, a content another holder owns,
+                        // the NPC add-on missing - and dropping the bool made
+                        // every refusal look like a completed operation.
+                        SKSE::GetTaskInterface()->AddTask([slot] {
+                            if (!UnpublishToBox(slot)) {
+                                RE::DebugNotification(
+                                    "CostumeFW: unpublish refused - the costume is unchanged (see log)");
+                            }
+                        });
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();

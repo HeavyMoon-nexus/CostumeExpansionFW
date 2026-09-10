@@ -564,12 +564,26 @@ namespace CostumeFW
     // Reconcile on the main thread to apply the visual change.
     //
     // Where a content id is already held: "" if free, "persist" if in the
-    // shared persist catalog, else the holding box's token. The injection
-    // registry is keyed per content id (a second registration silently steals
-    // the first, and removing either holder wipes the shared per-content
-    // settings), so capture flows must block while ANY box or the persist
-    // catalog holds the id (review 2026-07-07 P1-1).
+    // shared persist catalog, PublishHolderId()/NpcPersistHolderId() if a
+    // published costume or an NPC-persist assignment holds it, else the holding
+    // box's token. The injection registry is keyed per content id (a second
+    // registration silently steals the first, and removing either holder wipes
+    // the shared per-content settings), so capture flows must block while ANY of
+    // those four sources holds the id (review 2026-07-07 P1-1; the publish/NPC
+    // sources added for review 2026-09-09 F03/F06/F08).
     std::string ContentHolder(const std::string& a_content);
+
+    // The holder sentinels. Same shape as "persist": never a token colon-id, so
+    // the `holder != "persist"` / `holder != token` rejections that guard every
+    // capture path reject them without each site learning a new spelling.
+    // UnpublishToBox compares against PublishHolderId(its own slot) to tell "some
+    // OTHER owner has this" from "the snapshot I am about to dissolve has this".
+    std::string PublishHolderId(int a_pubSlot);
+    std::string NpcPersistHolderId(int a_poolSlot);
+
+    // True for any holder that is NOT a box token ("persist", "publish:N",
+    // "npr:N") - i.e. a holder that must not be fed to FindBox / ResolveArmo.
+    bool IsSentinelHolder(const std::string& a_holder);
 
     // X-DIAG: the carrier NIF the holding box's token currently points at
     // (meshes-relative, as carriers.json wrote it), or "" when the content is

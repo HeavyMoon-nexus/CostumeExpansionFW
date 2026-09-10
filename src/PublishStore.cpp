@@ -442,6 +442,33 @@ namespace CostumeFW
         return out;
     }
 
+    int PublishedSlotHolding(const std::string& a_content)
+    {
+        for (const auto& snap : g_published) {
+            if (snap && std::find(snap->contents.begin(), snap->contents.end(), a_content) !=
+                            snap->contents.end())
+                return snap->pubSlot;
+        }
+        return -1;
+    }
+
+    int NpcPersistSlotHolding(const std::string& a_content)
+    {
+        // Unresolved assignments count too: an NPC that has not loaded yet still
+        // owns its costume, and its items are still in the hidden store.
+        for (const auto& item : g_unresolvedNpr) {
+            if (std::find(item.contents.begin(), item.contents.end(), a_content) !=
+                item.contents.end())
+                return item.poolSlot;
+        }
+        for (const auto& item : g_nprAssignments) {
+            if (std::find(item.contents.begin(), item.contents.end(), a_content) !=
+                item.contents.end())
+                return item.poolSlot;
+        }
+        return -1;
+    }
+
     void EmitPublishJson(nlohmann::json& a_doc)
     {
         auto published = nlohmann::json::array();
@@ -846,34 +873,116 @@ namespace CostumeFW
                 break;
             }
         }
-        std::unordered_set<std::string> liveSettings;
-        for (const auto& id : snap->contents)
-            if (!ContentHolder(id).empty()) liveSettings.insert(id);
-        AddBox(snap->label, token, {});
+        // PHASE 1 - validate the WHOLE restore before anything is touched
+        // (review 2026-09-09 F03). This used to ignore every AddBox result and
+        // then delete the snapshot regardless, so a single refused content left
+        // a box missing pieces AND destroyed the definition they came from. The
+        // snapshot is the only copy of the costume's composition; it is the last
+        // thing to go, and only once the box that replaces it is certain.
+        //
+        // Two classes of problem, and they get opposite answers:
+        //
+        //   BLOCKING - a second owner already holds the content, or the list
+        //   repeats an id. Restoring would put one content under two holders,
+        //   the exact state F06 exists to prevent. Refuse; the snapshot is
+        //   untouched and the user can resolve it.
+        //
+        //   DROPPED - the content simply cannot be re-captured (its plugin is
+        //   gone, it is blacklisted now). Refusing here would be worse than the
+        //   bug: UnpublishToBox is the ONLY way to free a publish slot, so a
+        //   costume built on an uninstalled mod would be stuck forever, and its
+        //   items stuck in the hidden store with it. Drop those ids, report
+        //   them, and let the store items become orphans - the load-time sweep
+        //   and the Recovery page exist precisely to hand those back.
+        const std::string selfHolder = PublishHolderId(a_slot);
+        std::vector<std::string> restorable;
+        std::unordered_set<std::string> seen;
         for (const auto& id : snap->contents) {
-            AddBox(snap->label, token, id);
-            if (auto it = snap->settings.find(id);
-                !liveSettings.contains(id) && it != snap->settings.end() && it->second) {
-                SetHideSlots(id, it->second->hideSlots);
-                SetGenderMode(id, it->second->genderMode);
-                SetBodyMorphOn(id, it->second->bodyMorph);
-                for (const auto& shape : it->second->hideShapes) SetHideShape(id, shape, true);
-                SetShowRealBodyOn(id, it->second->showRealBody);
-            } else if (liveSettings.contains(id)) {
-                SKSE::log::warn("unpublish: '{}' already has a live holder; keeping live settings", id);
+            if (const std::string holder = ContentHolder(id);
+                !holder.empty() && holder != selfHolder) {
+                SKSE::log::warn("unpublish: slot {} kept - '{}' is also held by '{}'",
+                    a_slot, id, holder);
+                return false;
             }
+            if (!seen.insert(id).second) {  // AddBox refuses a duplicate
+                SKSE::log::warn("unpublish: slot {} kept - '{}' is listed twice", a_slot, id);
+                return false;
+            }
+            std::string why;
+            if (!CanCaptureContent(id, &why)) {  // same gate AddBox applies
+                SKSE::log::warn(
+                    "unpublish: slot {} - '{}' cannot go back into a box ({}); dropping it. "
+                    "Its stored item is handed back by Recovery / the next load's sweep.",
+                    a_slot, id, why);
+                continue;
+            }
+            restorable.push_back(id);
         }
-        SetBoxArmorType(token, snap->armorType);
-        SetBoxAbility(token, snap->manualAbility);
-        RecallPublished(a_slot);
+        // Recall BEFORE the snapshot goes: RecallPublished reads it (via PubBySlot)
+        // to take the manual ability back off each wearer. It refuses up front,
+        // without mutating, when the NPC add-on is not loaded - so a refusal here
+        // is safe to treat as "cannot unpublish yet".
+        if (!RecallPublished(a_slot)) {
+            SKSE::log::warn("unpublish: slot {} kept - recall failed (NPC add-on not loaded?)", a_slot);
+            return false;
+        }
         if (auto* player = RE::PlayerCharacter::GetSingleton()) {
             if (auto* pubToken = PubTokenArmo(a_slot))
                 player->RemoveItem(pubToken, 99, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
         }
+
+        // PHASE 2 - dissolve the snapshot, then rebuild the box. The erase must
+        // come FIRST: ContentHolder now answers "publish:<slot>" for these ids,
+        // and AddBox refuses a content that any other holder owns.
         g_published.erase(std::remove(g_published.begin(), g_published.end(), snap), g_published.end());
+        bool restored = AddBox(snap->label, token, {});
+        if (restored) {
+            for (const auto& id : restorable) {
+                if (!AddBox(snap->label, token, id)) {
+                    restored = false;
+                    break;
+                }
+                if (auto it = snap->settings.find(id); it != snap->settings.end() && it->second) {
+                    SetHideSlots(id, it->second->hideSlots);
+                    SetGenderMode(id, it->second->genderMode);
+                    SetBodyMorphOn(id, it->second->bodyMorph);
+                    for (const auto& shape : it->second->hideShapes) SetHideShape(id, shape, true);
+                    SetShowRealBodyOn(id, it->second->showRealBody);
+                }
+            }
+        }
+        if (!restored) {
+            // Phase 1 makes this unreachable in practice; if it happens anyway,
+            // put the costume back rather than leaving a half-filled box and no
+            // definition to rebuild it from. The wearers are already recalled -
+            // the tokens have to be handed out again - but the composition lives.
+            RemoveBox(token);
+            g_published.push_back(snap);
+            SaveGlobalSettings();
+            SKSE::log::error(
+                "unpublish: slot {} restore FAILED after validation - the published costume is "
+                "kept and the partial box was rolled back; re-issue its tokens", a_slot);
+            return false;
+        }
+        SetBoxArmorType(token, snap->armorType);
+        SetBoxAbility(token, snap->manualAbility);
         ResetPublishedTokenState(a_slot);
         GiveOrRemoveToken(token, true);
+        // AddBox only moves DEFINITIONS ("caller registers + reconciles"), and
+        // Publish detached these contents with DetachSkinned - so without this
+        // the restored box equips to nothing until the next settings reload
+        // ("works after a reload" - review F08). Same post-capture order the
+        // preset-assign path uses.
+        for (const auto& id : restorable) {
+            RegisterBoxById(id, token);
+        }
+        Reconcile();
+        RebuildBoxAbility(token);
+        ApplyBoxAbilities();
+        RefreshWornToken(token);
         SaveGlobalSettings();
+        SKSE::log::info("unpublish: slot {} -> box '{}' ({}/{} content(s) restored)",
+            a_slot, token, restorable.size(), snap->contents.size());
         return true;
     }
 

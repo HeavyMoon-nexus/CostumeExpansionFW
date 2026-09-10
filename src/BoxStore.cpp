@@ -4791,6 +4791,22 @@ namespace CostumeFW
         return plugin.size() >= 9 && ::_strnicmp(plugin.data(), "CostumeFW", 9) == 0;
     }
 
+    std::string PublishHolderId(int a_pubSlot)
+    {
+        return "publish:" + std::to_string(a_pubSlot);
+    }
+
+    std::string NpcPersistHolderId(int a_poolSlot)
+    {
+        return "npr:" + std::to_string(a_poolSlot);
+    }
+
+    bool IsSentinelHolder(const std::string& a_holder)
+    {
+        return a_holder == "persist" || a_holder.starts_with("publish:") ||
+               a_holder.starts_with("npr:");
+    }
+
     std::string ContentHolder(const std::string& a_content)
     {
         StoreLock lk;
@@ -4805,6 +4821,24 @@ namespace CostumeFW
         }
         if (std::find(g_persist.begin(), g_persist.end(), a_content) != g_persist.end()) {
             return "persist";
+        }
+        // Published costumes and NPC-persist assignments are OWNERS too (review
+        // 2026-09-09 F03/F06/F08). Publish DELETES the source box, so before this
+        // a published content answered "held by nobody" and the one-content-one-
+        // owner invariant collapsed: it could be re-captured into a second box
+        // (then either owner's unequip wiped the other's injection, and Unpublish
+        // silently dropped contents), and every ROOT E side-map guard below
+        // refused to store its hide/gender/morph settings.
+        //
+        // Same four sources as BuildHeldFormIds / BuildHolderLabels - the sweep,
+        // the Recovery list and this admission gate must agree on "held".
+        // Sentinels, like "persist": not a token colon-id, so the existing
+        // `holder != "persist"` / `holder != token` rejections all fire correctly.
+        if (const int slot = PublishedSlotHolding(a_content); slot >= 0) {
+            return PublishHolderId(slot);
+        }
+        if (const int slot = NpcPersistSlotHolding(a_content); slot >= 0) {
+            return NpcPersistHolderId(slot);
         }
         return {};
     }
@@ -5000,6 +5034,10 @@ namespace CostumeFW
             }
             if (holder == "persist") {
                 RebuildPersistAbility();
+            } else if (IsSentinelHolder(holder)) {
+                // Published / NPC-persist: no player token to restat, and the
+                // publish ability is rebuilt from the snapshot on its own path.
+                // ApplyBoxAbilities' trailing SyncNpcAbilities converges those.
             } else {
                 RebuildBoxAbility(holder);
                 const int idx = FindBox(holder);
