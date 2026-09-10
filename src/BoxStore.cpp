@@ -220,14 +220,6 @@ namespace CostumeFW
         std::string g_persistPreset;
         std::string g_persistPresetName;
 
-        // A preset value read from settings written before v1.6.2.1 is a display
-        // name, not a file. Everything CEF writes ends in .json, so the suffix
-        // tells the two apart without a folder scan.
-        bool LooksLikePresetFile(const std::string& a_value)
-        {
-            return a_value.ends_with(".json");
-        }
-
         int FindBox(const std::string& a_token)
         {
             for (std::size_t i = 0; i < g_boxes.size(); ++i) {
@@ -1524,11 +1516,13 @@ namespace CostumeFW
             b.presetName = jb.value("presetName", std::string{});
             // Pre-1.6.2.1: "preset" carried the display NAME. Park it as the name
             // and leave the file empty - Preset::MigrateAssignments() resolves it.
-            if (!b.preset.empty() && !LooksLikePresetFile(b.preset)) {
+            // New rows always write presetName, including unresolved/manual rows.
+            // Names can end in .json; valid files can use uppercase .JSON.
+            if (!jb.contains("presetName")) {
                 b.presetName = b.preset;
                 b.preset.clear();
             } else if (b.presetName.empty()) {
-                b.presetName = b.preset;  // file-only row: show something
+                b.presetName = b.preset;  // empty display name: show something
             }
             b.uiVisible = jb.value("uiVisible", true);
             b.wear = jb.value("wear", false);
@@ -1556,7 +1550,7 @@ namespace CostumeFW
         }
         g_persistPreset = persist.value("preset", std::string{});
         g_persistPresetName = persist.value("presetName", std::string{});
-        if (!g_persistPreset.empty() && !LooksLikePresetFile(g_persistPreset)) {
+        if (!persist.contains("presetName")) {
             g_persistPresetName = g_persistPreset;
             g_persistPreset.clear();
         } else if (g_persistPresetName.empty()) {
@@ -5164,10 +5158,10 @@ namespace CostumeFW
             }
             const auto it = a_nameToFile.find(name);
             if (it == a_nameToFile.end()) {
-                // The preset file is gone. Keep the name so the UI still says
-                // which preset the box came from; it is simply no longer part of
-                // the exclusivity pool - the same as before this migration.
-                SKSE::log::warn("preset: '{}' assigned but no CEFP file carries that name", name);
+                // Missing or ambiguous name: preserve the contents and display
+                // name, but do not claim a file in the exclusivity pool.
+                SKSE::log::warn("preset: '{}' assignment unresolved (missing or ambiguous file); "
+                                "current contents retained", name);
                 return;
             }
             file = it->second;

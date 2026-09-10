@@ -48,7 +48,7 @@ namespace CostumeFW::Preset
     // Resolve preset assignments that settings written before v1.6.2.1 stored as
     // a display NAME into the preset FILE that now identifies them (BoxStore
     // hands out the pending names; the folder scan lives here). Call once after
-    // the settings load. A name no CEFP file carries is left alone.
+    // the settings load. Missing or ambiguous names stay unresolved; contents stay.
     void MigrateAssignments();
 
     // Split contents into resolvable vs missing (FormID/plugin not loaded) so an

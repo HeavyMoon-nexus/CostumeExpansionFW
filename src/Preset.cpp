@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string_view>
+#include <unordered_set>
 
 namespace CostumeFW::Preset
 {
@@ -157,17 +158,23 @@ namespace CostumeFW::Preset
             return;
         }
         // One folder scan covers every pending name. A name shared by two files is
-        // ambiguous by construction - the assignment predates the file being the
-        // identity, so there is nothing left to tell them apart. Take the first
-        // in List()'s order (name, then folder order) and say so.
+        // ambiguous: keep its current contents/name and leave the file unresolved
+        // until the user selects it. Guessing would mark a different revision as
+        // selected without applying its contents, blocking that revision's picker.
         std::unordered_map<std::string, std::string> nameToFile;
+        std::unordered_set<std::string> ambiguous;
         for (const auto& p : List()) {
+            if (ambiguous.contains(p.name)) {
+                continue;
+            }
             const auto [it, inserted] = nameToFile.emplace(p.name, p.file);
             if (!inserted) {
                 SKSE::log::warn(
-                    "preset: '{}' is the display name of both {} and {} - a pre-1.6.2.1 "
-                    "assignment to it resolves to {}",
-                    p.name, it->second, p.file, it->second);
+                    "preset: '{}' is the display name of both {} and {} - legacy "
+                    "assignment left unresolved; select the intended preset",
+                    p.name, it->second, p.file);
+                ambiguous.insert(p.name);
+                nameToFile.erase(it);
             }
         }
         ResolvePresetFiles(nameToFile);
