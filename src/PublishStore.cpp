@@ -460,6 +460,16 @@ namespace CostumeFW
         return out;
     }
 
+    void MarkPublishAbilityStale(int a_pubSlot)
+    {
+        const auto it = g_pubEnchantSpells.find(a_pubSlot);
+        if (it == g_pubEnchantSpells.end()) {
+            return;  // not built yet; EnsurePubAbility will build it fresh
+        }
+        DropPubAbility(a_pubSlot, it->second);
+        it->second.dirty = true;
+    }
+
     int PublishedSlotHolding(const std::string& a_content)
     {
         for (const auto& snap : g_published) {

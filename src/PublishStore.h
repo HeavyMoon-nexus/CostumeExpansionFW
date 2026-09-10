@@ -99,6 +99,16 @@ namespace CostumeFW
     int PublishedSlotHolding(const std::string& a_content);
     int NpcPersistSlotHolding(const std::string& a_content);
 
+    // Mark a published slot's synthesized stat ability stale, taking it off its
+    // wearers first (its effect list may not be rewritten while it is applied).
+    // The next ApplyBoxAbilities refills it from the CURRENT item-data toggles.
+    //
+    // Publish freezes a costume's APPEARANCE, but its stat passthrough is read
+    // live on every rebuild - so an enchant/weight/armor toggle has to reach the
+    // ability, and nothing marked it dirty outside unpublish and the settings
+    // load (review follow-up 2026-09-10).
+    void MarkPublishAbilityStale(int a_pubSlot);
+
     void EmitPublishJson(nlohmann::json& a_doc);
     void ParsePublishJson(const nlohmann::json& a_doc);
     void SaveGlobalSettings();

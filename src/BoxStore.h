@@ -605,6 +605,13 @@ namespace CostumeFW
     // "npr:N") - i.e. a holder that must not be fed to FindBox / ResolveArmo.
     bool IsSentinelHolder(const std::string& a_holder);
 
+    // The publish slot a "publish:N" holder names, or -1 for any other holder.
+    // Publish FREEZES a costume's appearance (RegisterSnapshot renders from the
+    // snapshot's own ContentSettings, and unpublish restores them), so the
+    // appearance setters refuse a published content and say why instead of
+    // accepting an edit that would do nothing and then be overwritten.
+    int PublishSlotOfHolder(const std::string& a_holder);
+
     // X-DIAG: the carrier NIF the holding box's token currently points at
     // (meshes-relative, as carriers.json wrote it), or "" when the content is
     // unheld or lives in the persist head-carrier class (which is a HDPT pool,

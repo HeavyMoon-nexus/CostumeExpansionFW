@@ -2318,6 +2318,30 @@ namespace CostumeFW
         return it == g_hideRules.end() ? std::vector<int>{} : it->second;
     }
 
+    namespace
+    {
+        // Shared refusal for the five APPEARANCE settings when a published
+        // costume owns the content. Publish froze them: RegisterSnapshot renders
+        // from the snapshot's own ContentSettings, and unpublish restores those
+        // over anything set meanwhile - so accepting the edit would leave the UI
+        // claiming a setting that does nothing and then silently reverts.
+        // Item-data (stat) toggles are NOT gated here: publish reads those live
+        // on every ability rebuild, so they are meant to apply while published.
+        bool RefusedAsPublished(const char* a_what, const std::string& a_id,
+            const std::string& a_holder)
+        {
+            const int slot = PublishSlotOfHolder(a_holder);
+            if (slot < 0) {
+                return false;
+            }
+            SKSE::log::warn(
+                "{}: '{}' belongs to published costume #{} - its look is frozen at publish "
+                "time; unpublish it first to change this",
+                a_what, a_id, slot + 1);
+            return true;
+        }
+    }
+
     bool SetHideSlots(const std::string& a_id, const std::vector<int>& a_slots)
     {
         StoreLock lk;
@@ -2337,8 +2361,12 @@ namespace CostumeFW
         if (clean.empty()) {
             g_hideRules.erase(id);  // empty list = clear the rule
         } else {
-            if (ContentHolder(id).empty()) {  // ROOT E [1476]: no orphan side-map entries
+            const std::string holder = ContentHolder(id);
+            if (holder.empty()) {  // ROOT E [1476]: no orphan side-map entries
                 SKSE::log::warn("hide: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            if (RefusedAsPublished("hide", id, holder)) {
                 return false;
             }
             g_hideRules[id] = std::move(clean);
@@ -2363,8 +2391,12 @@ namespace CostumeFW
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
         if (a_mode == 1 || a_mode == 2) {
-            if (ContentHolder(id).empty()) {  // ROOT E [1476]: no orphan side-map entries
+            const std::string holder = ContentHolder(id);
+            if (holder.empty()) {  // ROOT E [1476]: no orphan side-map entries
                 SKSE::log::warn("gender: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            if (RefusedAsPublished("gender", id, holder)) {
                 return false;
             }
             g_genderModes[id] = a_mode;
@@ -2393,8 +2425,12 @@ namespace CostumeFW
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
         if (a_on) {
-            if (ContentHolder(id).empty()) {  // ROOT E [1498]: no orphan bodyMorph entries
+            const std::string holder = ContentHolder(id);
+            if (holder.empty()) {  // ROOT E [1498]: no orphan bodyMorph entries
                 SKSE::log::warn("morph: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            if (RefusedAsPublished("morph", id, holder)) {
                 return false;
             }
             g_bodyMorphOn.insert(id);
@@ -2420,8 +2456,12 @@ namespace CostumeFW
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
         if (a_on) {
-            if (ContentHolder(id).empty()) {  // ROOT E: no orphan entries
+            const std::string holder = ContentHolder(id);
+            if (holder.empty()) {  // ROOT E: no orphan entries
                 SKSE::log::warn("realbody: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            if (RefusedAsPublished("realbody", id, holder)) {
                 return false;
             }
             g_showRealBody.insert(id);
@@ -2456,8 +2496,12 @@ namespace CostumeFW
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
         if (a_on) {
-            if (ContentHolder(id).empty()) {  // ROOT E: no orphan hide-shape entries
+            const std::string holder = ContentHolder(id);
+            if (holder.empty()) {  // ROOT E: no orphan hide-shape entries
                 SKSE::log::warn("hideshape: '{}' is held by no box/persist - ignoring", id);
+                return false;
+            }
+            if (RefusedAsPublished("hideshape", id, holder)) {
                 return false;
             }
             auto& names = g_hideShapes[id];
@@ -4852,6 +4896,15 @@ namespace CostumeFW
                a_holder.starts_with("npr:");
     }
 
+    int PublishSlotOfHolder(const std::string& a_holder)
+    {
+        constexpr std::string_view kPrefix{ "publish:" };
+        if (!a_holder.starts_with(kPrefix)) {
+            return -1;
+        }
+        return std::atoi(a_holder.c_str() + kPrefix.size());
+    }
+
     std::string ContentHolder(const std::string& a_content)
     {
         StoreLock lk;
@@ -5117,10 +5170,16 @@ namespace CostumeFW
             }
             if (holder == "persist") {
                 RebuildPersistAbility();
+            } else if (const int pubSlot = PublishSlotOfHolder(holder); pubSlot >= 0) {
+                // A published costume's stat passthrough is read LIVE on every
+                // ability rebuild (FillContentEnchantSpell consults the toggles),
+                // but nothing marked that ability stale outside unpublish and the
+                // settings load - so the toggle did not take until a reload.
+                // ApplyBoxAbilities below re-grants it through SyncNpcAbilities.
+                MarkPublishAbilityStale(pubSlot);
             } else if (IsSentinelHolder(holder)) {
-                // Published / NPC-persist: no player token to restat, and the
-                // publish ability is rebuilt from the snapshot on its own path.
-                // ApplyBoxAbilities' trailing SyncNpcAbilities converges those.
+                // NPC persist: no player token to restat, and its contents carry
+                // no synthesized stat ability of their own.
             } else {
                 RebuildBoxAbility(holder);
                 const int idx = FindBox(holder);

@@ -312,14 +312,18 @@ namespace CostumeFW
                 return;
             }
             SKSE::GetTaskInterface()->AddTask([id, on] {
-                SetBodyMorphOn(id, on);
+                // Report the refusal (a published costume's look is frozen, an
+                // unheld id has nowhere to store the setting) - re-injecting and
+                // printing success either way said the opposite of the truth.
+                if (!SetBodyMorphOn(id, on)) {
+                    ConsolePrint("[CEF] body morph: refused (see log) - published "
+                                 "costumes are frozen; unpublish first");
+                    return;
+                }
                 HideInjectedNodes(id);  // drop the node so Reconcile re-injects with the new decision
                 Reconcile();
-                if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    ConsolePrint((std::string("[CEF] body morph ") + (on ? "ON" : "off") +
-                              " for " + id + " (re-injected)")
-                                 .c_str());
-                }
+                ConsolePrint(std::string("[CEF] body morph ") + (on ? "ON" : "off") +
+                             " for " + id + " (re-injected)");
             });
         } else if (sub == "shapes") {
             // List a content's skinned shapes (name + dismember biped slot) so the
@@ -370,14 +374,15 @@ namespace CostumeFW
             }
             SKSE::GetTaskInterface()->AddTask([id, shape] {
                 const bool now = !IsHideShape(id, shape);
-                SetHideShape(id, shape, now);
+                if (!SetHideShape(id, shape, now)) {
+                    ConsolePrint("[CEF] hideshape: refused (see log) - published "
+                                 "costumes are frozen; unpublish first");
+                    return;
+                }
                 HideInjectedNodes(id);  // drop the node so Reconcile re-injects with the new decision
                 Reconcile();
-                if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    ConsolePrint((std::string("[CEF] hideshape ") + (now ? "ON" : "off") + " '" +
-                              shape + "' for " + id + " (re-injected)")
-                                 .c_str());
-                }
+                ConsolePrint(std::string("[CEF] hideshape ") + (now ? "ON" : "off") + " '" +
+                             shape + "' for " + id + " (re-injected)");
             });
         } else if (sub == "headdiag") {
             // FSMP approach-C passive PoC: enumerate FSMP-renamed physics bones on
