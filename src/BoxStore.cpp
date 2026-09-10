@@ -551,6 +551,7 @@ namespace CostumeFW
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
+        void RestoreTokenDefaultName(const std::string& a_token);      // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
         void ReapplyStatsForContent(const std::string& a_id);          // fwd (defined below)
         void RecordCustody(const std::string& a_id, const char* a_event);  // fwd (below)
@@ -3653,6 +3654,7 @@ namespace CostumeFW
                 token->weight = 0.0f;
             }
             ClearTokenKeywords(a_token, token);  // strip our passthrough keywords
+            RestoreTokenDefaultName(a_token);    // F10: put it back in TokenPool
         }
 
         // Bring a holder's ability up to date with its contents: create the form
@@ -5029,6 +5031,20 @@ namespace CostumeFW
         // Stamp the box label onto the token's inventory name (same volatile
         // form-edit lifetime as armorRating/keyword passthrough: re-applied on
         // every settings load). Empty label falls back to the ESP default.
+        // The ESP name each token had before a label was ever stamped over it,
+        // by FormID. Process-lifetime, exactly like the fullName edit it undoes.
+        //
+        // TokenPool identifies a free box by that ESP name ("Costume Box ..."),
+        // so renaming a box and then freeing it used to drop the token out of
+        // the pool until the next game start - the rename feature ate boxes
+        // (review 2026-09-09 F10). The name test cannot simply go: every CEF
+        // plugin passes IsTokenPluginFile, so dropping it would sweep in
+        // CostumeFW_NPC.esp's publish tokens and NPC-persist carriers. And a
+        // stable id is not available either - SSE keeps no EditorID on ARMO at
+        // runtime. So restore the invariant the pool already relies on: a token
+        // that is not in a box carries its ESP name.
+        std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;
+
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box)
         {
             auto* token = ResolveArmo(a_box.token);
@@ -5036,8 +5052,32 @@ namespace CostumeFW
                 return;
             }
             if (!a_box.label.empty()) {
+                // Remember the pre-stamp name once, before it is overwritten.
+                // Every defined box passes here on each settings load, so a token
+                // that can ever be freed has been recorded by then.
+                if (const auto formId = token->GetFormID()) {
+                    const char* current = token->GetFullName();
+                    g_tokenDefaultNames.try_emplace(formId, current ? current : "");
+                }
                 token->fullName = a_box.label.c_str();
             }
+        }
+
+        // Undo the label stamp: put the ESP name back so TokenPool sees the token
+        // again. No-op for a token that was never renamed.
+        void RestoreTokenDefaultName(const std::string& a_token)
+        {
+            auto* token = ResolveArmo(a_token);
+            if (!token) {
+                return;
+            }
+            const auto it = g_tokenDefaultNames.find(token->GetFormID());
+            if (it == g_tokenDefaultNames.end() || it->second.empty()) {
+                return;
+            }
+            const std::string original = it->second;  // outlive the erase
+            g_tokenDefaultNames.erase(it);
+            token->fullName = original.c_str();
         }
 
         // Re-flow a changed item-data toggle through the existing contents-change
