@@ -411,7 +411,13 @@ namespace CostumeFW
     // if it holds one (keeps instance data), else - only if a_fabricate - a fresh
     // base copy (the accepted cross-save duplication, CEF_STATE_SCOPE.md §4).
     // Returns true if a copy reached the player. Main thread (touches inventory).
-    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate);
+    // a_wasRecreated (optional) reports HOW the request was met: false = the
+    // captured original came back with its tempering and enchantment, true = the
+    // store did not have it and a plain copy was minted instead. Only the
+    // single-item user paths tell the player about it; the bulk return loops
+    // (uninstall, catalog removal) would turn that into a wall of pop-ups.
+    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate,
+        bool* a_wasRecreated = nullptr);
 
     // --- SMF-era custody (P2): the native layer OWNS the hidden store ---------
     // The store FormID is co-save persisted ('STOR'), so an SMF-only session can
@@ -538,6 +544,44 @@ namespace CostumeFW
     // the history existed. Returns how many rows were added; never overwrites a
     // real event. Post-load main thread, with the NPC/publish state restored.
     int BackfillCustodyRows();
+
+    // --- store manifest: what THIS save's store held when it was written -------
+    //
+    // Box definitions are global and the store is per-save, so "held by a box but
+    // not in the store" is the normal state on a second character - it is not
+    // evidence of anything. The only way to tell a real loss from that is to know
+    // what THIS save's store held last time, which is why the list rides the
+    // co-save next to the store id rather than the settings json.
+    //
+    // What it catches: Skyrim strips items from a missing plugin out of every
+    // container, storage included. Disable a costume's plugin for one session,
+    // save, and the captured original is gone for good - with its tempering and
+    // player enchantment - while the box definition survives in the json and the
+    // costume still displays. Nothing pointed at that.
+
+    // Every content id the store holds right now, for the co-save. CEF's own
+    // tokens are skipped (they legitimately live there). Ids from the restored
+    // manifest whose plugin is NOT loaded right now are carried forward, so a
+    // session played with the mod disabled does not quietly erase the record of
+    // what the store used to hold (same reasoning as the ROOT H unresolved
+    // persist actives).
+    std::vector<std::string> StoreContentIdsForSave();
+
+    // The manifest this save carried. Restored from the co-save at load, before
+    // any store pass runs; cleared on revert so one save can never inherit
+    // another's (the store id follows the same rule).
+    void RestoreStoreManifest(std::vector<std::string> a_ids);
+
+    // Compare the manifest against what the store holds NOW and report what is
+    // missing. An id whose plugin is not loaded is NOT reported - it is simply
+    // unreadable this session, and the entry is carried forward instead. An id
+    // whose form resolves but is no longer in the store is a real loss: it gets a
+    // "lost" custody row so the Recovery page can show it, and a log line.
+    // Returns how many were lost.
+    //
+    // MUST run before SweepOrphanedStoredItems, which takes items OUT of the
+    // store - anything it handed back would otherwise look lost.
+    int ReportLostStoreItems();
 
     // What is actually inside the hidden store right now: one line per stack, with
     // who holds it (box / persist / published / NPC persist) or ORPHAN, plus the

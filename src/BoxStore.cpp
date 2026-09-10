@@ -177,6 +177,12 @@ namespace CostumeFW
         };
         std::unordered_map<std::string, std::vector<EnchEffect>> g_contentEnchants;
 
+        // What THIS save's hidden store held when the save was written, from the
+        // co-save. Per-save, exactly like g_storeFormId: box definitions are
+        // global, so only this list can tell a real loss from the normal
+        // "another character never captured it here".
+        std::vector<std::string> g_storeManifest;
+
         // Captured tempering multiplier per content (absent = untempered). The
         // base ARMO's armorRating misses the smithing improvement exactly like it
         // misses the player enchantment (2game.info 2026-08-18), so it snapshots
@@ -4408,7 +4414,7 @@ namespace CostumeFW
         }
     }
 
-    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate)
+    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate, bool* a_wasRecreated)
     {
         StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -4430,6 +4436,9 @@ namespace CostumeFW
                     store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
                     SKSE::log::info("custody: returned stored '{}' to player", a_id);
                     RecordCustody(a_id, "returned");
+                    if (a_wasRecreated) {
+                        *a_wasRecreated = false;
+                    }
                     return true;
                 }
             }
@@ -4438,6 +4447,9 @@ namespace CostumeFW
             player->AddObjectToContainer(obj, nullptr, 1, nullptr);
             SKSE::log::info("custody: fabricated 1x '{}' (none stored on this save)", a_id);
             RecordCustody(a_id, "recreated");
+            if (a_wasRecreated) {
+                *a_wasRecreated = true;
+            }
             return true;
         }
         return false;
@@ -4448,8 +4460,19 @@ namespace CostumeFW
         StoreLock lk;
         // ROOT A ([2279]): drain the store first, fabricate only on a store miss -
         // so recovering a still-stored item no longer mints a second copy.
-        if (ReturnStoredItem(a_id, true)) {
-            SKSE::log::info("recover: granted 1x '{}' ({})", ItemDisplayName(a_id), a_id);
+        bool recreated = false;
+        if (ReturnStoredItem(a_id, true, &recreated)) {
+            SKSE::log::info("recover: granted 1x '{}' ({}, {})", ItemDisplayName(a_id), a_id,
+                recreated ? "plain copy - the original was not in storage" : "the captured original");
+            // Say WHICH it was. A recreated copy has no tempering and no player
+            // enchantment, and the difference is invisible in the inventory - the
+            // user has to be told at the moment they ask for it, not left to find
+            // out when the numbers are wrong.
+            RE::DebugNotification(
+                (recreated
+                        ? "CostumeFW: the original was not in storage - you got a plain copy"
+                        : "CostumeFW: returned your captured original")
+            );
             WriteJson(false);  // console / Recovery UI callers do not persist otherwise
             return true;
         }
@@ -4715,6 +4738,117 @@ namespace CostumeFW
         return out;
     }
 
+    std::vector<std::string> StoreContentIdsForSave()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        std::unordered_set<std::string> seen;
+        auto* form = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+        auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
+        if (store) {
+            // Counts, not GetInventory: this only needs to know WHICH objects are
+            // in there, and GetInventory copies each stack's InventoryEntryData -
+            // the broad-filter copy that is the MARA CTD's shape (see the
+            // target-only filter note in CaptureEnchant).
+            for (const auto& [obj, count] : store->GetInventoryCounts()) {
+                if (!obj || count <= 0 || IsCefToken(obj->GetFormID())) {
+                    continue;  // CEF's own tokens legitimately live here
+                }
+                std::string id = MakeColonId(obj);
+                if (!id.empty() && seen.insert(id).second) {
+                    out.push_back(std::move(id));
+                }
+            }
+        }
+        // Carry forward what we cannot SEE this session. With the content's
+        // plugin disabled the item is not in the container to be listed, so
+        // writing only what we found would erase the very record that lets the
+        // next load tell "gone" from "never here" (ROOT H does the same for
+        // unresolved persist actives).
+        int carried = 0;
+        for (const auto& id : g_storeManifest) {
+            if (ResolveFormId(id) == 0 && seen.insert(id).second) {
+                out.push_back(id);
+                ++carried;
+            }
+        }
+        if (carried > 0) {
+            SKSE::log::info(
+                "store manifest: carrying {} entry(ies) whose plugin is not loaded", carried);
+        }
+        return out;
+    }
+
+    void RestoreStoreManifest(std::vector<std::string> a_ids)
+    {
+        StoreLock lk;
+        for (auto& id : a_ids) {
+            CanonicalizeColonId(id);  // ROOT D
+        }
+        g_storeManifest = std::move(a_ids);
+    }
+
+    int ReportLostStoreItems()
+    {
+        StoreLock lk;
+        if (g_storeManifest.empty()) {
+            return 0;  // no manifest yet (pre-1.6.2.2 save, or a new game)
+        }
+        auto* form = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+        auto* store = form ? form->As<RE::TESObjectREFR>() : nullptr;
+        if (!store) {
+            // Without the store there is nothing to compare against, and every
+            // entry would look lost. Say nothing rather than cry wolf.
+            SKSE::log::info("store manifest: no store on this save - comparison skipped");
+            return 0;
+        }
+        std::unordered_set<std::uint32_t> present;
+        for (const auto& [obj, count] : store->GetInventoryCounts()) {
+            if (obj && count > 0) {
+                present.insert(obj->GetFormID());
+            }
+        }
+        int lost = 0;
+        int unreadable = 0;
+        for (const auto& id : g_storeManifest) {
+            const std::uint32_t formId = ResolveFormId(id);
+            if (formId == 0) {
+                // The plugin is not loaded THIS session. The item is unreadable,
+                // not proven gone - the save may still hold it. Carried forward
+                // by StoreContentIdsForSave; nothing is reported.
+                ++unreadable;
+                continue;
+            }
+            if (present.contains(formId)) {
+                continue;
+            }
+            // The form resolves and the store does not have it: the engine took
+            // it out. Its tempering and player enchantment went with it; a
+            // recovery from here can only mint a plain copy.
+            SKSE::log::warn(
+                "store manifest: '{}' ({}) was in this save's storage and is gone - "
+                "recovering it now can only make a plain copy",
+                ItemDisplayName(id), id);
+            RecordCustody(id, "lost");
+            ++lost;
+        }
+        if (unreadable > 0) {
+            SKSE::log::info(
+                "store manifest: {} entry(ies) unreadable this session (plugin not loaded)",
+                unreadable);
+        }
+        if (lost > 0) {
+            WriteJson(false);
+            SKSE::log::warn("store manifest: {} captured item(s) no longer in storage", lost);
+            RE::DebugNotification(std::format(
+                "CostumeFW: {} captured item(s) are no longer in storage - see Recovery",
+                lost).c_str());
+        } else {
+            SKSE::log::info("store manifest: {} entry(ies) checked, none missing",
+                g_storeManifest.size());
+        }
+        return lost;
+    }
     int BackfillCustodyRows()
     {
         StoreLock lk;

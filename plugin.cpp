@@ -401,6 +401,14 @@ namespace
                 // THIS save's (ROOT A protection preserved). Clearing it here ran
                 // AFTER the restore and wiped it.
                 CostumeFW::InvalidateStatAbilities();
+                // v1.6.2.2: what this save's storage held last time, against what
+                // it holds now. FIRST of the store passes, because the sweep below
+                // takes items OUT of storage - anything it hands back would look
+                // lost. Skyrim strips items from a missing plugin out of every
+                // container, so disabling a costume's plugin for one session
+                // destroys the captured original while the box definition survives
+                // in the global json; nothing pointed at that before.
+                CostumeFW::ReportLostStoreItems();
                 // v1.6.1: recover temper/enchant snapshots missing on older
                 // captures from the stored originals BEFORE stats reapply; a
                 // heal also restamps publish tokens (their armor sums live).

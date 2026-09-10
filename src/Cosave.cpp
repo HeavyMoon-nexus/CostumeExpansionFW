@@ -23,6 +23,8 @@ namespace CostumeFW
         constexpr std::uint32_t kRecordPubState = 'PUBS';
         constexpr std::uint32_t kRecordPubBind = 'PUBB';
         constexpr std::uint32_t kPubVersion = 1;
+        constexpr std::uint32_t kRecordStoreManifest = 'STMF';
+        constexpr std::uint32_t kStoreManifestVersion = 1;
         constexpr std::uint32_t kRecordNprState = 'NPRS';
         constexpr std::uint32_t kNprVersion = 1;
         constexpr std::uint32_t kMaxBindCount = 1024;
@@ -98,6 +100,20 @@ namespace CostumeFW
                 SKSE::log::error("cosave: OpenRecord(STOR) failed");
             }
 
+            // What the store holds, so the NEXT load of this save can tell a real
+            // loss from the normal "a second character never captured it here".
+            // Sits next to the store id because it has the same per-save lifetime.
+            const auto manifest = StoreContentIdsForSave();
+            if (a_intfc->OpenRecord(kRecordStoreManifest, kStoreManifestVersion)) {
+                a_intfc->WriteRecordData(static_cast<std::uint32_t>(manifest.size()));
+                for (const auto& id : manifest) {
+                    WriteString(a_intfc, id);
+                }
+                SKSE::log::info("cosave: saved store manifest ({} entry(ies))", manifest.size());
+            } else {
+                SKSE::log::error("cosave: OpenRecord(STMF) failed");
+            }
+
             const auto states = PubStatesForSave();
             if (a_intfc->OpenRecord(kRecordPubState, kPubVersion)) {
                 a_intfc->WriteRecordData(static_cast<std::uint32_t>(states.size()));
@@ -148,6 +164,26 @@ namespace CostumeFW
                             SKSE::log::warn("cosave: hidden store {:08X} did not resolve", saved);
                         }
                     }
+                    continue;
+                }
+                if (type == kRecordStoreManifest) {
+                    std::uint32_t count = 0;
+                    if (a_intfc->ReadRecordData(count) != sizeof(count) || count > kMaxItemCount) {
+                        continue;
+                    }
+                    std::vector<std::string> ids;
+                    ids.reserve(count);
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        std::string id;
+                        if (!ReadStringChecked(a_intfc, id)) {
+                            break;  // damaged record: keep what parsed, stop here
+                        }
+                        if (!id.empty()) {
+                            ids.push_back(std::move(id));
+                        }
+                    }
+                    SKSE::log::info("cosave: store manifest restored ({} entry(ies))", ids.size());
+                    RestoreStoreManifest(std::move(ids));
                     continue;
                 }
                 if (type == kRecordPubState) {
@@ -269,6 +305,7 @@ namespace CostumeFW
             // (ROOT A cross-save protection, moved here from the kPostLoadGame
             // task - which ran AFTER LoadCallback and wiped the restored id).
             RestoreStoreFormId(0);
+            RestoreStoreManifest({});  // same per-save rule as the store id above
             SKSE::log::info("cosave: reverted (registry cleared)");
         }
     }
