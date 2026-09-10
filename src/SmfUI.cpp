@@ -1491,6 +1491,23 @@ namespace CostumeFW::SmfUI
                 "still in storage you get the original back with its tempering and "
                 "enchantment, and if it is not, CEF recreates a plain copy - so recovering "
                 "something you already have gives you two.");
+            // The load-time notice for this is gone in seconds, and unlike the
+            // orphan sweep - which reports something it already put right - this
+            // reports an original that is not coming back. Keep it on screen for
+            // the session. Session-scoped, not a count of "lost" rows: the custody
+            // log is global, so those rows include other characters' losses.
+            if (const int lost = LastStoreLossCount(); lost > 0) {
+                ImGui::SeparatorText("Items lost from this save");
+                ImGui::TextWrapped(
+                    "%d captured item(s) were in this save's storage last time and are gone "
+                    "now. The usual cause is a costume's plugin being disabled for a session: "
+                    "Skyrim strips items from a missing plugin out of every container. The "
+                    "originals took their tempering and player enchantment with them, so "
+                    "recovering one below can only give you a plain copy. The rows are marked "
+                    "\"lost\".",
+                    lost);
+                ImGui::Spacing();
+            }
             if (!valid) {
                 ImGui::TextDisabled("(loading...)");
                 return;
@@ -1542,6 +1559,12 @@ namespace CostumeFW::SmfUI
                 if (ImGui::Button("Recover")) {
                     ImGui::OpenPopup("Recover this item?###cfwrec");
                 }
+                // What last happened to it. "lost" is the one that changes what
+                // Recover can do - the original is gone, so it can only mint a
+                // plain copy - and it has to stay visible after the session that
+                // detected it ends, which the banner above does not.
+                ImGui::SameLine();
+                ImGui::TextDisabled("[%s]", e.event.c_str());
                 ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal("Recover this item?###cfwrec")) {
                     ImGui::TextWrapped("%s", e.name.c_str());

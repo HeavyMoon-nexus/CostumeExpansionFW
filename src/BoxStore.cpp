@@ -183,6 +183,12 @@ namespace CostumeFW
         // "another character never captured it here".
         std::vector<std::string> g_storeManifest;
 
+        // How many the last comparison found missing. The on-screen notice at
+        // load scrolls away in seconds, and this one reports something that
+        // cannot be undone - so the Recovery page carries it for the session too.
+        // Atomic: the render thread reads it every frame it draws that page.
+        std::atomic<int> g_lastStoreLoss{ 0 };
+
         // Captured tempering multiplier per content (absent = untempered). The
         // base ARMO's armorRating misses the smithing improvement exactly like it
         // misses the player enchantment (2game.info 2026-08-18), so it snapshots
@@ -4788,9 +4794,14 @@ namespace CostumeFW
         g_storeManifest = std::move(a_ids);
     }
 
+    int LastStoreLossCount()
+    {
+        return g_lastStoreLoss.load(std::memory_order_relaxed);
+    }
     int ReportLostStoreItems()
     {
         StoreLock lk;
+        g_lastStoreLoss.store(0, std::memory_order_relaxed);
         if (g_storeManifest.empty()) {
             return 0;  // no manifest yet (pre-1.6.2.2 save, or a new game)
         }
@@ -4837,6 +4848,7 @@ namespace CostumeFW
                 "store manifest: {} entry(ies) unreadable this session (plugin not loaded)",
                 unreadable);
         }
+        g_lastStoreLoss.store(lost, std::memory_order_relaxed);
         if (lost > 0) {
             WriteJson(false);
             SKSE::log::warn("store manifest: {} captured item(s) no longer in storage", lost);

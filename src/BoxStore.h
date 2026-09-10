@@ -583,6 +583,14 @@ namespace CostumeFW
     // store - anything it handed back would otherwise look lost.
     int ReportLostStoreItems();
 
+    // How many the last comparison found missing, for the Recovery page. The
+    // load-time notice scrolls away in seconds and this one reports something
+    // that cannot be undone, so the page carries it for the rest of the session.
+    // Session-scoped on purpose: the custody log is global, so counting "lost"
+    // rows there would report another character's loss on this one.
+    // Lock-free - the render thread reads it.
+    int LastStoreLossCount();
+
     // What is actually inside the hidden store right now: one line per stack, with
     // who holds it (box / persist / published / NPC persist) or ORPHAN, plus the
     // tempering and enchantment a returned original carries and a recreated copy
