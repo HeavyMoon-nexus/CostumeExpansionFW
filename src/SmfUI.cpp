@@ -1553,6 +1553,13 @@ namespace CostumeFW::SmfUI
                     ImGui::TextDisabled("in %s", held.c_str());
                     ImGui::SameLine();
                     ImGui::Text("%s", e.name.c_str());
+                    // Held rows carry the event too. "lost" on one of these is the
+                    // case that has no button and still needs saying: a box goes on
+                    // claiming the item while its original is gone from storage, so
+                    // taking it out of the box hands over a plain copy. Without
+                    // this the page shows nothing but "in box X" and looks fine.
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("[%s]", e.event.c_str());
                     ImGui::PopID();
                     continue;
                 }
