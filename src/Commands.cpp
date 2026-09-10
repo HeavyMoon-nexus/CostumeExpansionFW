@@ -373,7 +373,24 @@ namespace CostumeFW
                 return;
             }
             SKSE::GetTaskInterface()->AddTask([id, shape] {
+                // Typo guard (test run 2026-09-10): a name the content does not
+                // have used to be stored and reported as a success, so a
+                // mistyped shape read as "hidden" while nothing was hidden.
+                // Only check when the shape list resolves - an unresolved
+                // content (plugin disabled) must not lose an existing rule.
+                // Turning a rule OFF is never blocked: it can only clean up.
                 const bool now = !IsHideShape(id, shape);
+                if (now) {
+                    const auto shapes = EnumerateContentShapes(id);
+                    const bool known = std::any_of(shapes.begin(), shapes.end(),
+                        [&shape](const auto& s) { return s.first == shape; });
+                    if (!shapes.empty() && !known) {
+                        SKSE::log::warn("hideshape: '{}' has no shape named '{}'", id, shape);
+                        ConsolePrint("[CEF] hideshape: no shape named '" + shape +
+                                     "' - run 'cef shapes " + id + "' for the list");
+                        return;
+                    }
+                }
                 if (!SetHideShape(id, shape, now)) {
                     ConsolePrint("[CEF] hideshape: refused (see log) - published "
                                  "costumes are frozen; unpublish first");

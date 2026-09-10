@@ -3488,7 +3488,23 @@ namespace CostumeFW
             };
             // r3 (re-review P1-2): single ability choke - box AND persist
             // ability synthesis skip quarantined contents here.
-            for (const auto& c : AdmittedContents(a_contents)) {
+            const auto admitted = AdmittedContents(a_contents);
+            // Name what got dropped. This gate is the one place a content can
+            // stop contributing stats with nothing said anywhere - the reason
+            // "my enchantment stopped applying" had no log line to look at
+            // (test run 2026-09-10). A drop here is normal after a plugin is
+            // disabled or blacklisted; it is the SILENCE that is the problem.
+            if (admitted.size() != a_contents.size()) {
+                for (const auto& c : a_contents) {
+                    if (std::find(admitted.begin(), admitted.end(), c) == admitted.end()) {
+                        SKSE::log::warn(
+                            "boxes: '{}' contributes no stats to '{}' - not admitted right now "
+                            "(unresolved plugin, blacklisted, or no model for this race/sex)",
+                            c, a_name);
+                    }
+                }
+            }
+            for (const auto& c : admitted) {
                 if (g_statEnchantOff.contains(c)) {
                     continue;  // item-data toggle: enchant passthrough OFF
                 }
