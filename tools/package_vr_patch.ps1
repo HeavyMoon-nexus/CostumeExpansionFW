@@ -32,9 +32,25 @@ $dll = Get-Item "$stage\SKSE\Plugins\CostumeExpansionFW.dll"
 Write-Host "DLL: $($dll.LastWriteTime)  $($dll.Length) bytes"
 
 New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
-if (Test-Path $out) { Remove-Item $out -Force }
+# Temp-then-verify-then-replace (review F22) - see package.ps1 for the rationale.
+$tmpOut = "$out.tmp"
+if (Test-Path $tmpOut) { Remove-Item $tmpOut -Force }
 Push-Location $stage
-& $sevenZip a -t7z $out * | Select-Object -Last 3
-Pop-Location
+try {
+    & $sevenZip a -t7z $tmpOut * | Select-Object -Last 3
+    $rc = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($rc -ne 0 -or -not (Test-Path $tmpOut)) {
+    if (Test-Path $tmpOut) { Remove-Item $tmpOut -Force }
+    throw "7z FAILED (exit $rc). $out is untouched and the stage is kept for diagnosis: $stage"
+}
+& $sevenZip t $tmpOut | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item $tmpOut -Force
+    throw "7z wrote an unreadable archive (test exit $LASTEXITCODE). $out is untouched; stage kept: $stage"
+}
+Move-Item -LiteralPath $tmpOut -Destination $out -Force
 Write-Host "packaged: $out"
 Remove-Item $stage -Recurse -Force

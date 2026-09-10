@@ -96,9 +96,28 @@ if ((& $norm "$stage\CostumeFW_KID.ini") -ne (& $norm $kidMirror)) {
 }
 Write-Host "repo mirrors: CostumeFW.esp + CostumeFW_KID.ini OK"
 
-if (Test-Path $out) { Remove-Item $out -Force }
+# Build into a temp name, CHECK the exit code, TEST the archive, and only then
+# replace the last good one (adversarial review 2026-09-09 F22): $ErrorActionPreference
+# does NOT stop on a native non-zero exit, so deleting $out first and trusting 7z
+# published a truncated archive as a release and threw the stage away with it.
+$tmpOut = "$out.tmp"
+if (Test-Path $tmpOut) { Remove-Item $tmpOut -Force }
 Push-Location $stage
-& $sevenZip a -t7z $out * | Select-Object -Last 3
-Pop-Location
+try {
+    & $sevenZip a -t7z $tmpOut * | Select-Object -Last 3
+    $rc = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($rc -ne 0 -or -not (Test-Path $tmpOut)) {
+    if (Test-Path $tmpOut) { Remove-Item $tmpOut -Force }
+    throw "7z FAILED (exit $rc). $out is untouched and the stage is kept for diagnosis: $stage"
+}
+& $sevenZip t $tmpOut | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item $tmpOut -Force
+    throw "7z wrote an unreadable archive (test exit $LASTEXITCODE). $out is untouched; stage kept: $stage"
+}
+Move-Item -LiteralPath $tmpOut -Destination $out -Force
 Write-Host "packaged: $out"
 Remove-Item $stage -Recurse -Force
