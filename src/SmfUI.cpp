@@ -1486,11 +1486,13 @@ namespace CostumeFW::SmfUI
             }
             ImGui::TextWrapped(
                 "Every item CEF has taken into storage, newest first. Use this when a piece "
-                "went missing. An item a box still holds is not missing - take it out of the "
-                "box instead; those rows say where they are. For the rest, if the item is "
-                "still in storage you get the original back with its tempering and "
-                "enchantment, and if it is not, CEF recreates a plain copy - so recovering "
-                "something you already have gives you two.");
+                "went missing. A row a box still holds has no button - take it out of the box "
+                "instead - but read the note after it: \"not in this save's storage\" means the "
+                "box is still listing it while the original is gone, so taking it out can only "
+                "give you a plain copy. For the rest, if the item is still in storage you get "
+                "the original back with its tempering and enchantment, and if it is not, CEF "
+                "recreates a plain copy - so recovering something you already have gives you "
+                "two.");
             // The load-time notice for this is gone in seconds, and unlike the
             // orphan sweep - which reports something it already put right - this
             // reports an original that is not coming back. Keep it on screen for
@@ -1560,6 +1562,19 @@ namespace CostumeFW::SmfUI
                     // this the page shows nothing but "in box X" and looks fine.
                     ImGui::SameLine();
                     ImGui::TextDisabled("[%s]", e.event.c_str());
+                    // The box says it has this; storage says otherwise. Stated as
+                    // the fact it is, not as a loss: box definitions are shared by
+                    // every character and storage is per-save, so this is also the
+                    // normal state for a piece captured on someone else. Either
+                    // way it is what the player needs to know - taking it out of
+                    // the box can only hand over a plain copy.
+                    if (!row->resolves) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("- plugin not loaded");
+                    } else if (!row->inStore) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("- not in this save's storage");
+                    }
                     ImGui::PopID();
                     continue;
                 }

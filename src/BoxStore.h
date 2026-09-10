@@ -530,6 +530,15 @@ namespace CostumeFW
     {
         CustodyLogEntry entry;
         std::string holder;  // "" = nothing holds it, so it is recoverable
+        // Whether the id resolves at all right now (its plugin is loaded), and
+        // whether THIS save's store actually has it. A box can go on listing a
+        // content whose original the engine took out of storage - the definition
+        // is global, the store is per-save - and the row would otherwise read as
+        // a plain "in box X" with nothing wrong. Only meaningful when resolves
+        // is true: with the plugin unloaded the item is not in the container to
+        // be seen, which is not the same as being gone.
+        bool resolves{ false };
+        bool inStore{ false };
     };
     // Every row, newest first, joined against ONE holder scan. The join lives
     // here and not in the caller because that scan walks every box, persist,

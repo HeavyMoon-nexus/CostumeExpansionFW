@@ -4726,12 +4726,28 @@ namespace CostumeFW
         // every box, persist, published and NPC-persist content, each resolved
         // and each label freshly allocated - for every row, every frame.
         const auto holder = BuildHolderLabels();
+        // ONE store read for the whole list, same reasoning as the holder scan.
+        // Counts, not GetInventory: presence is all this needs, and GetInventory
+        // copies every stack's entry data (the MARA CTD's shape).
+        std::unordered_set<std::uint32_t> inStore;
+        {
+            auto* sform = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+            if (auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr) {
+                for (const auto& [obj, count] : store->GetInventoryCounts()) {
+                    if (obj && count > 0) {
+                        inStore.insert(obj->GetFormID());
+                    }
+                }
+            }
+        }
         std::vector<CustodyRow> out;
         out.reserve(g_custody.size());
         for (const auto& [id, e] : g_custody) {
             CustodyRow row;
             row.entry = e;
             if (const std::uint32_t formId = ResolveFormId(id)) {
+                row.resolves = true;
+                row.inStore = inStore.contains(formId);
                 if (const auto it = holder.find(formId); it != holder.end()) {
                     row.holder = it->second;
                 }
