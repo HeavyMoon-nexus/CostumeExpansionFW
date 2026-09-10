@@ -1996,6 +1996,15 @@ namespace CostumeFW
                 ++restored;
             }
         }
+        // ClearRegistry above wiped EVERY actor, not just the player - published
+        // costumes and NPC persist went with it, and nothing put them back
+        // (review 2026-09-09 F09: the only caller of ReapplyNpcBindings was the
+        // co-save load). Reachable without touching the settings file at all:
+        // ReevaluateContentAdmissions runs this whenever a blacklist flag
+        // changes, so an unrelated deny stripped the costume off an NPC standing
+        // in the same cell until they unloaded. It re-registers publish bindings
+        // AND NPC persist wear, and reconciles the actors it touches.
+        ReapplyNpcBindings();
         Reconcile();
         RebuildPersistAbility();
         ApplyBoxAbilities();
