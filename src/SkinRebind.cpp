@@ -2955,6 +2955,22 @@ namespace CostumeFW
         }
         std::string id = a_contentId;
         CanonicalizeColonId(id);
+        // Same hard admission line as RegisterBoxById (review 2026-09-09 F11).
+        // This path was added with NPC support and went straight to model
+        // resolution, so an ARMO the user had blacklisted still rendered on
+        // NPCs - and disagreed with the carrier manifest, which does check.
+        // Quarantine-lite, as on the player path: the assignment is KEPT in
+        // settings/co-save, it is simply never registered, one log line.
+        const auto pol = CapturePolicySnapshot();
+        {
+            std::string why;
+            if (!IsContentAdmissible(id, *pol, &why)) {
+                SKSE::log::warn(
+                    "register: NPC content '{}' not admitted - {} (config kept, not registered)",
+                    id, why);
+                return false;
+            }
+        }
         std::uint32_t local = 0;
         std::string plugin;
         if (!ParseColonId(id, local, plugin)) return false;
@@ -2963,7 +2979,6 @@ namespace CostumeFW
         if (mode == 1) sex = RE::SEXES::kMale;
         if (mode == 2) sex = RE::SEXES::kFemale;
         ModelRef m3p, m1p;
-        const auto pol = CapturePolicySnapshot();
         if (!ResolveArmaModelsFor(local, plugin, sex, a_actor->GetRace(), *pol, m3p, m1p, true)) {
             return false;
         }
