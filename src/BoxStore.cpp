@@ -3385,6 +3385,49 @@ namespace CostumeFW
             a_spell->effects.push_back(eff);
         }
 
+        // True when a flat capture snapshot is just a copy of the base
+        // enchantment - same MGEFs, same magnitudes - rather than a player
+        // enchantment that cannot be re-derived from the form. CaptureEnchant
+        // reads the EFFECTIVE enchantment, so an unenchanted-by-the-player item
+        // snapshots its base; that snapshot then shadows the live form even
+        // though the live form is the same thing WITH its conditions.
+        bool SnapshotMatchesEnchant(const std::vector<EnchEffect>& a_snap,
+            const RE::EnchantmentItem* a_ench)
+        {
+            if (!a_ench) {
+                return false;
+            }
+            std::size_t live = 0;
+            for (const auto* e : a_ench->effects) {
+                if (e && e->baseEffect) {
+                    ++live;
+                }
+            }
+            if (live == 0 || live != a_snap.size()) {
+                return false;
+            }
+            std::vector<bool> used(a_snap.size(), false);
+            for (const auto* e : a_ench->effects) {
+                if (!e || !e->baseEffect) {
+                    continue;
+                }
+                const std::string id = MakeColonId(e->baseEffect);
+                bool found = false;
+                for (std::size_t i = 0; i < a_snap.size(); ++i) {
+                    const float d = a_snap[i].magnitude - e->effectItem.magnitude;
+                    if (!used[i] && a_snap[i].mgef == id && d < 0.01f && d > -0.01f) {
+                        used[i] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // Whether the hidden store still holds a content's captured original,
         // and that original's player/instance enchantment if it carries one.
         // The live form has the full Effect data (conditions, durations) the
@@ -3526,6 +3569,21 @@ namespace CostumeFW
                 }
                 const auto snap = g_contentEnchants.find(c);
                 if (snap != g_contentEnchants.end()) {
+                    // The snapshot is FLAT: it cannot carry the conditions or
+                    // duration that gate an effect. When it is merely a copy of
+                    // the base enchantment, the live form is the SAME effects at
+                    // full fidelity - take that instead, or a conditional
+                    // enchant silently becomes always-on the moment the stored
+                    // original goes missing. Field-reported 2026-09-10:
+                    // disabling a costume's plugin for one session makes the
+                    // engine strip the captured item out of the hidden store,
+                    // which drops this content from source 2 to here, and a
+                    // "while sneaking" bonus started applying while standing.
+                    if (armo && armo->formEnchanting &&
+                        SnapshotMatchesEnchant(snap->second, armo->formEnchanting)) {
+                        pushLive(armo->formEnchanting);
+                        continue;
+                    }
                     for (const auto& e : snap->second) {
                         if (auto* mgef = ResolveMgef(e.mgef)) {
                             effs.push_back({ mgef, e.magnitude, nullptr });
