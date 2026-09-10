@@ -1,8 +1,10 @@
 # Changelog
 
-## v1.6.2.1 (2026-09-09)
+## v1.6.2.1 (2026-09-10)
 
-Two preset fixes and two performance fixes.
+Fixes for 1.6.2. Most of them are in published costumes and NPC distribution,
+which 1.6.0 added and which turned out to be sitting outside a few of the rules
+the rest of CEF follows.
 
 **This is the last release with MCM support.** From 1.6.3 the MCM is removed and
 SKSE Menu Framework becomes the UI. The MCM has been behind for a while: NPC
@@ -14,6 +16,95 @@ you open them from. If you are on VR, SKSE Menu Framework needs
 [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
 
 ### Fixed
+
+- **An enchantment that only applies under a condition could start applying
+  always.** A "while sneaking" bonus would sit on you while standing. CEF reads
+  a captured piece's enchantment from the stored original where it can, because
+  that carries the conditions and the duration; it falls back to a flat snapshot
+  of the effect that carries neither. The fallback was also being used when the
+  original was simply a copy of the item's own enchantment, which the item still
+  has and still carries the conditions for. That only showed once the stored
+  original went missing, and disabling a costume's plugin for a single session
+  is enough for that: Skyrim strips items from a missing plugin out of
+  containers, storage included. Taking the piece out and capturing it again
+  fixed it, which is why this was easy to miss.
+
+- **Publishing a costume dropped its enchantments' conditions and duration.**
+  Same defect, on the publish side: a published costume rebuilt its stats from a
+  frozen list that only held the effect and its magnitude. A conditional
+  enchantment became unconditional the moment the outfit was published. Publish
+  now builds its stats the same way a normal box does.
+
+- **A published costume did not count as owning the items in it.** Publishing
+  removes the box it came from, and CEF then treated those items as belonging to
+  nobody. Three things came out of that. You could capture the same item into a
+  second box, and since only one holder can display an item, taking either one
+  off stopped the other showing. Unpublishing ignored whether the items actually
+  went back into the box and deleted the costume anyway, so a piece that could
+  not be restored took the record of what the costume was with it. And an
+  unpublished box did not display until you loaded a save. All three are fixed,
+  and unpublishing now checks the whole restore before it dissolves the costume.
+
+- **Unpublishing could put a costume back on the head slot without saying so.**
+  There is one box token per equipment slot, so publishing frees the slot the
+  box was on. If another box took that slot meanwhile, the costume has to come
+  back somewhere else, and CEF picked the lowest free slot, which is the head.
+  Equipping it made the head disappear. Automatic picks now avoid head and hair
+  unless nothing else is free, and if a costume comes back on a different slot
+  than it left, CEF says so. You can still choose head or hair yourself in the
+  new-box list.
+
+- **Reloading settings left NPCs stripped of their costumes.** Anything that
+  rebuilds CEF's state from the settings file unregisters every actor first, and
+  only the player was being put back. NPCs kept their tokens and their
+  assignments but showed nothing until they unloaded and came back. This did not
+  need the settings file at all: adding one entry to the blocked list runs the
+  same rebuild, so blocking an unrelated item undressed an NPC standing in front
+  of you.
+
+- **A blocked item still showed on NPCs.** The blocked list is enforced at the
+  point CEF registers an item for display, and the NPC path was going straight
+  to the model instead. The item was also refused for the physics carrier, so
+  what was drawn and what physics was built from disagreed.
+
+- **Renaming a box and then deleting it lost the slot until you restarted.** CEF
+  finds free boxes by their item name, and renaming a box overwrites that name.
+  Freeing the box did not put it back, so the slot dropped out of the list.
+  Publishing a renamed box did the same thing. The name is restored when the box
+  is freed.
+
+- **A box name containing `%` could crash the game.** Console output treated the
+  name as a format string, so `%s` or `%n` in a box label, a shape name or an
+  NPC name made it read arguments that were never there. Listing your boxes was
+  enough to hit it.
+
+- **Published costumes accepted look settings that did nothing.** Hide-when-worn,
+  gender, body morph, show-real-body and hide-shape are frozen when a costume is
+  published, so setting one on a published costume changed nothing and was
+  reverted on unpublish. It is now refused with the reason. The item-data
+  switches (enchantment, weight, armor) are read live and do apply while
+  published, which they previously did not until you reloaded.
+
+- **`cef hideshape` accepted a shape name the item does not have.** A typo was
+  stored and reported as a success, so nothing was hidden and there was nothing
+  to notice it by. The name is checked against the item's own shapes, and CEF
+  points you at `cef shapes` when it misses.
+
+- **The Recovery page cost frames while it was open.** For every row on the
+  list it rebuilt the whole "who holds this" scan - every box, persist entry,
+  published costume and NPC assignment - and it did that again on every single
+  frame. On a setup with dozens of captured items that is thousands of lookups
+  per frame for a page that only changes when you press a button. It now takes
+  one snapshot and refreshes it twice a second, the same way the NPC and
+  Diagnostics pages already did. Building that snapshot also moved onto the
+  main thread, which closes the same read-while-it-is-being-changed hazard
+  those two pages were fixed for earlier.
+
+- **A short-lived OS thread was created for every delayed retry.** CEF
+  schedules one whenever an NPC builds its 3D, so a busy cell was creating and
+  tearing down several threads a second (measured: 544 in three minutes). They
+  used almost no CPU - they only sleep until their turn - but they are now all
+  served by a single timer thread.
 
 - **A preset with a wrong field type could take the game down.** Presets are
   files you install and share, so a hand-edited or third-party `CEFP_*.json`
@@ -31,24 +122,9 @@ you open them from. If you are on VR, SKSE Menu Framework needs
   not be assigned to a second box either. Presets are now identified by their
   file, so two presets sharing a name are two presets. Where the name alone
   would be ambiguous, the list shows the file next to it. Existing assignments
-  are matched to their file on the first load; if that preset file is gone, the
-  box keeps showing the name it had.
-
-- **The Recovery page cost frames while it was open.** For every row on the
-  list it rebuilt the whole "who holds this" scan - every box, persist entry,
-  published costume and NPC assignment - and it did that again on every single
-  frame. On a setup with dozens of captured items that is thousands of lookups
-  per frame for a page that only changes when you press a button. It now takes
-  one snapshot and refreshes it twice a second, the same way the NPC and
-  Diagnostics pages already did. Building that snapshot also moved onto the
-  main thread, which closes the same read-while-it-is-being-changed hazard
-  those two pages were fixed for earlier.
-
-- **A short-lived OS thread was created for every delayed retry.** CEF
-  schedules one whenever an NPC builds its 3D, so a busy cell was creating and
-  tearing down several threads a second (measured: 544 in three minutes). They
-  used almost no CPU - they only sleep until their turn - but they are now all
-  served by a single timer thread.
+  are matched to their file on the first load. If two presets share that name
+  there is nothing left to tell them apart, so the assignment is left unresolved
+  and the box keeps its contents until you pick the one you meant.
 
 If you came here looking for high CPU usage: check your framerate limiter
 first. CEF's per-frame work is a fixed cost *per frame*, so an uncapped
