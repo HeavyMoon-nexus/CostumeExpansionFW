@@ -3,6 +3,7 @@
 #include "BoxStore.h"
 #include "PublishStore.h"
 #include "StoreLock.h"
+#include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "Config.h"  // PersistHeadRebuildEnabled (F2 diagnostic lever)
 #include "Diag.h"    // two-tier logging + thread-contract guard
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
@@ -3219,14 +3220,14 @@ namespace CostumeFW
         for (const auto& state : g_actors) count += state.items.size();
         SKSE::log::info("active: {} item(s), {} actor state(s)", count, g_actors.size());
         if (auto* c = RE::ConsoleLog::GetSingleton()) {
-            c->Print("[CEF] active items:");
+            ConsolePrint("[CEF] active items:");
         }
         for (auto& state : g_actors) {
             auto* actor = ResolveActor(state);
             const char* name = actor ? actor->GetName() : "<unloaded>";
             for (const auto& it : state.items) {
                 SKSE::log::info("  {}: {}", name, it.id);
-                if (auto* c = RE::ConsoleLog::GetSingleton()) c->Print(it.id.c_str());
+                if (auto* c = RE::ConsoleLog::GetSingleton()) ConsolePrint(it.id.c_str());
             }
         }
     }
@@ -4204,7 +4205,7 @@ namespace CostumeFW
             SKSE::log::error("hair PoC: refusing - {:X}:{} is head-part type {} (Hair only)",
                 localID, plugin, static_cast<int>(hdpt->type.get()));
             if (auto* console = RE::ConsoleLog::GetSingleton()) {
-                console->Print("CostumeFW: cef hair refused - not a Hair head part");
+                ConsolePrint("CostumeFW: cef hair refused - not a Hair head part");
             }
             return false;
         }
@@ -4235,7 +4236,7 @@ namespace CostumeFW
         const auto say = [&](const std::string& s) {
             SKSE::log::info("{}", s);
             if (console) {
-                console->Print(s.c_str());
+                ConsolePrint(s.c_str());
             }
         };
 
@@ -4500,7 +4501,7 @@ namespace CostumeFW
         if (line.empty()) {
             SKSE::log::error("test inject: empty Data\\SKSE\\Plugins\\CostumeExpansionFW_test.txt");
             if (auto* console = RE::ConsoleLog::GetSingleton()) {
-                console->Print("CostumeFW: put 'XXXXXX:Plugin.esp' (ARMA/ARMO FormID) in the test txt");
+                ConsolePrint("CostumeFW: put 'XXXXXX:Plugin.esp' (ARMA/ARMO FormID) in the test txt");
             }
             return;
         }
@@ -4521,13 +4522,13 @@ namespace CostumeFW
                     // inside this main-thread task and hard-crashed the game.
                     SKSE::log::error("test inject: bad FormID hex '{}'", left);
                     if (auto* console = RE::ConsoleLog::GetSingleton()) {
-                        console->Print("CostumeFW: bad FormID in test txt");
+                        ConsolePrint("CostumeFW: bad FormID in test txt");
                     }
                     return;
                 }
                 const bool ok = InjectArma(localID, plugin, "test");
                 if (auto* console = RE::ConsoleLog::GetSingleton()) {
-                    console->Print(ok ? "CostumeFW: injected (ARMA)" : "CostumeFW: inject FAILED (see log)");
+                    ConsolePrint(ok ? "CostumeFW: injected (ARMA)" : "CostumeFW: inject FAILED (see log)");
                 }
                 return;
             }
@@ -4535,7 +4536,7 @@ namespace CostumeFW
 
         const bool ok = InjectSkinned(line, "test");  // fallback: raw NIF path
         if (auto* console = RE::ConsoleLog::GetSingleton()) {
-            console->Print(ok ? "CostumeFW: injected (NIF)" : "CostumeFW: inject FAILED (see log)");
+            ConsolePrint(ok ? "CostumeFW: injected (NIF)" : "CostumeFW: inject FAILED (see log)");
         }
     }
 
@@ -4544,7 +4545,7 @@ namespace CostumeFW
         StoreLock lk;
         DetachSkinned("test");
         if (auto* console = RE::ConsoleLog::GetSingleton()) {
-            console->Print("CostumeFW: detached test NIF");
+            ConsolePrint("CostumeFW: detached test NIF");
         }
     }
 }

@@ -2,6 +2,7 @@
 #include "BoxStore.h"
 #include "SkinRebind.h"
 #include "PublishStore.h"
+#include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 
 #include "RE/S/Script.h"
 #include "RE/C/Console.h"
@@ -18,12 +19,11 @@ namespace CostumeFW
 {
     namespace
     {
-        void Print(const char* a_msg)
-        {
-            if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                c->Print(a_msg);
-            }
-        }
+        // Console output for `cef ...`. Forwards to the ONE console chokepoint
+        // (ConsoleOut.h) - never call ConsoleLog::Print directly: it is a varargs
+        // FORMAT call, and a costume label or shape name containing '%' would be
+        // read as the format string (review 2026-09-09 F01).
+        void Print(std::string_view a_msg) { ConsolePrint(a_msg); }
 
         std::string Trim(std::string s)
         {
@@ -183,7 +183,7 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([] {
                 const int n = DetachAllInjected();
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print(("[CEF] nuke removed " + std::to_string(n) + " node(s)").c_str());
+                    ConsolePrint(("[CEF] nuke removed " + std::to_string(n) + " node(s)").c_str());
                 }
             });
         } else if (sub == "repair") {
@@ -195,7 +195,7 @@ namespace CostumeFW
                 const int n = DetachAllInjected();
                 Reconcile();
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print(("[CEF] repair: re-injected (" + std::to_string(n) +
+                    ConsolePrint(("[CEF] repair: re-injected (" + std::to_string(n) +
                               " node(s) detached)").c_str());
                 }
             });
@@ -268,7 +268,7 @@ namespace CostumeFW
                             msg = on ? "[CEF] persist on: failed - not in catalog? (see log)"
                                      : "[CEF] persist off: not active on this save";
                         }
-                        c->Print(msg.c_str());
+                        ConsolePrint(msg.c_str());
                     }
                 });
             } else {
@@ -285,14 +285,14 @@ namespace CostumeFW
                 SKSE::GetTaskInterface()->AddTask([] {
                     auto* c = RE::ConsoleLog::GetSingleton();
                     if (c) {
-                        c->Print("[CEF] body morph (ON = applied; default off):");
+                        ConsolePrint("[CEF] body morph (ON = applied; default off):");
                     }
                     for (const auto& it : ActiveSnapshot()) {
                         const std::string line =
                             std::string("  ") + (BodyMorphOn(it.id) ? "ON  " : "off ") + it.id;
                         SKSE::log::info("{}", line);
                         if (c) {
-                            c->Print(line.c_str());
+                            ConsolePrint(line.c_str());
                         }
                     }
                 });
@@ -316,7 +316,7 @@ namespace CostumeFW
                 HideInjectedNodes(id);  // drop the node so Reconcile re-injects with the new decision
                 Reconcile();
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print((std::string("[CEF] body morph ") + (on ? "ON" : "off") +
+                    ConsolePrint((std::string("[CEF] body morph ") + (on ? "ON" : "off") +
                               " for " + id + " (re-injected)")
                                  .c_str());
                 }
@@ -336,13 +336,13 @@ namespace CostumeFW
                 if (shapes.empty()) {
                     SKSE::log::warn("shapes: '{}' - none (unresolved content or empty NIF)", id);
                     if (c) {
-                        c->Print(("[CEF] shapes '" + id + "': none (unresolved / empty NIF)").c_str());
+                        ConsolePrint(("[CEF] shapes '" + id + "': none (unresolved / empty NIF)").c_str());
                     }
                     return;
                 }
                 SKSE::log::info("shapes for '{}': {} shape(s)", id, shapes.size());
                 if (c) {
-                    c->Print(("[CEF] shapes for " + id + " (ON = hidden):").c_str());
+                    ConsolePrint(("[CEF] shapes for " + id + " (ON = hidden):").c_str());
                 }
                 for (const auto& [name, slot] : shapes) {
                     const std::string line = std::string("  ") +
@@ -350,7 +350,7 @@ namespace CostumeFW
                         " [slot " + std::to_string(slot) + "]";
                     SKSE::log::info("{}", line);
                     if (c) {
-                        c->Print(line.c_str());
+                        ConsolePrint(line.c_str());
                     }
                 }
             });
@@ -374,7 +374,7 @@ namespace CostumeFW
                 HideInjectedNodes(id);  // drop the node so Reconcile re-injects with the new decision
                 Reconcile();
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print((std::string("[CEF] hideshape ") + (now ? "ON" : "off") + " '" +
+                    ConsolePrint((std::string("[CEF] hideshape ") + (now ? "ON" : "off") + " '" +
                               shape + "' for " + id + " (re-injected)")
                                  .c_str());
                 }
@@ -393,7 +393,7 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([rest] {
                 const bool ok = ChangeHeadPartPoC(rest);
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print(ok ? "[CEF] head part changed + reset 3D; run 'cef headdiag'"
+                    ConsolePrint(ok ? "[CEF] head part changed + reset 3D; run 'cef headdiag'"
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
@@ -411,9 +411,9 @@ namespace CostumeFW
                     SKSE::log::info("  {}", l);
                 }
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print(std::format("[CEF] {}:", which).c_str());
+                    ConsolePrint(std::format("[CEF] {}:", which).c_str());
                     for (const auto& l : lines) {
-                        c->Print(("  " + l).c_str());
+                        ConsolePrint(("  " + l).c_str());
                     }
                 }
             });
@@ -427,7 +427,7 @@ namespace CostumeFW
                             item.poolSlot + 1, item.actorFormID, item.contents.size(),
                             item.unresolved ? " (unresolved)" : "",
                             item.restoreSuspended ? " (restore suspended)" : "");
-                        c->Print(line.c_str());
+                        ConsolePrint(line.c_str());
                     }
                 }
                 return;
@@ -491,15 +491,15 @@ namespace CostumeFW
                             "[CEF] pub {} '{}' slot={} contents={} holders={} wearers={} unresolved={}",
                             snap.pubSlot + 1, snap.label, snap.sourceSlot, snap.contents.size(),
                             holders, wearers, unresolved);
-                        c->Print(line.c_str());
+                        ConsolePrint(line.c_str());
                     }
                     const auto cap = std::format("[CEF] injected NPCs: {} / {}",
                         InjectedNpcCount(), MaxNpcInjected());
-                    c->Print(cap.c_str());
+                    ConsolePrint(cap.c_str());
                 }
             } else if (rest == "diag") {
                 if (auto* c = RE::ConsoleLog::GetSingleton())
-                    for (const auto& line : NpcDiagLines()) c->Print(line.c_str());
+                    for (const auto& line : NpcDiagLines()) ConsolePrint(line.c_str());
             } else {
                 const auto split = rest.find(' ');
                 const auto op = Lower(split == std::string::npos ? rest : rest.substr(0, split));
@@ -522,9 +522,9 @@ namespace CostumeFW
                     SKSE::log::info("  {}", l);
                 }
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print("[CEF] invisdiag (also in the log):");
+                    ConsolePrint("[CEF] invisdiag (also in the log):");
                     for (const auto& l : lines) {
-                        c->Print(("  " + l).c_str());
+                        ConsolePrint(("  " + l).c_str());
                     }
                 }
             });
@@ -539,7 +539,7 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([rest] {
                 const bool ok = RecoverContentItem(rest);
                 if (auto* c = RE::ConsoleLog::GetSingleton()) {
-                    c->Print(ok ? "[CEF] recover: granted 1 copy (see log)"
+                    ConsolePrint(ok ? "[CEF] recover: granted 1 copy (see log)"
                                 : "[CEF] recover: id does not resolve to an item");
                 }
             });

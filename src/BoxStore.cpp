@@ -4,6 +4,7 @@
 #include "PublishStore.h"
 #include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
 #include "StoreLock.h"
+#include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "nifcarrier/NifCarrierCore.h"
 
 #include "RE/A/ActorEquipManager.h"
@@ -1805,7 +1806,7 @@ namespace CostumeFW
         const auto say = [&](const std::string& s) {
             SKSE::log::info("{}", s);
             if (console) {
-                console->Print(s.c_str());
+                ConsolePrint(s.c_str());
             }
         };
         const auto pool = PersistPool();
