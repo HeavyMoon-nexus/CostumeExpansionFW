@@ -7,10 +7,12 @@
 #include "RE/E/Effect.h"
 #include "RE/E/EffectSetting.h"
 #include "RE/I/IFormFactory.h"
+#include "RE/M/Misc.h"  // RE::DebugNotification
 #include "RE/S/SpellItem.h"
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <format>
 
 namespace CostumeFW
 {
@@ -889,6 +891,19 @@ namespace CostumeFW
                 break;
             }
         }
+        // The box's ORIGINAL slot may have been handed to another box while this
+        // costume was published (publish frees the source token). There is one
+        // token per biped slot, so the costume then has to come back somewhere
+        // else - and its slot decides what it hides. Say so: silently changing
+        // it read as "unpublish re-stamped my box" (test run 2026-09-10).
+        const int landedSlot = TokenSlot(token);
+        const bool relocated = landedSlot != snap->sourceSlot;
+        if (relocated) {
+            SKSE::log::warn(
+                "unpublish: slot {} is taken by another box - '{}' comes back on slot {} ('{}'). "
+                "Its biped slot decides what it hides, so the outfit may behave differently.",
+                snap->sourceSlot, snap->label, landedSlot, token);
+        }
         // PHASE 1 - validate the WHOLE restore before anything is touched
         // (review 2026-09-09 F03). This used to ignore every AddBox result and
         // then delete the snapshot regardless, so a single refused content left
@@ -999,6 +1014,11 @@ namespace CostumeFW
         SaveGlobalSettings();
         SKSE::log::info("unpublish: slot {} -> box '{}' ({}/{} content(s) restored)",
             a_slot, token, restorable.size(), snap->contents.size());
+        if (relocated) {
+            RE::DebugNotification(std::format(
+                "CostumeFW: slot {} was taken - '{}' came back on slot {}",
+                snap->sourceSlot, snap->label, landedSlot).c_str());
+        }
         return true;
     }
 

@@ -3031,11 +3031,38 @@ namespace CostumeFW
         return out;
     }
 
+    // Slots an AUTOMATIC pick must not reach for first. 30 (Head) and 31
+    // (Hair/LongHair) hide the head and hair the moment the token is worn, so
+    // handing one out unasked reads as "CEF deleted my head" (test run
+    // 2026-09-10: a publish/unpublish slot collision landed a restored box on
+    // Costume Box 30). The pool is sorted by slot number, so these WERE the
+    // first two candidates for every automatic allocation.
+    //
+    // Deliberately a preference, not a ban: the user can still pick them in the
+    // "+ New box" slot picker (that list stays in plain slot order), and an
+    // automatic pick still takes one rather than fail when nothing else is free.
+    static bool IsRiskyAutoSlot(int a_slot)
+    {
+        return a_slot == 30 || a_slot == 31;
+    }
+
     std::string NextFreeToken()
     {
         StoreLock lk;
         const auto free = FreeTokens();
-        return free.empty() ? std::string{} : free.front();
+        if (free.empty()) {
+            return {};
+        }
+        for (const auto& token : free) {
+            if (!IsRiskyAutoSlot(TokenSlot(token))) {
+                return token;
+            }
+        }
+        SKSE::log::warn(
+            "boxes: only head/hair slots are free - auto-picking '{}' (slot {}); wearing it "
+            "hides that body part",
+            free.front(), TokenSlot(free.front()));
+        return free.front();
     }
 
     int TokenSlot(const std::string& a_token)
