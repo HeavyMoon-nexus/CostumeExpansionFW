@@ -3586,7 +3586,7 @@ namespace CostumeFW
         // engine holds the Effect pointers of a live ability, so rewriting the list
         // under it would leave dangling active effects.
         bool FillEnchantSpell(RE::SpellItem* a_spell, const std::vector<std::string>& a_contents,
-            const char* a_name)
+            const char* a_name, const FrozenEnchantLookup& a_frozen = {})
         {
             // Per effect: either a LIVE source Effect (full fidelity: magnitude
             // + duration + conditions) or a flat {mgef, magnitude} snapshot.
@@ -3632,6 +3632,7 @@ namespace CostumeFW
                 // base - the base form's enchantment, both at full fidelity.
                 // Then the flat snapshot (original unreachable: other-character
                 // persist, cross-save copy), and last the bare base form.
+                const std::size_t before = effs.size();
                 auto* armo = ResolveArmo(c);
                 const auto stored = FindStoredEnchant(c);
                 if (stored.instance) {
@@ -3666,6 +3667,30 @@ namespace CostumeFW
                     }
                 } else if (armo && armo->formEnchanting) {
                     pushLive(armo->formEnchanting);
+                    continue;
+                }
+                // 5th and last, per content: a frozen copy the HOLDER carries -
+                // today only a published costume, which froze what each piece
+                // was worth at publish time. Flat by construction, so it is
+                // reached only when all four live sources came up empty for
+                // THIS content, and never in place of one of them (2026-09-11
+                // F01/F02). A published piece whose live sources are gone is
+                // worth its frozen value; a piece whose sources are fine is
+                // unaffected by any other piece's state.
+                if (a_frozen && effs.size() == before) {
+                    int recovered = 0;
+                    for (const auto& e : a_frozen(c)) {
+                        if (auto* mgef = ResolveMgef(e.mgef)) {
+                            effs.push_back({ mgef, e.magnitude, nullptr });
+                            ++recovered;
+                        }
+                    }
+                    if (recovered > 0) {
+                        SKSE::log::info(
+                            "boxes: '{}' fell back to its frozen snapshot for '{}' ({} effect(s), "
+                            "flat - any conditions it had are not in that copy)",
+                            c, a_name, recovered);
+                    }
                 }
             }
             RetireSynthEffects(a_spell);
@@ -4221,10 +4246,11 @@ namespace CostumeFW
     }
 
     bool FillContentEnchantSpell(RE::SpellItem* a_spell,
-        const std::vector<std::string>& a_contents, const char* a_name)
+        const std::vector<std::string>& a_contents, const char* a_name,
+        const FrozenEnchantLookup& a_frozen)
     {
         StoreLock lk;  // reads g_contentEnchants / g_statEnchantOff
-        return a_spell ? FillEnchantSpell(a_spell, a_contents, a_name) : false;
+        return a_spell ? FillEnchantSpell(a_spell, a_contents, a_name, a_frozen) : false;
     }
 
     void RebuildPersistAbility()

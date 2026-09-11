@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -525,8 +527,26 @@ namespace CostumeFW
     // The caller MUST have removed the ability from every actor first: the
     // engine holds the Effect pointers of a live ability. Returns false when no
     // content contributes an effect (the form stays, with an empty list).
+    // a_frozen is an OPTIONAL last-resort source, consulted per content after
+    // all four live sources have come up empty for that one content. It exists
+    // for a published costume, which carries its own frozen copy of what each
+    // piece was worth when it was published.
+    //
+    // It replaces a fallback that sat one level too high. Publish used to
+    // rebuild the WHOLE ability from its frozen list whenever the shared filler
+    // returned nothing at all, which had two consequences (review 2026-09-11
+    // F01/F02): the rebuilt effects were flat, so a blacklisted or
+    // conditionally-gated piece came back unconditional - a "while sneaking"
+    // bonus applying while standing, the third time that defect has been fixed
+    // - and the trigger was the whole spell being empty, so one piece that
+    // still worked suppressed the recovery of every piece that did not, while
+    // that piece going quiet resurrected them.
+    using FrozenEnchantLookup =
+        std::function<std::vector<EnchantEffectInfo>(const std::string& a_contentId)>;
+
     bool FillContentEnchantSpell(RE::SpellItem* a_spell,
-        const std::vector<std::string>& a_contents, const char* a_name);
+        const std::vector<std::string>& a_contents, const char* a_name,
+        const FrozenEnchantLookup& a_frozen = {});
 
     // Custody history: one row per content id CEF has ever taken custody of, with
     // what last happened to it. The id is the only handle on a piece whose box

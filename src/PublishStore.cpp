@@ -228,31 +228,26 @@ namespace CostumeFW
             // sneaking" effect became always-on. It clears the old effect list
             // itself, honors the per-content enchant toggle, and skips
             // quarantined contents.
-            ability.hasEffects =
-                FillContentEnchantSpell(ability.spell, a_snap.contents, label.c_str());
-            if (!ability.hasEffects) {
-                // Nothing reachable (the contents' plugin is gone, or the global
-                // capture snapshot was pruned) - fall back to the costume's own
-                // frozen list so a published costume never loses its stats
-                // outright. Flat by construction: this is all the snapshot has.
-                // Retired, not freed: RemoveSpell only flags an active effect,
-                // and its later teardown still reads the Effect*.
-                ability.spell->effects.clear();
-                for (const auto& [id, effects] : a_snap.enchants) {
-                    if (!StatEnchantOn(id)) continue;  // item-data toggle
-                    for (const auto& frozen : effects) {
-                        auto* mgef = ResolveColonForm<RE::EffectSetting>(frozen.mgef);
-                        if (!mgef) continue;
-                        auto* effect = new RE::Effect();
-                        effect->baseEffect = mgef;
-                        effect->effectItem.magnitude = frozen.magnitude;
-                        effect->effectItem.area = 0;
-                        effect->effectItem.duration = 0;
-                        ability.spell->effects.push_back(effect);
-                    }
-                }
-                ability.hasEffects = !ability.spell->effects.empty();
-            }
+            // The costume's own frozen copy of what each piece was worth at
+            // publish time, handed to the filler as a per-CONTENT last resort.
+            // It used to be a separate rebuild of the whole spell, run whenever
+            // the filler returned nothing at all, and that height was the bug
+            // (review 2026-09-11 F01/F02): it skipped the admission gate and
+            // the per-content toggle the filler applies, it re-created every
+            // effect flat - so a blacklisted or "while sneaking" piece came
+            // back unconditional, the third time that defect has been fixed -
+            // and its trigger was the WHOLE spell being empty, so one working
+            // piece suppressed every other piece's recovery while that piece
+            // going quiet resurrected them all.
+            ability.hasEffects = FillContentEnchantSpell(ability.spell, a_snap.contents,
+                label.c_str(), [&a_snap](const std::string& a_id) {
+                    std::vector<EnchantEffectInfo> out;
+                    const auto it = a_snap.enchants.find(a_id);
+                    if (it == a_snap.enchants.end()) return out;
+                    for (const auto& frozen : it->second)
+                        out.push_back({ frozen.mgef, frozen.magnitude });
+                    return out;
+                });
             ability.dirty = false;
             return ability;
         }
