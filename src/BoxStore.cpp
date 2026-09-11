@@ -4251,7 +4251,12 @@ namespace CostumeFW
             // With CEF disabled nothing is injected, so a worn token must not still
             // grant its contents' enchant/armor effects (only the persist spell was
             // gated before - border audit [2161]).
-            const bool worn = cefOn && TokenWorn(b.token);
+            // b.enabled is the SMF "Distribute token" switch. SetTokenStats
+            // already zeroes an off box's armor, weight and keywords, but the
+            // ability only asked whether the token was worn - so a token put
+            // on by any other means still granted the enchantments of a box
+            // the user had turned off (review 2026-09-11 N2).
+            const bool worn = cefOn && b.enabled && TokenWorn(b.token);
             const std::string key = "box:" + b.token;
             // Synthesized ENCHANT ability (armor/weight are on the token's fields).
             SyncAbility(player, g_boxSpells[b.token], b.contents, "Costume Stats", worn, key);
