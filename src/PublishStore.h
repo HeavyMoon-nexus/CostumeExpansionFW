@@ -115,6 +115,12 @@ namespace CostumeFW
     // happened to restamp it (review 2026-09-11 F03).
     void RefreshPublishedStats(int a_pubSlot);
 
+    // Take every published slot's ability back off its wearers and the player,
+    // and mark them stale. Called from InvalidateStatAbilities on game load, for
+    // the same reason boxes and persist are: the effects are derived from THIS
+    // save's hidden store, so another save's build must not be carried over.
+    void InvalidatePublishAbilities();
+
     void EmitPublishJson(nlohmann::json& a_doc);
     void ParsePublishJson(const nlohmann::json& a_doc);
     void SaveGlobalSettings();

@@ -461,6 +461,23 @@ namespace CostumeFW
         return out;
     }
 
+    void InvalidatePublishAbilities()
+    {
+        // A published costume's CONTENTS are global, but the effects built from
+        // them are not: the filler reads this save's hidden store to decide
+        // whether a piece contributes its stored original's enchantment (with
+        // the conditions that gate it) or a flat snapshot. Loading another save
+        // changes that answer, and nothing re-derived it - the box and persist
+        // abilities were taken back and marked stale at kPostLoadGame while the
+        // publish ones were left holding the previous save's build (review
+        // 2026-09-11 F08). It is the same defect f35418d fixed for boxes,
+        // reached from the load path instead of from a plugin going missing.
+        for (auto& [slot, ability] : g_pubEnchantSpells) {
+            DropPubAbility(slot, ability);
+            ability.dirty = true;
+        }
+    }
+
     void RefreshPublishedStats(int a_pubSlot)
     {
         if (const auto it = g_pubEnchantSpells.find(a_pubSlot); it != g_pubEnchantSpells.end()) {

@@ -4330,6 +4330,11 @@ namespace CostumeFW
         }
         g_persistAbility.dirty = true;
         dropped += DropAbilityFrom(player, g_persistAbility, "persist") ? 1 : 0;
+        // Published costumes too. Their contents are global, but the effects
+        // built from them read THIS save's hidden store, so another save's build
+        // must not be carried over - and until now nothing took them back
+        // (review 2026-09-11 F08).
+        InvalidatePublishAbilities();
         SKSE::log::info("boxes: stat abilities invalidated for load ({} taken back)", dropped);
     }
 
