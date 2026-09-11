@@ -461,14 +461,18 @@ namespace CostumeFW
         return out;
     }
 
-    void MarkPublishAbilityStale(int a_pubSlot)
+    void RefreshPublishedStats(int a_pubSlot)
     {
-        const auto it = g_pubEnchantSpells.find(a_pubSlot);
-        if (it == g_pubEnchantSpells.end()) {
-            return;  // not built yet; EnsurePubAbility will build it fresh
+        if (const auto it = g_pubEnchantSpells.find(a_pubSlot); it != g_pubEnchantSpells.end()) {
+            DropPubAbility(a_pubSlot, it->second);
+            it->second.dirty = true;
+        }  // else: not built yet; EnsurePubAbility will build it fresh
+        // Armor and weight do not live in the ability - they are written onto
+        // the token ARMO's own fields, so the stale flag above does nothing for
+        // them (F03).
+        if (const auto* snap = PubBySlot(a_pubSlot)) {
+            StampSnapshotStats(*snap);
         }
-        DropPubAbility(a_pubSlot, it->second);
-        it->second.dirty = true;
     }
 
     int PublishedSlotHolding(const std::string& a_content)

@@ -5503,7 +5503,10 @@ namespace CostumeFW
                 // but nothing marked that ability stale outside unpublish and the
                 // settings load - so the toggle did not take until a reload.
                 // ApplyBoxAbilities below re-grants it through SyncNpcAbilities.
-                MarkPublishAbilityStale(pubSlot);
+                // This restamps the token's armor/weight too: those are ARMO
+                // fields, not ability effects, and the stale flag never reached
+                // them (F03).
+                RefreshPublishedStats(pubSlot);
             } else if (IsSentinelHolder(holder)) {
                 // NPC persist: no player token to restat, and its contents carry
                 // no synthesized stat ability of their own.

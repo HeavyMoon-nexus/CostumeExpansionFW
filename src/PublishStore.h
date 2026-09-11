@@ -107,7 +107,13 @@ namespace CostumeFW
     // live on every rebuild - so an enchant/weight/armor toggle has to reach the
     // ability, and nothing marked it dirty outside unpublish and the settings
     // load (review follow-up 2026-09-10).
-    void MarkPublishAbilityStale(int a_pubSlot);
+    //
+    // It restamps the token too. Marking the ability stale only covers the
+    // ENCHANT channel; armor and weight are written onto the token ARMO's own
+    // fields, and nothing rewrote those - so turning armor off for a published
+    // piece left the old rating on the token until some unrelated reload
+    // happened to restamp it (review 2026-09-11 F03).
+    void RefreshPublishedStats(int a_pubSlot);
 
     void EmitPublishJson(nlohmann::json& a_doc);
     void ParsePublishJson(const nlohmann::json& a_doc);
