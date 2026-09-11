@@ -3489,6 +3489,104 @@ namespace CostumeFW
             a_spell->effects.push_back(eff);
         }
 
+        // --- Identical-effect collapse (2026-09-11) -----------------------------
+        // The engine creates ONE active effect for two effects that are entirely
+        // identical inside the same spell. Measured: a box holding two Imperial
+        // cuirasses - different items sharing one enchantment form, +40 Fortify
+        // Health each - was worth +40, not +80, and CEF had built both. Two
+        // pieces with Resist Fire 40 behave the same way, so it is not specific
+        // to one effect. Two effects of the same MGEF with DIFFERENT magnitudes
+        // (Fortify Alteration 22 and 20) both apply, and so do two identical
+        // ones in DIFFERENT spells - so the collapse is keyed on the effect's
+        // whole content, within one spell.
+        //
+        // The answer is to never hand the engine two identical effects: fold
+        // each group into ONE, carrying what N pieces are worth together. That
+        // is also what wearing those N pieces for real would give you.
+        bool SameConditionData(const RE::CONDITION_ITEM_DATA& a_lhs,
+            const RE::CONDITION_ITEM_DATA& a_rhs)
+        {
+            // NOT a memcmp: comparisonValue is a union and the struct carries
+            // two padding words, so identical conditions differ byte-wise.
+            if (a_lhs.flags.isOR != a_rhs.flags.isOR ||
+                a_lhs.flags.usesAliases != a_rhs.flags.usesAliases ||
+                a_lhs.flags.global != a_rhs.flags.global ||
+                a_lhs.flags.usePackData != a_rhs.flags.usePackData ||
+                a_lhs.flags.swapTarget != a_rhs.flags.swapTarget ||
+                a_lhs.flags.opCode != a_rhs.flags.opCode) {
+                return false;
+            }
+            if (a_lhs.object.get() != a_rhs.object.get() || a_lhs.dataID != a_rhs.dataID ||
+                a_lhs.runOnRef != a_rhs.runOnRef) {
+                return false;
+            }
+            // params are function-dependent and may not be pointers at all, so
+            // they are compared as raw bits and never dereferenced. Same bits
+            // means same parameter; different bits that happen to mean the same
+            // thing simply do not merge, which is the safe direction.
+            if (a_lhs.functionData.function.get() != a_rhs.functionData.function.get() ||
+                a_lhs.functionData.params[0] != a_rhs.functionData.params[0] ||
+                a_lhs.functionData.params[1] != a_rhs.functionData.params[1]) {
+                return false;
+            }
+            // The union follows the global flag, equal on both sides by now.
+            return a_lhs.flags.global ? a_lhs.comparisonValue.g == a_rhs.comparisonValue.g
+                                      : a_lhs.comparisonValue.f == a_rhs.comparisonValue.f;
+        }
+
+        bool SameConditionChain(const RE::TESCondition* a_lhs, const RE::TESCondition* a_rhs)
+        {
+            if (!a_lhs && !a_rhs) {
+                return true;
+            }
+            if (!a_lhs || !a_rhs) {
+                return false;
+            }
+            const RE::TESConditionItem* l = a_lhs->head;
+            const RE::TESConditionItem* r = a_rhs->head;
+            for (; l && r; l = l->next, r = r->next) {
+                if (!SameConditionData(l->data, r->data)) {
+                    return false;
+                }
+            }
+            return l == nullptr && r == nullptr;  // same length as well as content
+        }
+
+        // Whether N copies of this effect add up, the way N real pieces carrying
+        // it would. Value-modifier archetypes do. For anything else - waterbreathing,
+        // invisibility, a script effect - magnitude either is not an amount or does
+        // not compose, so the group keeps the largest and says so. That is what the
+        // engine's collapse already gave us, so it cannot be a regression, and the
+        // log line is what would justify promoting an archetype later.
+        // What to call an MGEF in a fold line: its display name if it has one,
+        // else its colon-id. Both are useful - the name is what the user sees in
+        // the active-effect list, the id is what a bug report can be traced with.
+        std::string MgefLabel(RE::EffectSetting* a_mgef)
+        {
+            if (!a_mgef) {
+                return "(null)";
+            }
+            const char* nm = a_mgef->GetFullName();
+            const std::string id = MakeColonId(a_mgef);
+            return (nm && *nm) ? EnsureUtf8(std::string(nm)) + " [" + id + "]" : id;
+        }
+
+        bool MagnitudeIsAdditive(const RE::EffectSetting* a_mgef)
+        {
+            if (!a_mgef) {
+                return false;
+            }
+            using A = RE::EffectSetting::Archetype;
+            switch (a_mgef->data.archetype) {
+            case A::kValueModifier:
+            case A::kPeakValueModifier:
+            case A::kDualValueModifier:
+                return true;
+            default:
+                return false;
+            }
+        }
+
         // True when a flat capture snapshot is just a copy of the base
         // enchantment - same MGEFs, same magnitudes - rather than a player
         // enchantment that cannot be re-derived from the form. CaptureEnchant
@@ -3727,19 +3825,86 @@ namespace CostumeFW
                 SKSE::log::debug("boxes: synth enchant ability '{}' - no effects", a_name);
                 return false;
             }
-            int conditioned = 0;
+            // Fold effects the engine would collapse into one. The group key is
+            // everything the collapse looks at: the MGEF, the area, the duration
+            // and the condition chain. One output per group, so the list handed
+            // to the engine cannot contain a duplicate pair by construction -
+            // which is why this needs no second pass to check for collisions.
+            struct EffectGroup
+            {
+                RE::EffectSetting* mgef{ nullptr };
+                float magnitude{ 0.0f };
+                std::uint32_t area{ 0 };
+                std::uint32_t duration{ 0 };
+                const RE::TESCondition* conditions{ nullptr };
+                const RE::Effect* rep{ nullptr };  // full-fidelity source, if any
+                int count{ 0 };
+                bool additive{ false };
+            };
+            const auto conditionsOf = [](const RE::Effect* a_live) -> const RE::TESCondition* {
+                return (a_live && a_live->conditions.head) ? &a_live->conditions : nullptr;
+            };
+            std::vector<EffectGroup> groups;
             for (const auto& pe : effs) {
-                if (pe.live) {
-                    AddEffectFull(a_spell, pe.live);
-                    if (pe.live->conditions) {
+                RE::EffectSetting* mgef = pe.live ? pe.live->baseEffect : pe.mgef;
+                if (!mgef) {
+                    continue;
+                }
+                const float mag = pe.live ? pe.live->effectItem.magnitude : pe.magnitude;
+                const std::uint32_t area = pe.live ? pe.live->effectItem.area : 0u;
+                const std::uint32_t duration = pe.live ? pe.live->effectItem.duration : 0u;
+                const RE::TESCondition* cond = conditionsOf(pe.live);
+                EffectGroup* hit = nullptr;
+                for (auto& g : groups) {
+                    if (g.mgef == mgef && g.area == area && g.duration == duration &&
+                        SameConditionChain(g.conditions, cond)) {
+                        hit = &g;
+                        break;
+                    }
+                }
+                if (!hit) {
+                    groups.push_back({ mgef, mag, area, duration, cond, pe.live, 1,
+                        MagnitudeIsAdditive(mgef) });
+                    continue;
+                }
+                ++hit->count;
+                hit->magnitude = hit->additive ? hit->magnitude + mag
+                                               : std::max(hit->magnitude, mag);
+                if (!hit->rep && pe.live) {
+                    hit->rep = pe.live;  // prefer a full-fidelity representative
+                }
+            }
+            int conditioned = 0;
+            int merged = 0;
+            int unsupported = 0;
+            for (const auto& g : groups) {
+                if (g.rep) {
+                    auto* eff = new RE::Effect();
+                    eff->baseEffect = g.rep->baseEffect;
+                    eff->effectItem = g.rep->effectItem;  // area / duration
+                    eff->effectItem.magnitude = g.magnitude;
+                    eff->cost = g.rep->cost;
+                    CopyConditions(eff->conditions, g.rep->conditions);
+                    a_spell->effects.push_back(eff);
+                    if (g.rep->conditions.head) {
                         ++conditioned;
                     }
                 } else {
-                    AddEffect(a_spell, pe.mgef, pe.magnitude);
+                    AddEffect(a_spell, g.mgef, g.magnitude);
+                }
+                if (g.count > 1) {
+                    ++merged;
+                    unsupported += g.additive ? 0 : 1;
+                    SKSE::log::info("boxes: '{}' folded {} identical '{}' into one -> {:.1f} ({})",
+                        a_name, g.count, MgefLabel(g.mgef), g.magnitude,
+                        g.additive ? "summed" : "largest kept - magnitude does not add for this "
+                                                "archetype");
                 }
             }
-            SKSE::log::debug("boxes: synth enchant ability '{}' ({} effect(s), {} conditioned)",
-                a_name, effs.size(), conditioned);
+            SKSE::log::debug(
+                "boxes: synth enchant ability '{}' (src {} -> out {} effect(s), {} conditioned, "
+                "{} group(s) folded, {} unsupported)",
+                a_name, effs.size(), a_spell->effects.size(), conditioned, merged, unsupported);
             return true;
         }
 
