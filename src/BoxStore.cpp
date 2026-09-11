@@ -566,6 +566,19 @@ namespace CostumeFW
         void RestoreTokenDefaultName(const std::string& a_token);      // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
         void ReapplyStatsForContent(const std::string& a_id);          // fwd (defined below)
+        void ResetUnclaimedTokenStats();                               // fwd (defined below)
+
+        // Tokens SetTokenStats has written to in this process. A box's armor,
+        // weight, class, name and keywords live on the token ARMO's BASE form,
+        // and the only record of "CEF put that there" was the box definition
+        // itself - so a definition that disappeared took the undo with it. A
+        // settings reload replaces g_boxes wholesale and restamps only the boxes
+        // it read, which left a deleted box's token carrying its old stats for
+        // the rest of the session (review 2026-09-11 F06).
+        //
+        // Process-lived on purpose: base-form fields reset to the plugin's
+        // values when the process restarts, so this set has nothing to survive.
+        std::unordered_set<std::string> g_stampedTokens;
         void RecordCustody(const std::string& a_id, const char* a_event);  // fwd (below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
@@ -1784,6 +1797,10 @@ namespace CostumeFW
             }
             SetTokenStats(b);
         }
+        // After the new set is stamped: undo the tokens the reloaded file no
+        // longer claims (F06). A box deleted from the json otherwise kept its
+        // armor, weight, name and keywords on the token for the session.
+        ResetUnclaimedTokenStats();
         // Persist is NOT registered from the catalog: the ACTIVE set is per-save
         // and comes from the co-save restore (M2, CEF_STATE_SCOPE.md §3). A new
         // character starts with nothing shown.
@@ -3901,6 +3918,7 @@ namespace CostumeFW
                 type = AT::kHeavyArmor;
             }
             ApplyStatsToToken(a_box.token, a_box, armorSum, weightSum, type);
+            g_stampedTokens.insert(a_box.token);  // so a vanished box can be undone
         }
 
         // Clear a token ARMO's stat fields (freed box / disabled).
@@ -3913,6 +3931,23 @@ namespace CostumeFW
             }
             ClearTokenKeywords(a_token, token);  // strip our passthrough keywords
             RestoreTokenDefaultName(a_token);    // F10: put it back in TokenPool
+            g_stampedTokens.erase(a_token);
+        }
+
+        // Undo the stamp on every token no box claims any more. Driven by what
+        // we stamped rather than by the current definitions, because the whole
+        // point is the case where the definition is gone (F06). TokenPool()
+        // cannot stand in for this: it identifies a free token by its ESP name,
+        // and a RENAMED box's token does not carry that name until it is freed.
+        void ResetUnclaimedTokenStats()
+        {
+            const std::vector<std::string> stamped(g_stampedTokens.begin(), g_stampedTokens.end());
+            for (const auto& token : stamped) {
+                if (FindBox(token) < 0) {
+                    ResetTokenStats(token);  // erases from g_stampedTokens
+                    SKSE::log::info("boxes: cleared the token stats of vanished box '{}'", token);
+                }
+            }
         }
 
         // Bring a holder's ability up to date with its contents: create the form

@@ -587,6 +587,18 @@ namespace CostumeFW
             }
             g_published.push_back(std::move(snap));
         }
+        // Pool slots this json does NOT publish must not keep the stamp an
+        // earlier definition left on them. A reload replaces the published set
+        // and only ever restamped the NEW set, so a costume removed from the
+        // file left its token carrying the old armor, weight, class, name and
+        // keywords for the rest of the session (review 2026-09-11 F06). The
+        // definition is gone, so nothing was left to say what to undo - which
+        // is why the reset is driven by the pool, not by the definitions.
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            if (!PubBySlot(slot)) {
+                ResetPublishedTokenState(slot);
+            }
+        }
         InitializeNpcSupport();
     }
 
