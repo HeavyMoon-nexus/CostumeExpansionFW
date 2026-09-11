@@ -755,7 +755,12 @@ namespace CostumeFW
         binding->handle = a_handle;
         if (a_worn) {
             binding->wearer = true;
-            ApplyManualAbility(actor, *PubBySlot(a_slot), true);
+            // Master-switch gate (7.6 parity). Every other ability path has
+            // had it since NPC_AUDIT M8; this one - the direct "put it on
+            // this NPC" action - did not, so dressing an NPC from the UI
+            // while CEF was off granted spells nothing else would have
+            // (review 2026-09-11 F13).
+            ApplyManualAbility(actor, *PubBySlot(a_slot), CefEnabled());
             if (!g_hidden[a_slot]) RegisterSnapshot(actor, *PubBySlot(a_slot));
             equip->EquipObject(actor, token, nullptr, 1, nullptr, true, false, false);
         } else {
@@ -1396,12 +1401,17 @@ namespace CostumeFW
         // enabled and loses them the moment the master toggle goes off. Loaded
         // actors only; unloaded ones converge via ReapplyNpcBindings /
         // OnNpcTokenEquip when they return.
-        const bool cefOn = CefEnabled();
+        // NpcEspLoaded as well as the master switch: without the add-on the
+        // publish system is dormant, but a co-save restores its bindings
+        // anyway, and this pass would grant from them (F13). Passing false
+        // still runs the removal branch, which is what a wearer left over
+        // from a session that HAD the add-on needs.
+        const bool grantable = CefEnabled() && NpcEspLoaded();
         for (auto& binding : g_bindings) {
             const auto* snap = PubBySlot(binding.pubSlot);
             if (!snap) continue;
             if (auto* actor = ResolveActor(binding))
-                ApplyManualAbility(actor, *snap, cefOn && binding.wearer);
+                ApplyManualAbility(actor, *snap, grantable && binding.wearer);
         }
     }
 
