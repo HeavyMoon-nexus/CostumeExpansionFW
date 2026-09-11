@@ -625,6 +625,25 @@ namespace CostumeFW
     // in-process reload before v1.6.1.1. Main thread.
     void InvalidateStatAbilities();
 
+    // --- The two chokepoints for granting / revoking an ability -------------
+    // EVERY AddSpell and RemoveSpell CEF performs goes through these, so that
+    // "did this ability actually land on / come off this actor" is answerable
+    // from the log. Until v1.6.2.2 it was not: the "(N effect(s))" build line
+    // describes the SPELL, not the AddSpell that follows it, and the engine's
+    // return values were discarded at all four call sites. A fortify stranded
+    // on the player could therefore only be found by reading the save file
+    // (owner investigation 2026-09-11, +180 Health of unknown origin).
+    //
+    // a_key names the holder for the log: "box:<token>", "persist",
+    // "pub:<slot>", "manual:<colon-id>".
+    //
+    // Grant returns true when the actor holds the spell afterwards. Revoke
+    // returns true when it verifiably does NOT - a removal that does not take
+    // is warned about, because that is exactly the shape that strands an
+    // actor-value modifier with nobody left to take it back off.
+    bool GrantAbility(RE::Actor* a_actor, RE::SpellItem* a_spell, std::string_view a_key);
+    bool RevokeAbility(RE::Actor* a_actor, RE::SpellItem* a_spell, std::string_view a_key);
+
     // Human-readable summary of a box's aggregated stats (for the MCM display).
     std::string BoxStatsSummary(int a_index);
 

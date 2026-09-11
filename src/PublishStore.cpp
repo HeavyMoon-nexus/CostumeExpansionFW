@@ -185,14 +185,13 @@ namespace CostumeFW
         void DropPubAbility(int a_slot, PubAbility& a_ability)
         {
             if (!a_ability.spell) return;
+            const std::string key = "pub:" + std::to_string(a_slot);
             for (auto& binding : g_bindings) {
                 if (binding.pubSlot != a_slot) continue;
                 if (auto* actor = ResolveActor(binding))
-                    if (actor->HasSpell(a_ability.spell)) actor->RemoveSpell(a_ability.spell);
+                    RevokeAbility(actor, a_ability.spell, key);
             }
-            if (auto* player = RE::PlayerCharacter::GetSingleton();
-                player && player->HasSpell(a_ability.spell))
-                player->RemoveSpell(a_ability.spell);
+            RevokeAbility(RE::PlayerCharacter::GetSingleton(), a_ability.spell, key);
         }
 
         // The slot's ability form, refilled from the frozen snapshot when stale.
@@ -256,18 +255,18 @@ namespace CostumeFW
             if (!a_actor) return;
             if (!a_snap.manualAbility.empty()) {
                 if (auto* spell = ResolveColonForm<RE::SpellItem>(a_snap.manualAbility)) {
-                    if (a_equip) a_actor->AddSpell(spell);
-                    else a_actor->RemoveSpell(spell);
+                    const std::string manualKey = "manual:" + a_snap.manualAbility;
+                    if (a_equip) GrantAbility(a_actor, spell, manualKey);
+                    else RevokeAbility(a_actor, spell, manualKey);
                 }
             }
             // Always run the removal branch (as BoxStore's SyncAbility does), so a
             // wearer can never be left holding an ability CEF has stopped granting.
             auto& ability = EnsurePubAbility(a_snap);
             if (!ability.spell) return;
-            const bool has = a_actor->HasSpell(ability.spell);
-            const bool grant = a_equip && ability.hasEffects;
-            if (grant && !has) a_actor->AddSpell(ability.spell);
-            else if (!grant && has) a_actor->RemoveSpell(ability.spell);
+            const std::string key = "pub:" + std::to_string(a_snap.pubSlot);
+            if (a_equip && ability.hasEffects) GrantAbility(a_actor, ability.spell, key);
+            else RevokeAbility(a_actor, ability.spell, key);
         }
 
         std::shared_ptr<PubSnapshot> SharedBySlot(int a_slot)

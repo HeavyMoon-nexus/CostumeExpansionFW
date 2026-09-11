@@ -3290,6 +3290,64 @@ namespace CostumeFW
 
     namespace
     {
+        // "Lisa (00000014)" - enough to tell the player from an NPC, and two NPCs
+        // of the same name apart, in a log line.
+        std::string ActorLabel(RE::Actor* a_actor)
+        {
+            if (!a_actor) {
+                return "(null)";
+            }
+            const char* nm = a_actor->GetName();
+            const std::string name = (nm && *nm) ? EnsureUtf8(std::string(nm)) : std::string("?");
+            return std::format("{} ({:08X})", name, a_actor->GetFormID());
+        }
+    }
+
+    bool GrantAbility(RE::Actor* a_actor, RE::SpellItem* a_spell, std::string_view a_key)
+    {
+        if (!a_actor || !a_spell) {
+            return false;
+        }
+        if (a_actor->HasSpell(a_spell)) {
+            return true;  // already granted - not a second AddSpell
+        }
+        const bool ok = a_actor->AddSpell(a_spell);
+        if (ok) {
+            SKSE::log::info("ability: granted '{}' to {} ({} effect(s), form {:08X})", a_key,
+                ActorLabel(a_actor), a_spell->effects.size(), a_spell->GetFormID());
+        } else {
+            SKSE::log::warn("ability: AddSpell REFUSED '{}' for {} - nothing was granted", a_key,
+                ActorLabel(a_actor));
+        }
+        return ok;
+    }
+
+    bool RevokeAbility(RE::Actor* a_actor, RE::SpellItem* a_spell, std::string_view a_key)
+    {
+        if (!a_actor || !a_spell) {
+            return false;
+        }
+        if (!a_actor->HasSpell(a_spell)) {
+            return true;  // nothing to take off
+        }
+        const bool ok = a_actor->RemoveSpell(a_spell);
+        const bool gone = !a_actor->HasSpell(a_spell);
+        if (ok && gone) {
+            SKSE::log::info("ability: removed '{}' from {}", a_key, ActorLabel(a_actor));
+        } else {
+            // The shape that strands an actor-value modifier: we believe the
+            // ability is off, nobody re-runs the removal, and the fortify it
+            // applied has nothing left to take it back off.
+            SKSE::log::warn(
+                "ability: RemoveSpell did NOT take '{}' off {} (returned {}, still held {}) - "
+                "its actor-value modifier may be stranded",
+                a_key, ActorLabel(a_actor), ok, !gone);
+        }
+        return ok && gone;
+    }
+
+    namespace
+    {
         // Resolve a colon-form id to a SpellItem (nullptr on failure).
         RE::SpellItem* ResolveSpell(const std::string& a_colonId)
         {
@@ -3654,12 +3712,13 @@ namespace CostumeFW
         // Take the ability off an actor if it holds it. Refilling effects under a
         // live ability is what leaves orphaned actor-value modifiers behind, so
         // every mutation path goes through here first.
-        bool DropAbilityFrom(RE::Actor* a_actor, const StatAbility& a_ability)
+        bool DropAbilityFrom(RE::Actor* a_actor, const StatAbility& a_ability,
+            std::string_view a_key = "box")
         {
             if (!a_actor || !a_ability.spell || !a_actor->HasSpell(a_ability.spell)) {
                 return false;
             }
-            a_actor->RemoveSpell(a_ability.spell);
+            RevokeAbility(a_actor, a_ability.spell, a_key);
             return true;
         }
 
@@ -3817,12 +3876,13 @@ namespace CostumeFW
         // Bring a holder's ability up to date with its contents: create the form
         // once, and refill its effects only while it is on nobody.
         void EnsureAbilityBuilt(RE::Actor* a_player, StatAbility& a_ability,
-            const std::vector<std::string>& a_contents, const char* a_name)
+            const std::vector<std::string>& a_contents, const char* a_name,
+            std::string_view a_key)
         {
             if (!EnsureSynthSpell(a_ability, a_name) || !a_ability.dirty) {
                 return;
             }
-            DropAbilityFrom(a_player, a_ability);
+            DropAbilityFrom(a_player, a_ability, a_key);
             a_ability.hasEffects = FillEnchantSpell(a_ability.spell, a_contents, a_name);
             a_ability.dirty = false;
         }
@@ -3882,7 +3942,7 @@ namespace CostumeFW
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* spell = ResolveSpell(a_ability);
         if (player && spell && player->HasSpell(spell)) {
-            player->RemoveSpell(spell);
+            RevokeAbility(player, spell, "manual:" + a_ability);
         }
     }
 
@@ -4069,16 +4129,16 @@ namespace CostumeFW
 
     namespace
     {
-        void SyncSpell(RE::Actor* a_player, RE::SpellItem* a_spell, bool a_worn)
+        void SyncSpell(RE::Actor* a_player, RE::SpellItem* a_spell, bool a_worn,
+            std::string_view a_key)
         {
             if (!a_spell) {
                 return;
             }
-            const bool has = a_player->HasSpell(a_spell);
-            if (a_worn && !has) {
-                a_player->AddSpell(a_spell);
-            } else if (!a_worn && has) {
-                a_player->RemoveSpell(a_spell);
+            if (a_worn) {
+                GrantAbility(a_player, a_spell, a_key);
+            } else {
+                RevokeAbility(a_player, a_spell, a_key);
             }
         }
 
@@ -4087,18 +4147,17 @@ namespace CostumeFW
         // removal branch, so an ability can never be stranded on the player -
         // not by a load, not by the master switch, not by an emptied box.
         void SyncAbility(RE::Actor* a_player, StatAbility& a_ability,
-            const std::vector<std::string>& a_contents, const char* a_name, bool a_want)
+            const std::vector<std::string>& a_contents, const char* a_name, bool a_want,
+            std::string_view a_key)
         {
-            EnsureAbilityBuilt(a_player, a_ability, a_contents, a_name);
+            EnsureAbilityBuilt(a_player, a_ability, a_contents, a_name, a_key);
             if (!a_ability.spell) {
                 return;
             }
-            const bool has = a_player->HasSpell(a_ability.spell);
-            const bool grant = a_want && a_ability.hasEffects;
-            if (grant && !has) {
-                a_player->AddSpell(a_ability.spell);
-            } else if (!grant && has) {
-                a_player->RemoveSpell(a_ability.spell);
+            if (a_want && a_ability.hasEffects) {
+                GrantAbility(a_player, a_ability.spell, a_key);
+            } else {
+                RevokeAbility(a_player, a_ability.spell, a_key);
             }
         }
     }
@@ -4116,17 +4175,18 @@ namespace CostumeFW
             // grant its contents' enchant/armor effects (only the persist spell was
             // gated before - border audit [2161]).
             const bool worn = cefOn && TokenWorn(b.token);
+            const std::string key = "box:" + b.token;
             // Synthesized ENCHANT ability (armor/weight are on the token's fields).
-            SyncAbility(player, g_boxSpells[b.token], b.contents, "Costume Stats", worn);
+            SyncAbility(player, g_boxSpells[b.token], b.contents, "Costume Stats", worn, key);
             // Optional manual extra ability (dormant unless set in json).
             if (!b.ability.empty()) {
-                SyncSpell(player, ResolveSpell(b.ability), worn);
+                SyncSpell(player, ResolveSpell(b.ability), worn, "manual:" + b.ability);
             }
         }
         // Abilities whose box is gone (deleted, or its token handed to a publish
         // slot): the form is kept for reuse, but it must not stay on the player.
         for (auto& [token, ability] : g_boxSpells) {
-            if (FindBox(token) < 0 && DropAbilityFrom(player, ability)) {
+            if (FindBox(token) < 0 && DropAbilityFrom(player, ability, "box:" + token)) {
                 SKSE::log::info("boxes: dropped the stat ability of freed box '{}'", token);
             }
         }
@@ -4135,7 +4195,7 @@ namespace CostumeFW
         // ACTIVE set, not the shared catalog (M2) - a non-active entry another
         // character cataloged must not grant effects here.
         SyncAbility(player, g_persistAbility, ActivePersistIds(),
-            "Costume Stats (Persist)", cefOn);
+            "Costume Stats (Persist)", cefOn, "persist");
         // Publish bindings (NPC wearers + the player wearing a publish token)
         // follow the same master-switch contract - converge them in the same
         // pass so a master toggle can never strand spells on an NPC (§7.6).
@@ -4151,7 +4211,7 @@ namespace CostumeFW
         }
         // Take it off NOW - the refill must not run under a live ability - and
         // mark it stale. The FORM stays: it is the same one the save may hold.
-        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), it->second);
+        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), it->second, "box:" + a_token);
         it->second.dirty = true;  // next ApplyBoxAbilities refills + reapplies
     }
 
@@ -4165,7 +4225,7 @@ namespace CostumeFW
     void RebuildPersistAbility()
     {
         StoreLock lk;
-        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), g_persistAbility);
+        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), g_persistAbility, "persist");
         g_persistAbility.dirty = true;  // next ApplyBoxAbilities refills + reapplies
     }
 
@@ -4181,10 +4241,10 @@ namespace CostumeFW
         int dropped = 0;
         for (auto& [token, ability] : g_boxSpells) {
             ability.dirty = true;
-            dropped += DropAbilityFrom(player, ability) ? 1 : 0;
+            dropped += DropAbilityFrom(player, ability, "box:" + token) ? 1 : 0;
         }
         g_persistAbility.dirty = true;
-        dropped += DropAbilityFrom(player, g_persistAbility) ? 1 : 0;
+        dropped += DropAbilityFrom(player, g_persistAbility, "persist") ? 1 : 0;
         SKSE::log::info("boxes: stat abilities invalidated for load ({} taken back)", dropped);
     }
 
