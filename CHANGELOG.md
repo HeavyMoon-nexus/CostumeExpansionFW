@@ -1,5 +1,65 @@
 # Changelog
 
+## v1.6.2.2 (2026-09-11)
+
+Finishes what 1.6.2 started. The orphan sweep hands back items storage is
+holding that nothing owns; this covers the other direction, where something
+owns an item that storage no longer has.
+
+**This is the last release with MCM support**, and the one to be on if you are
+staying with the MCM - 1.6.2.1 was a source-only release, so everything in it
+is here too. From 1.6.3 the MCM is removed and SKSE Menu Framework becomes the
+UI. Nothing you have set up changes: boxes, presets and settings live in
+`CEF_settings.json` and in your save, not in the menu. If you are on VR, SKSE
+Menu Framework needs
+[ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
+
+### Added
+
+- **CEF now tells you when a captured original is gone.** Disable a costume's
+  plugin for a single session and save, and Skyrim strips that plugin's items
+  out of every container, storage included. The box definition survives - it
+  lives in a global file, not in your save - and the costume still displays,
+  because that is built from the plugin's own model. What is gone is the
+  captured original, with its tempering and its player enchantment. There was
+  nothing anywhere to tell you that had happened.
+
+  Your save now carries a list of what storage held when it was written, and
+  the next load of that save compares it. An item that has left is named in the
+  log, marked "lost" on the Recovery page, and reported on screen. It cannot be
+  undone - the item is gone - but you find out when it happens instead of
+  months later from numbers that are wrong.
+
+  Two things it deliberately will not do. An item whose plugin is not loaded
+  right now is *not* reported: it cannot be seen, which is not the same as
+  being gone, and your save may well still have it - so the entry is carried
+  forward and checked again next time. And nothing is recreated behind your
+  back; a lost original can only ever come back as a plain copy, which is your
+  call to make.
+
+  This is also why it has to live in your save rather than in the settings
+  file. Box definitions are shared by all your characters and storage is
+  per-save, so "a box holds it but storage does not" is simply the normal state
+  on a second character. Only the save itself can tell that apart from a loss.
+
+### Changed
+
+- **The Recovery page says more about each row.** Every row shows what last
+  happened to it, so a "lost" item stays marked after the session that found
+  it. A row a box still holds says when storage does not have it, which is the
+  case that used to render as a plain "in box X" with nothing wrong about it -
+  taking that one out of the box can only give you a plain copy. A row whose
+  plugin is not loaded says so, and its Recover button is disabled rather than
+  offered: recovery gives up before it reaches storage for an item it cannot
+  resolve, so the button's only possible outcome was an error. The rare row
+  whose original is still in storage is marked too, because that is the one
+  where recovering gets your tempering and enchantment back.
+
+- **Recovering an item says which one you got.** The captured original, or a
+  plain copy because the original was not there. The difference does not show
+  in the inventory, and finding out later from the numbers is exactly the
+  problem this release is about.
+
 ## v1.6.2.1 (2026-09-10)
 
 Fixes for 1.6.2. Most of them are in published costumes and NPC distribution,
