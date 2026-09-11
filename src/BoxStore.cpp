@@ -579,30 +579,18 @@ namespace CostumeFW
 
         void ScheduleAutoSync();  // fwd (defined below)
 
-        // r3 (re-review P1-2): the quiet admitted-contents snapshot every
-        // derived processor iterates INSTEAD of raw box.contents / persist
-        // actives - a configured-but-blocked (quarantined) content must not
-        // be read by stats/keyword/ability/UI code either. Manifest uses the
-        // same safe resolver directly. Loud
-        // refusal logs stay at the explicit gates; this filter is silent.
-        std::vector<std::string> AdmittedContents(const std::vector<std::string>& a_ids)
-        {
-            // r4: base-form admission alone is insufficient for ARMO content:
-            // its race-selected ARMA may be runtime/no-file/deny-listed. Resolve
-            // every id through the shared safe model seam with ONE policy
-            // generation for the whole derived-processing operation.
-            const auto pol = CapturePolicySnapshot();
-            std::vector<std::string> out;
-            out.reserve(a_ids.size());
-            for (const auto& id : a_ids) {
-                std::string nif;
-                if (ResolveAdmittedModelPath(
-                        id, EffectiveSexFor(id), *pol, nif, false)) {
-                    out.push_back(id);
-                }
-            }
-            return out;
-        }
+        // r3 (re-review P1-2) established that every derived processor must
+        // iterate an admitted snapshot rather than raw box.contents, so a
+        // configured-but-blocked content is not read by stats/keyword/ability/
+        // UI code either. That filter used to be ONE list, built by resolving
+        // each id's model through ResolveAdmittedModelPath (r4).
+        //
+        // It is now two, because the two questions are different (2026-09-11):
+        //   - stats  -> StatAdmittedContents (BoxStore.h): blacklist / capture
+        //     policy only. Race- and sex-independent.
+        //   - visual -> ResolveAdmittedModelPath directly, at the seam that
+        //     needs the model anyway (injection, WriteCarrierManifest).
+        // Both stay silent; loud refusal logs belong at the explicit gates.
 
         void WriteCarrierManifest()
         {
@@ -2712,6 +2700,23 @@ namespace CostumeFW
         return IsContentAdmissible(a_id, *pol, a_why, a_log);
     }
 
+    std::vector<std::string> StatAdmittedContents(const std::vector<std::string>& a_ids)
+    {
+        StoreLock lk;
+        // ONE policy generation for the whole derived-processing operation, the
+        // same contract AdmittedContents follows - but without the model
+        // resolution, which is race/sex dependent (see the header).
+        const auto pol = CapturePolicySnapshot();
+        std::vector<std::string> out;
+        out.reserve(a_ids.size());
+        for (const auto& id : a_ids) {
+            if (IsContentAdmissible(id, *pol, nullptr, false)) {
+                out.push_back(id);
+            }
+        }
+        return out;
+    }
+
     namespace
     {
         // M4-J: whether MARA.dll was present at kDataLoaded (plugin.cpp sets
@@ -3601,7 +3606,7 @@ namespace CostumeFW
             };
             // r3 (re-review P1-2): single ability choke - box AND persist
             // ability synthesis skip quarantined contents here.
-            const auto admitted = AdmittedContents(a_contents);
+            const auto admitted = StatAdmittedContents(a_contents);
             // Name what got dropped. This gate is the one place a content can
             // stop contributing stats with nothing said anywhere - the reason
             // "my enchantment stopped applying" had no log line to look at
@@ -3612,7 +3617,7 @@ namespace CostumeFW
                     if (std::find(admitted.begin(), admitted.end(), c) == admitted.end()) {
                         SKSE::log::warn(
                             "boxes: '{}' contributes no stats to '{}' - not admitted right now "
-                            "(unresolved plugin, blacklisted, or no model for this race/sex)",
+                            "(unresolved plugin, or blocked by the capture blacklist)",
                             c, a_name);
                     }
                 }
@@ -3785,7 +3790,7 @@ namespace CostumeFW
             ClearTokenKeywords(a_tokenId, token);
             auto& mine = g_boxKeywords[a_tokenId];
             if (a_box.enabled) {
-                for (const auto& c : AdmittedContents(a_box.contents)) {  // r3: skip quarantined
+                for (const auto& c : StatAdmittedContents(a_box.contents)) {  // blacklist only
                     auto* armo = ResolveArmo(c);
                     if (!armo) {
                         continue;
@@ -3835,7 +3840,7 @@ namespace CostumeFW
             float armorSum = 0.0f;
             float weightSum = 0.0f;
             if (a_box.enabled) {
-                for (const auto& c : AdmittedContents(a_box.contents)) {  // r3: skip quarantined
+                for (const auto& c : StatAdmittedContents(a_box.contents)) {  // blacklist only
                     if (auto* armo = ResolveArmo(c)) {
                         if (!g_statArmorOff.contains(c)) {
                             // Captured temper multiplier scales the base rating the
@@ -4258,7 +4263,7 @@ namespace CostumeFW
         float armorSum = 0.0f;
         float weightSum = 0.0f;
         std::vector<std::string> effs;
-        for (const auto& c : AdmittedContents(box.contents)) {  // r3: skip quarantined
+        for (const auto& c : StatAdmittedContents(box.contents)) {  // blacklist only
             auto* armo = ResolveArmo(c);
             if (!armo) {
                 continue;

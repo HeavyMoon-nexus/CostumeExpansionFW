@@ -293,6 +293,22 @@ namespace CostumeFW
         bool a_log = true);
     bool IsContentAdmissible(const std::string& a_id, std::string* a_why = nullptr,
         bool a_log = true);
+
+    // The STAT admission filter: the blacklist / capture policy, and nothing
+    // else. Deliberately NOT the filter the visual path uses - that one also
+    // resolves the content's ARMA, which picks the addon for the PLAYER's race
+    // and the content's effective sex. That is the right question for deciding
+    // what to DRAW on the player, and the wrong one for deciding what a piece
+    // of equipment is worth:
+    //   - a published costume's stats were judged against the player's race
+    //     while an NPC of another race wore it (review 2026-09-11 F11)
+    //   - changing a content's gender mode moved the admitted set with nothing
+    //     restatting the token or rebuilding the ability (N1)
+    //   - a published costume's stats skipped admission entirely, so a
+    //     blacklisted item still counted (F04)
+    // Stats follow the fact that the item is held; the model follows whether it
+    // can be drawn. Caller holds StoreLock.
+    std::vector<std::string> StatAdmittedContents(const std::vector<std::string>& a_ids);
     // The semantic capture gate: IsContentAdmissible + mesh resolvability
     // (CanResolveContent). Every capture entrance funnels here - MCM (via the
     // CanResolveContent native), SMF QueueCapture*, preset Validate, and the

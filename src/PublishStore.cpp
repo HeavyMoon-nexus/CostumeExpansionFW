@@ -127,7 +127,14 @@ namespace CostumeFW
             prior.clear();
             float armor = 0.0f;
             float weight = 0.0f;
-            for (const auto& id : a_snap.contents) {
+            // The admission gate a box's token has had since r3, which this
+            // path never ran: a blacklisted content still counted towards a
+            // published costume's armor, weight and keywords (review
+            // 2026-09-11 F04). StatAdmittedContents is the blacklist / capture
+            // policy only - NOT the model resolution the visual path uses,
+            // which asks about the PLAYER's race even when the wearer is an
+            // NPC of another one (F11).
+            for (const auto& id : StatAdmittedContents(a_snap.contents)) {
                 auto* item = ResolveColonForm<RE::TESObjectARMO>(id);
                 if (!item) continue;
                 // Item-data toggles ride the global per-content settings, so a
