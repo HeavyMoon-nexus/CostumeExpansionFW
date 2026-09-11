@@ -1578,15 +1578,34 @@ namespace CostumeFW::SmfUI
                     ImGui::PopID();
                     continue;
                 }
+                // Recover cannot do anything for an id that does not resolve -
+                // ReturnStoredItem gives up before it looks at storage - so the
+                // button only ever produced "could not be resolved". Say why
+                // instead of offering it.
+                ImGui::BeginDisabled(!row->resolves);
                 if (ImGui::Button("Recover")) {
                     ImGui::OpenPopup("Recover this item?###cfwrec");
                 }
+                ImGui::EndDisabled();
                 // What last happened to it. "lost" is the one that changes what
                 // Recover can do - the original is gone, so it can only mint a
                 // plain copy - and it has to stay visible after the session that
                 // detected it ends, which the banner above does not.
                 ImGui::SameLine();
                 ImGui::TextDisabled("[%s]", e.event.c_str());
+                // Only the cases that CHANGE what the button does get a note. A
+                // recoverable row is normally not in storage - that is what makes
+                // it recoverable - so marking that would tag nearly every row and
+                // say nothing; the confirmation covers it. The two that carry
+                // information are the button being dead, and the rare row whose
+                // original is still there to be handed back intact.
+                if (!row->resolves) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("- plugin not loaded");
+                } else if (row->inStore) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("- original in storage");
+                }
                 ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal("Recover this item?###cfwrec")) {
                     ImGui::TextWrapped("%s", e.name.c_str());
