@@ -121,7 +121,17 @@ namespace CostumeFW
 
     bool PublishBox(int a_boxIndex);
     bool SetPubHidden(int a_slot, bool a_hidden);
-    bool RecallPublished(int a_slot);
+    // Take a published costume's token and ability back off everyone wearing it.
+    //
+    // A wearer CEF cannot resolve right now is KEPT as a pending binding, not
+    // forgotten: nothing scans for a forgotten one again (both DropPubAbility
+    // and SyncNpcAbilities walk the binding list), and the unresolved list is
+    // also what stops UnpublishToBox dissolving a costume somebody still has
+    // (review 2026-09-11 F07).
+    //
+    // a_forgetUnreachable is for the uninstall flow only, where a record that
+    // would ride the next co-save is worse than a forgotten one.
+    bool RecallPublished(int a_slot, bool a_forgetUnreachable = false);
     bool PubHidden(int a_slot);
     bool UnpublishToBox(int a_slot);
     void RefreshPubWearers(int a_slot);

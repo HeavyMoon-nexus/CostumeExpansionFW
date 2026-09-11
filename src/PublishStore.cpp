@@ -875,21 +875,56 @@ namespace CostumeFW
         return true;
     }
 
-    bool RecallPublished(int a_slot)
+    bool RecallPublished(int a_slot, bool a_forgetUnreachable)
     {
         auto* token = PubTokenArmo(a_slot);
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!token || !player) return false;
+        // Only forget a binding we actually finished with. Recall used to take
+        // the token and the ability off whoever it could resolve and then erase
+        // every binding for the slot regardless - so an actor CEF could not
+        // reach kept the ability, and the record that anyone still had it was
+        // gone with the binding. Nothing scans for it again after that: both
+        // DropPubAbility and SyncNpcAbilities walk g_bindings (review
+        // 2026-09-11 F07).
+        std::vector<RE::FormID> settled;
         for (auto& binding : g_bindings) {
             if (binding.pubSlot != a_slot) continue;
-            if (auto* actor = ResolveActor(binding)) {
-                RemoveActorToken(actor, token->GetFormID());
-                if (const auto* snap = PubBySlot(a_slot)) ApplyManualAbility(actor, *snap, false);
-                actor->RemoveItem(token, 99, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
-            }
+            auto* actor = ResolveActor(binding);
+            if (!actor) continue;  // keep the binding; try again when they load
+            RemoveActorToken(actor, token->GetFormID());
+            if (const auto* snap = PubBySlot(a_slot)) ApplyManualAbility(actor, *snap, false);
+            actor->RemoveItem(token, 99, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
+            settled.push_back(binding.actorFormID);
         }
-        std::erase_if(g_bindings, [a_slot](const PubBinding& b) { return b.pubSlot == a_slot; });
-        std::erase_if(g_unresolved, [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
+        std::erase_if(g_bindings, [a_slot, &settled](const PubBinding& b) {
+            return b.pubSlot == a_slot &&
+                std::find(settled.begin(), settled.end(), b.actorFormID) != settled.end();
+        });
+        if (a_forgetUnreachable) {
+            // Uninstall: the user is about to delete the mod, so a record that
+            // would ride the next co-save is worse than a forgotten one.
+            std::erase_if(g_bindings, [a_slot](const PubBinding& b) { return b.pubSlot == a_slot; });
+            std::erase_if(g_unresolved, [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
+            SKSE::log::info("publish: recalled slot {} from {} actor(s); unreachable ones forgotten "
+                            "(uninstall)", a_slot, settled.size());
+            return true;
+        }
+        // g_unresolved is deliberately left alone. Those are wearers this save
+        // restored but could not resolve at all, and clearing them here removed
+        // the very thing that stops UnpublishToBox dissolving a costume somebody
+        // is still wearing.
+        std::size_t pending = 0;
+        for (const auto& b : g_bindings) pending += (b.pubSlot == a_slot) ? 1 : 0;
+        for (const auto& b : g_unresolved) pending += (b.pubSlot == a_slot) ? 1 : 0;
+        if (pending > 0) {
+            SKSE::log::warn(
+                "publish: recalled slot {} from {} actor(s); {} could not be reached and still "
+                "hold it - they are kept as pending and settled when they load",
+                a_slot, settled.size(), pending);
+        } else {
+            SKSE::log::info("publish: recalled slot {} from {} actor(s)", a_slot, settled.size());
+        }
         return true;
     }
 
@@ -1131,7 +1166,7 @@ namespace CostumeFW
         }
         for (int slot = 0; slot < kPoolSize; ++slot) {
             if (PubBySlot(slot)) {
-                RecallPublished(slot);
+                RecallPublished(slot, true);  // forget wearers we cannot reach
             }
         }
         // Copy first: RemoveNpcPersist erases from g_nprAssignments.
