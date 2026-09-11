@@ -1975,6 +1975,21 @@ namespace CostumeFW
         // Snapshot this save's persist actives BEFORE the registry is wiped -
         // they are co-save state, invisible to the settings JSON.
         const auto actives = ActivePersistIds();
+        // Take every live box ability back off the player before the contents
+        // behind it change - an ability may not be refilled while it is applied
+        // - and mark it stale so ApplyBoxAbilities below refills it from the
+        // RELOADED definitions.
+        //
+        // This used to live in ReevaluateContentAdmissions, the blacklist
+        // caller, so only that one route got it. The SMF / MCM "reload settings
+        // from disk" lever reached here directly, and its boxes kept the effects
+        // they had before the file was re-read: an enchantment removed from the
+        // json went on applying until something unrelated rebuilt the ability
+        // (review 2026-09-11 F05). Same position in the sequence as the
+        // manifest emit, and for the same reason - every reload path gets it.
+        for (const auto& box : g_boxes) {
+            RebuildBoxAbility(box.token);
+        }
         for (const auto& it : ActiveSnapshot()) {
             DetachSkinned(it.id);
         }
@@ -2793,21 +2808,18 @@ namespace CostumeFW
     namespace
     {
         // r4 (re-review P1-2): policy mutation is a main-thread transaction.
-        // Settings were already persisted WITHOUT a manifest. Take every live
-        // box ability back off the player before the contents behind it change
-        // (an ability may not be refilled while it is applied), then use
-        // the established reload primitive to detach/re-register configured
+        // Settings were already persisted WITHOUT a manifest. Use the
+        // established reload primitive to detach/re-register configured
         // contents and preserve uncataloged M2 persist actives. Only after all
         // derived state is rebuilt do we emit one admitted-only manifest.
         void ReevaluateContentAdmissions()
         {
-            for (const auto& box : g_boxes) {
-                RebuildBoxAbility(box.token);  // take it off the player, mark it stale
-            }
             // X-MAN: the manifest emit moved INTO ReloadSettingsFromDisk's tail
             // (same position in the sequence, but now every reload path gets it).
             // Writing it again here would double the per-operation manifest
-            // updates that §F5 checks.
+            // updates that §F5 checks. The box-ability drop that used to sit
+            // here moved for the same reason (F05) - it is at the head of
+            // ReloadSettingsFromDisk now, so the direct reload lever gets it too.
             ReloadSettingsFromDisk();
         }
     }
@@ -4216,9 +4228,16 @@ namespace CostumeFW
         // Abilities whose box is gone (deleted, or its token handed to a publish
         // slot): the form is kept for reuse, but it must not stay on the player.
         for (auto& [token, ability] : g_boxSpells) {
-            if (FindBox(token) < 0 && DropAbilityFrom(player, ability, "box:" + token)) {
+            if (FindBox(token) >= 0) {
+                continue;
+            }
+            if (DropAbilityFrom(player, ability, "box:" + token)) {
                 SKSE::log::info("boxes: dropped the stat ability of freed box '{}'", token);
             }
+            // Its contents no longer exist. Marking it stale here is what stops
+            // the OLD effect list being granted if this token is later handed to
+            // a new box that never went through RebuildBoxAbility itself.
+            ability.dirty = true;
         }
         // Persist class: no token, always shown while CEF is enabled -> grant its
         // aggregate enchant ability whenever CEF is on. Built from THIS SAVE'S
