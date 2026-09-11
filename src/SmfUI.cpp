@@ -47,6 +47,7 @@ namespace CostumeFW::SmfUI
     {
         // --- render-thread-only UI state (tasks never touch these) -----------
         std::string s_selContent;         // content id shown in the detail block
+        std::string s_selPubContent;      // same, for a PUBLISHED costume's contents
         char s_invFilter[64] = "";        // "+ Add from inventory" name filter
         char s_catFilter[64] = "";        // Persist page: catalog row filter (X-SCROLL)
         char s_recFilter[64] = "";        // Recovery page: row filter (X-SCROLL)
@@ -1396,8 +1397,34 @@ namespace CostumeFW::SmfUI
                 }
 
                 ImGui::SeparatorText("Contents");
-                for (const auto& id : snap.contents)
-                    ImGui::BulletText("%s", ItemDisplayName(id).c_str());
+                // The item-data toggles reach a published costume too. Publish
+                // reads them live on every stat rebuild - that has been true
+                // since the publish path was folded into the shared filler - but
+                // the only place to SET them was the Boxes page, and publishing
+                // deletes the box. A published costume's pieces were therefore
+                // unreachable: you could not turn an enchantment, weight or
+                // armor contribution off once the outfit was published, and the
+                // code path that applies such a change had no way to fire
+                // (2026-09-11, found while writing the test for it).
+                for (const auto& id : snap.contents) {
+                    const bool sel = (id == s_selPubContent);
+                    if (ImGui::Selectable(
+                            std::format("{}##pubsel{}{}", ItemDisplayName(id), snap.pubSlot, id)
+                                .c_str(),
+                            sel)) {
+                        s_selPubContent = sel ? std::string{} : id;
+                    }
+                }
+                if (!s_selPubContent.empty() &&
+                    std::find(snap.contents.begin(), snap.contents.end(), s_selPubContent) !=
+                        snap.contents.end()) {
+                    ImGui::Indent();
+                    // Appearance is frozen at publish time, so only the
+                    // item-data channels are offered here - not the hide/gender/
+                    // morph controls a box content gets.
+                    RenderItemDataFold(s_selPubContent, std::format("pub{}", snap.pubSlot), true);
+                    ImGui::Unindent();
+                }
 
                 ImGui::SeparatorText("Tracked holders");
                 bool anyBinding = false;
