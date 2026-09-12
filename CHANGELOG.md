@@ -161,6 +161,31 @@ Menu Framework needs
   applied has nothing left to take it back off. This is the instrument the rest
   of the work above was measured with.
 
+- **A console command that says what a costume did to your character.**
+  `cef av` lists every actor value CEF's passthrough has moved, with the
+  permanent and temporary parts separate, and `cef av base` then `cef av diff`
+  reports what changed across an equip. `cef av <name>` still answers about one
+  value if you know which you want.
+
+  It exists because `getavinfo` does not. That answers one value at a time and
+  only if you have the console spelling right, which is `fireresist` rather than
+  `resistfire` and `magickaratemult` rather than `magickarate`. Get it wrong and
+  you read a clean zero off a value that was never the problem. `cef av` reports
+  the whole actor, so a bonus landing somewhere you did not expect shows up on
+  its own.
+
+  Click an NPC in the console first and it reads that NPC instead. That is the
+  case `player.` cannot express, and the one that matters for a published
+  costume: you can cancel a leftover bonus on yourself by hand, an NPC cannot.
+
+  It only reads, and everything it prints also goes to the log.
+
+- **The last two runs' logs are kept.** `CostumeExpansionFW.prev1.log` and
+  `.prev2.log`, next to the current one. The log was truncated at every launch,
+  and a Skyrim problem is routinely found one launch too late - you restart to
+  look at it and the evidence is gone. If you are asked for a log after a crash,
+  the one worth attaching is usually `prev1`.
+
 ### Notes
 
 - **Bonuses left over from earlier sessions are not removed by this release.**
