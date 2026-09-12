@@ -1,5 +1,182 @@
 # Changelog
 
+## v1.6.2.3 (unreleased)
+
+Boxes and published costumes have been handing out the wrong numbers. This
+release is ten separate reasons why, found by tracing a +180 Fortify Health on
+a character who was wearing nothing at all. Three of them were what that bonus
+was actually made of; the other seven turned up in the sweep that followed, and
+they are here because it is not worth asking you to update again for each one.
+
+**This is still an MCM release**, and everything in 1.6.2.1 and 1.6.2.2 is here
+too. From 1.6.3 the MCM is removed and SKSE Menu Framework becomes the UI.
+Nothing you have set up changes: boxes, presets and settings live in
+`CEF_settings.json` and in your save, not in the menu. If you are on VR, SKSE
+Menu Framework needs
+[ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
+
+### Fixed
+
+- **Two pieces with the same enchantment were worth one.** A box holding two
+  Imperial cuirasses, a heavy one and a light one carrying the same +40 Fortify
+  Health, gave you +40. CEF built both effects and the engine made a single
+  active effect out of them, because two entirely identical effects inside one
+  spell collapse into one.
+
+  This was measured rather than assumed. Two pieces with Resist Fire 40 behave
+  the same way, so it is not about Health. Two effects of the same kind with
+  different magnitudes both apply - Fortify Alteration 22 and 20 read 42. Two
+  identical effects in *different* spells both apply. So what the engine keys
+  on is the whole content of an effect, within one spell.
+
+  CEF now folds its effect list before the engine sees it, grouping by
+  everything that key looks at, and emits one effect per group. For the
+  fortify-style effects a group's magnitudes are added, which is what wearing
+  those pieces for real gives you. For anything else, such as waterbreathing,
+  invisibility, or an effect driven by a script, a magnitude is not an amount
+  you can add up, so the largest is kept and the log names what was folded.
+
+  "+100 always" and "+100 while sneaking" are not the same effect, and both
+  still apply. That is what the condition half of the grouping is for, and the
+  conditions are compared field by field rather than as raw bytes, because two
+  identical conditions do not look identical in memory.
+
+- **Stat passthrough asked whether your character could wear the piece.**
+  Deciding what a captured piece was worth went through the same filter that
+  decides what to draw on you, and that filter resolves the piece's armor addon
+  for the player's race and the piece's gender setting. That is the right
+  question for drawing and the wrong one for stats. Three faults came out of
+  the one filter. A published costume worn by an NPC of another race was judged
+  against the *player's* race, because every wearer shares one ability.
+  Changing a piece's gender setting moved which pieces counted, but nothing
+  restatted the token or rebuilt the ability, so armor, weight and keywords
+  kept the old answer until something unrelated rebuilt them. And a published
+  costume's token armor and weight ran no admission check at all, so a
+  blacklisted piece still counted there while a box would have refused it.
+
+  Worth knowing, because it changes a number you may have seen: a piece whose
+  mesh does not resolve for your race or sex now contributes its stats. It
+  could not be drawn before and it still cannot be drawn; what changed is that
+  it is no longer silently worth nothing. The "contributes no stats" warning no
+  longer lists that as a reason.
+
+- **One working piece decided whether the others got their stats back.** A
+  published costume carries a frozen copy of what each piece was worth when it
+  was published, as a last resort for pieces whose live sources have gone. That
+  fallback was tested against the whole costume instead of against each piece.
+  If piece A was unreachable and piece B still worked, B's one effect was
+  enough to call the result non-empty and A got nothing back. Blacklist B, or
+  let B's plugin go, and A reappeared - a piece's stats depended on an
+  unrelated piece's state.
+
+  The rebuild also ran its own loop rather than the shared one, so it skipped
+  the blacklist check and re-created every effect flat, with no conditions and
+  no duration. A "while sneaking" bonus published into a costume applied while
+  standing. The frozen copy is now consulted per piece, only after the live
+  sources have come up empty for that one piece, and the log says when it was
+  used and that the copy is flat.
+
+- **A load left published costumes holding the previous save's stats.** Loading
+  a game takes the box and persist abilities back off the player and marks them
+  stale, so this save's boxes decide what gets granted. Published costumes were
+  not in that pass. Their contents are shared by all your characters, so it
+  looks as though there is nothing to re-derive - but what a piece is worth is
+  read from *this* save's hidden storage, which decides whether it contributes
+  its stored original's enchantment with the conditions that gate it, or a flat
+  snapshot that has neither. A different character has different storage, so
+  the same costume is worth something different there, and the old build was
+  simply carried over.
+
+- **Turning off a published costume's armor left the rating on its token.** An
+  item-data toggle on a published costume marked the ability stale and stopped
+  there. That covers the enchantment, which lives in the ability. Armor and
+  weight do not - they are written onto the token's own fields, so nothing
+  rewrote them, and the number the UI now said was off stayed on the token
+  until some unrelated reload happened to restamp it.
+
+- **Reloading settings left every box ability holding its old effects.** An
+  enchantment you removed from a box in `CEF_settings.json` went on applying
+  after a reload, until something unrelated rebuilt that ability and it stopped
+  on its own. The step that makes a reload take existed, but it sat in one
+  caller rather than in the reload itself, so only the blacklist route got it -
+  the "reload settings from disk" button did not. A freed box's ability is also
+  marked stale now, so a token later handed to a new box cannot grant the
+  previous box's enchantments.
+
+- **A box deleted from the settings file left its stats on the token.** A box's
+  armor, weight, class, name and keywords are written onto the token itself,
+  and the only record that CEF put them there was the box definition. A reload
+  replaces the definitions wholesale, so a box you deleted from the file took
+  its own undo with it, and its token carried the old numbers and keywords for
+  the rest of the session. Published costumes had the same hole on their own
+  token pool. Both now clear anything that no current box or costume claims.
+  This was only ever a session-long problem, since token fields go back to the
+  plugin's values on restart, but a session is long enough to be confusing.
+
+- **Recalling a costume forgot the wearers it never reached.** Recall took the
+  token and the ability off every wearer it could resolve, then erased the
+  records for the whole slot, including the ones it had just skipped. An NPC
+  who was not loaded kept the ability, and the only record that anyone still
+  had it went with the erase. Nothing looks again after that, so an unrecorded
+  wearer is one CEF can never take it back off. Recall also cleared the list
+  that unpublishing checks before dissolving a costume, so it removed that
+  guard without doing the work the guard stands for. Wearers that were not
+  reached now stay pending, settle when the actor loads, and the log says how
+  many are outstanding. Uninstalling still forgets them, which is deliberate -
+  there you are about to delete the mod, and a record riding the next co-save
+  is the worse outcome.
+
+- **A box with token distribution turned off still granted its enchantments.**
+  Turning "Distribute token" off zeroes the box's armor, weight and keywords on
+  the token. The ability ignored the switch and only asked whether the token
+  was worn, so equipping that token by any other means handed out the
+  enchantments while the other three channels read zero.
+
+- **Two NPC paths granted abilities the master switch had turned off.** Putting
+  a published costume on an NPC from the UI passed an unconditional yes to the
+  ability sync, so doing it with CEF off granted spells that nothing else would
+  have granted and nothing was going to take back. Separately, the pass that
+  runs at load checked the master switch but not the NPC add-on, and a co-save
+  restores publish bindings whether the add-on is there or not, so without the
+  add-on that pass still granted from them.
+
+### Added
+
+- **A published costume's pieces get their item-data toggles back.** The
+  per-piece enchantment, weight and armor switches were only reachable on the
+  Boxes page, and publishing deletes the box. So once a costume was published
+  there was no way to turn one piece's enchantment off, and no way for the code
+  that applies such a change to ever run. The published-costume block on the
+  NPC page now lists its contents as selectable rows with the same Item data
+  fold a box content gets. Appearance is frozen at publish time, so only the
+  item-data switches are offered, not the hide, gender or morph controls.
+
+- **The log says when an ability is granted, removed, or refuses to come off.**
+  Nothing recorded whether an ability actually landed on an actor. The
+  "(N effect(s))" line describes the spell that was just built, not the grant
+  that follows it. Every grant and removal now names its holder and the actor
+  it touched, and a removal that did not take is warned about rather than
+  assumed. That last one is exactly the shape that strands a fortify: CEF
+  believes the ability is off, nothing re-runs the removal, and the bonus it
+  applied has nothing left to take it back off. This is the instrument the rest
+  of the work above was measured with.
+
+### Notes
+
+- **Bonuses left over from earlier sessions are not removed by this release.**
+  The ten fixes above stop new ones being created. They do not clean up what is
+  already in your save, and there is a separate defect still open that puts
+  them there: quit Skyrim while wearing a box, and the bonus that box was
+  giving you can stay on your character permanently. It happens once per
+  session, every session, and it adds up. The +180 this release started from
+  was three sessions of one box.
+
+  You can check with `player.getavinfo health`, or whatever the box fortifies,
+  and read the number next to `Perm` with every box taken off. If it is not
+  zero, `player.modav health -<that number>` cancels it. An NPC wearing a
+  published costume collects the same leftovers and they are much harder to
+  notice. Taking your boxes off before you quit avoids it.
+
 ## v1.6.2.2 (2026-09-11)
 
 Finishes what 1.6.2 started. The orphan sweep hands back items storage is
