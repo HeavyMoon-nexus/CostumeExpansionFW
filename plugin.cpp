@@ -504,6 +504,11 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
             fileStamp);
     }
 
+    // Say the previous runs are still on disk, because the one time you need
+    // them is after you have already restarted and found this log truncated.
+    SKSE::log::info("log: the two previous runs are kept next to this file as "
+                    "CostumeExpansionFW.prev1.log and .prev2.log");
+
     // Runtime banner: one NG DLL serves SE/AE/VR, so community reports must show
     // WHICH engine loaded us. VR additionally requires the VR Address Library
     // (Data/SKSE/Plugins/version-1-4-15-0.csv) - REL fails hard without it.
