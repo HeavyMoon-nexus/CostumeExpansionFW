@@ -3,6 +3,7 @@
 #include "SkinRebind.h"
 #include "PublishStore.h"
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
+#include "AvDiag.h"
 
 #include "RE/S/Script.h"
 #include "RE/C/Console.h"
@@ -118,7 +119,7 @@ namespace CostumeFW
         if (afterPrefix.empty()) {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag");
+                  "slottest | invisdiag | av");
             return;
         }
 
@@ -565,10 +566,17 @@ namespace CostumeFW
                                 : "[CEF] recover: id does not resolve to an item");
                 }
             });
+        } else if (sub == "av") {
+            // Read-only. Acts on the console's selected reference when it is an
+            // actor - so an NPC's stranded modifiers are reachable by clicking
+            // them - and on the player otherwise.
+            auto* targetActor = a_target ? a_target->As<RE::Actor>() : nullptr;
+            SKSE::GetTaskInterface()->AddTask(
+                [targetActor, rest] { AvReport(targetActor, rest); });
         } else {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag");
+                  "slottest | invisdiag | av");
         }
     }
 }
