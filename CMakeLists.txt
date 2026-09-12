@@ -71,6 +71,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/NifCarrierBridge.cpp
     src/SmfUI.cpp
     src/AvDiag.cpp
+    src/AbilityPool.cpp
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json nifcarrier_core)

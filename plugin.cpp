@@ -4,6 +4,7 @@
 // Real seed/config/co-save driven flow continues to replace this test driver.
 
 #include "logger.h"
+#include "AbilityPool.h"  // SPIKE: fixed-ability-pool experiment (design §7.1)
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Commands.h"
@@ -346,6 +347,13 @@ namespace
                     "WORN jewelry is refused (stripping it crashes MARA - M4-J)");
             }
             LogEnvironmentCensus();
+            // SPIKE. Synchronous, right here, on purpose: the whole point of the
+            // experiment is that the pool abilities carry their effects BEFORE
+            // any save can be read. Handing this to AddTask would put it after
+            // the load and measure the wrong thing. Reads one small json and
+            // touches only CEFTest_AbilityPool.esp - it is a no-op for anyone
+            // who does not have that test plugin enabled.
+            CostumeFW::pool::HydrateAtDataLoaded();
             Load3DHook::Install();
             // VR: PlayerCharacter's vtable inserts virtuals before Update, so the
             // SE/AE index 0xAD would land on the wrong function - VR keeps the

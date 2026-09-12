@@ -4,6 +4,7 @@
 #include "PublishStore.h"
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "AvDiag.h"
+#include "AbilityPool.h"  // SPIKE: the fixed-ability-pool experiment (§7.1)
 
 #include "RE/S/Script.h"
 #include "RE/C/Console.h"
@@ -119,7 +120,7 @@ namespace CostumeFW
         if (afterPrefix.empty()) {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av");
+                  "slottest | invisdiag | av | pool");
             return;
         }
 
@@ -573,10 +574,14 @@ namespace CostumeFW
             auto* targetActor = a_target ? a_target->As<RE::Actor>() : nullptr;
             SKSE::GetTaskInterface()->AddTask(
                 [targetActor, rest] { AvReport(targetActor, rest); });
+        } else if (sub == "pool") {
+            // SPIKE. Touches nothing but CEFTest_AbilityPool.esp.
+            SKSE::GetTaskInterface()->AddTask(
+                [a_target, rest] { pool::PoolCommand(a_target, rest); });
         } else {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av");
+                  "slottest | invisdiag | av | pool");
         }
     }
 }
