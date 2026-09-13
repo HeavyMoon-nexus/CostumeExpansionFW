@@ -58,9 +58,9 @@ namespace CostumeFW::abilities
         // use the form kind (WornHasKeyword, GetEquipped, IsSpellTarget,
         // GetGlobalValue...). A pointer is a different address next launch, so
         // storing the raw bits would restore a condition pointing at whatever
-        // happens to live there. BoxStore's SameConditionData compares these as
-        // raw bits and says so; that is right for COMPARING and wrong for
-        // saving, which is why none of this reuses it.
+        // happens to live there. The effect-folding code this replaced compared
+        // them as raw bits and said so in its own comment; that is right for
+        // COMPARING and wrong for saving, which is why none of it was reused.
         struct RecipeParam
         {
             bool isForm{ false };

@@ -3364,154 +3364,10 @@ namespace CostumeFW
             return player && player->GetWornArmor(form) != nullptr;
         }
 
-        // --- Stat passthrough ---
-        // Armor + weight are written DIRECTLY onto the token ARMO's own fields
-        // (armorRating / weight) - the token IS worn equipment, so the engine
-        // applies them naturally (real armor scaling, real carried weight). This
-        // is correct where a CarryWeight magic effect was NOT (the AV is max
-        // capacity, not the item's own weight). See SetTokenStats below.
-        // Enchantment effects are still aggregated into a runtime ability spell.
-        //
-        // ONE ability form per holder, created once and MUTATED IN PLACE. It must
-        // never be re-created per rebuild: AddSpell writes the form's id into the
-        // SAVE (the player's added-spell list), and a load that does NOT restart
-        // the process - dying and reloading, a quickload - resolves that id back
-        // to the still-live form. The old code dropped its pointer at load
-        // (ClearBoxSpellCache) on the assumption that the save drops the ability
-        // too; it does not, so the restored ability stayed on the player with
-        // nobody tracking it and the rebuilt one was granted ON TOP: one more
-        // "Costume Stats" per reload, unremovable even with CEF off, its fortify
-        // baked into the actor value (v1.6.1.1, Nexus report 2026-09-07).
-        // A stable form makes the restored ability the one we already own, so
-        // HasSpell / RemoveSpell keep working across in-process loads. Forms are
-        // process-lived; a fresh process leaves the save's dangling 0xFF id
-        // unresolved, which is the only case the old clear was written for - and
-        // that case needs no clearing at all, since the map starts empty.
-        struct StatAbility
-        {
-            RE::SpellItem* spell{ nullptr };  // created once; id stable for the process
-            bool hasEffects{ false };         // false = built, but nothing to grant
-            bool dirty{ true };               // effects need a refill before granting
-        };
-        // token -> synthesized enchant ability. Process-global; entries are kept
-        // (not erased) so a token always maps to the same form.
-        std::unordered_map<std::string, StatAbility> g_boxSpells;
-        // The persist class's aggregate enchant ability (persist has no token, so
-        // it's kept separately and granted while CEF is enabled).
-        StatAbility g_persistAbility;
 
-        void AddEffect(RE::SpellItem* a_spell, RE::EffectSetting* a_mgef, float a_magnitude)
-        {
-            if (!a_mgef) {
-                return;
-            }
-            auto* eff = new RE::Effect();
-            eff->baseEffect = a_mgef;
-            eff->effectItem.magnitude = a_magnitude;
-            eff->effectItem.area = 0;
-            eff->effectItem.duration = 0;
-            a_spell->effects.push_back(eff);
-        }
 
-        // Deep-copy a condition chain so the synthesized spell OWNS its list.
-        // ~TESCondition deletes the whole chain, so SHARING nodes with the
-        // source form would hand the engine a double-free if it ever tears a
-        // dynamic spell down. Node data is plain (function index, params,
-        // flags); the param FORM pointers stay shared - forms outlive spells.
-        void CopyConditions(RE::TESCondition& a_dst, const RE::TESCondition& a_src)
-        {
-            RE::TESConditionItem** tail = &a_dst.head;
-            for (auto* cur = a_src.head; cur; cur = cur->next) {
-                auto* node = new RE::TESConditionItem();
-                node->data = cur->data;
-                node->next = nullptr;
-                *tail = node;
-                tail = &node->next;
-            }
-        }
 
-        // Full-fidelity copy of a live enchantment effect: magnitude AND the
-        // conditions/duration that gate it, so a conditional enchant ("while
-        // sneaking ...") does not become always-on on the token (2game.info
-        // follow-up 2026-08-20). The engine re-evaluates conditions on constant
-        // ability effects the same way it does on worn-enchant effects (the
-        // vanilla conditional-ability pattern), with the same subject. Flat
-        // AddEffect remains for snapshot-only contents.
-        void AddEffectFull(RE::SpellItem* a_spell, const RE::Effect* a_src)
-        {
-            if (!a_src || !a_src->baseEffect) {
-                return;
-            }
-            auto* eff = new RE::Effect();
-            eff->baseEffect = a_src->baseEffect;
-            eff->effectItem = a_src->effectItem;  // magnitude / area / duration
-            eff->cost = a_src->cost;
-            CopyConditions(eff->conditions, a_src->conditions);
-            a_spell->effects.push_back(eff);
-        }
 
-        // --- Identical-effect collapse (2026-09-11) -----------------------------
-        // The engine creates ONE active effect for two effects that are entirely
-        // identical inside the same spell. Measured: a box holding two Imperial
-        // cuirasses - different items sharing one enchantment form, +40 Fortify
-        // Health each - was worth +40, not +80, and CEF had built both. Two
-        // pieces with Resist Fire 40 behave the same way, so it is not specific
-        // to one effect. Two effects of the same MGEF with DIFFERENT magnitudes
-        // (Fortify Alteration 22 and 20) both apply, and so do two identical
-        // ones in DIFFERENT spells - so the collapse is keyed on the effect's
-        // whole content, within one spell.
-        //
-        // The answer is to never hand the engine two identical effects: fold
-        // each group into ONE, carrying what N pieces are worth together. That
-        // is also what wearing those N pieces for real would give you.
-        bool SameConditionData(const RE::CONDITION_ITEM_DATA& a_lhs,
-            const RE::CONDITION_ITEM_DATA& a_rhs)
-        {
-            // NOT a memcmp: comparisonValue is a union and the struct carries
-            // two padding words, so identical conditions differ byte-wise.
-            if (a_lhs.flags.isOR != a_rhs.flags.isOR ||
-                a_lhs.flags.usesAliases != a_rhs.flags.usesAliases ||
-                a_lhs.flags.global != a_rhs.flags.global ||
-                a_lhs.flags.usePackData != a_rhs.flags.usePackData ||
-                a_lhs.flags.swapTarget != a_rhs.flags.swapTarget ||
-                a_lhs.flags.opCode != a_rhs.flags.opCode) {
-                return false;
-            }
-            if (a_lhs.object.get() != a_rhs.object.get() || a_lhs.dataID != a_rhs.dataID ||
-                a_lhs.runOnRef != a_rhs.runOnRef) {
-                return false;
-            }
-            // params are function-dependent and may not be pointers at all, so
-            // they are compared as raw bits and never dereferenced. Same bits
-            // means same parameter; different bits that happen to mean the same
-            // thing simply do not merge, which is the safe direction.
-            if (a_lhs.functionData.function.get() != a_rhs.functionData.function.get() ||
-                a_lhs.functionData.params[0] != a_rhs.functionData.params[0] ||
-                a_lhs.functionData.params[1] != a_rhs.functionData.params[1]) {
-                return false;
-            }
-            // The union follows the global flag, equal on both sides by now.
-            return a_lhs.flags.global ? a_lhs.comparisonValue.g == a_rhs.comparisonValue.g
-                                      : a_lhs.comparisonValue.f == a_rhs.comparisonValue.f;
-        }
-
-        bool SameConditionChain(const RE::TESCondition* a_lhs, const RE::TESCondition* a_rhs)
-        {
-            if (!a_lhs && !a_rhs) {
-                return true;
-            }
-            if (!a_lhs || !a_rhs) {
-                return false;
-            }
-            const RE::TESConditionItem* l = a_lhs->head;
-            const RE::TESConditionItem* r = a_rhs->head;
-            for (; l && r; l = l->next, r = r->next) {
-                if (!SameConditionData(l->data, r->data)) {
-                    return false;
-                }
-            }
-            return l == nullptr && r == nullptr;  // same length as well as content
-        }
 
         // Whether N copies of this effect add up, the way N real pieces carrying
         // it would. Value-modifier archetypes do. For anything else - waterbreathing,
@@ -3532,21 +3388,6 @@ namespace CostumeFW
             return (nm && *nm) ? EnsureUtf8(std::string(nm)) + " [" + id + "]" : id;
         }
 
-        bool MagnitudeIsAdditive(const RE::EffectSetting* a_mgef)
-        {
-            if (!a_mgef) {
-                return false;
-            }
-            using A = RE::EffectSetting::Archetype;
-            switch (a_mgef->data.archetype) {
-            case A::kValueModifier:
-            case A::kPeakValueModifier:
-            case A::kDualValueModifier:
-                return true;
-            default:
-                return false;
-            }
-        }
 
         // True when a flat capture snapshot is just a copy of the base
         // enchantment - same MGEFs, same magnitudes - rather than a player
@@ -3654,15 +3495,6 @@ namespace CostumeFW
             return form ? form->As<RE::EffectSetting>() : nullptr;
         }
 
-        // Retire the current effect list. The Effect objects are deliberately NOT
-        // freed: RemoveSpell only FLAGS an active effect, whose teardown runs on a
-        // later magic-target update and still reads its Effect*. Freeing here would
-        // hand that pass dangling memory. They leak - a few dozen bytes per rebuild,
-        // strictly less than the pre-1.6.1.1 code, which leaked the whole spell.
-        void RetireSynthEffects(RE::SpellItem* a_spell)
-        {
-            a_spell->effects.clear();
-        }
 
         // Per effect: either a LIVE source Effect (full fidelity: magnitude
         // + duration + conditions) or a flat {mgef, magnitude} snapshot.
@@ -3760,169 +3592,8 @@ namespace CostumeFW
             return effs;
         }
 
-        // (Re)fill a synthesized ability with a content list's enchantment effects.
-        // Per content, uses the CAPTURED snapshot (covers player/instance
-        // enchantments) if present, else the base ARMO's own enchantment. Returns
-        // false if none of the contents contributes an effect (the form stays, with
-        // an empty list, and simply is not granted).
-        //
-        // The caller MUST have removed the ability from every actor first: the
-        // engine holds the Effect pointers of a live ability, so rewriting the list
-        // under it would leave dangling active effects.
-        bool FillEnchantSpell(RE::SpellItem* a_spell, const std::vector<std::string>& a_contents,
-            const char* a_name, const FrozenEnchantLookup& a_frozen = {})
-        {
-            // Per effect: either a LIVE source Effect (full fidelity: magnitude
-            // + duration + conditions) or a flat {mgef, magnitude} snapshot.
-            std::vector<PendingEffect> effs;
-            // r3 (re-review P1-2): single ability choke - box AND persist
-            // ability synthesis skip quarantined contents here.
-            const auto admitted = StatAdmittedContents(a_contents);
-            // Name what got dropped. This gate is the one place a content can
-            // stop contributing stats with nothing said anywhere - the reason
-            // "my enchantment stopped applying" had no log line to look at
-            // (test run 2026-09-10). A drop here is normal after a plugin is
-            // disabled or blacklisted; it is the SILENCE that is the problem.
-            if (admitted.size() != a_contents.size()) {
-                for (const auto& c : a_contents) {
-                    if (std::find(admitted.begin(), admitted.end(), c) == admitted.end()) {
-                        SKSE::log::warn(
-                            "boxes: '{}' contributes no stats to '{}' - not admitted right now "
-                            "(unresolved plugin, or blocked by the capture blacklist)",
-                            c, a_name);
-                    }
-                }
-            }
-            for (const auto& c : admitted) {
-                auto part = ContentEffects(c, a_frozen, a_name);
-                effs.insert(effs.end(), std::make_move_iterator(part.begin()),
-                    std::make_move_iterator(part.end()));
-            }
-            RetireSynthEffects(a_spell);
-            if (effs.empty()) {
-                SKSE::log::debug("boxes: synth enchant ability '{}' - no effects", a_name);
-                return false;
-            }
-            // Fold effects the engine would collapse into one. The group key is
-            // everything the collapse looks at: the MGEF, the area, the duration
-            // and the condition chain. One output per group, so the list handed
-            // to the engine cannot contain a duplicate pair by construction -
-            // which is why this needs no second pass to check for collisions.
-            struct EffectGroup
-            {
-                RE::EffectSetting* mgef{ nullptr };
-                float magnitude{ 0.0f };
-                std::uint32_t area{ 0 };
-                std::uint32_t duration{ 0 };
-                const RE::TESCondition* conditions{ nullptr };
-                const RE::Effect* rep{ nullptr };  // full-fidelity source, if any
-                int count{ 0 };
-                bool additive{ false };
-            };
-            const auto conditionsOf = [](const RE::Effect* a_live) -> const RE::TESCondition* {
-                return (a_live && a_live->conditions.head) ? &a_live->conditions : nullptr;
-            };
-            std::vector<EffectGroup> groups;
-            for (const auto& pe : effs) {
-                RE::EffectSetting* mgef = pe.live ? pe.live->baseEffect : pe.mgef;
-                if (!mgef) {
-                    continue;
-                }
-                const float mag = pe.live ? pe.live->effectItem.magnitude : pe.magnitude;
-                const std::uint32_t area = pe.live ? pe.live->effectItem.area : 0u;
-                const std::uint32_t duration = pe.live ? pe.live->effectItem.duration : 0u;
-                const RE::TESCondition* cond = conditionsOf(pe.live);
-                EffectGroup* hit = nullptr;
-                for (auto& g : groups) {
-                    if (g.mgef == mgef && g.area == area && g.duration == duration &&
-                        SameConditionChain(g.conditions, cond)) {
-                        hit = &g;
-                        break;
-                    }
-                }
-                if (!hit) {
-                    groups.push_back({ mgef, mag, area, duration, cond, pe.live, 1,
-                        MagnitudeIsAdditive(mgef) });
-                    continue;
-                }
-                ++hit->count;
-                hit->magnitude = hit->additive ? hit->magnitude + mag
-                                               : std::max(hit->magnitude, mag);
-                if (!hit->rep && pe.live) {
-                    hit->rep = pe.live;  // prefer a full-fidelity representative
-                }
-            }
-            int conditioned = 0;
-            int merged = 0;
-            int unsupported = 0;
-            for (const auto& g : groups) {
-                if (g.rep) {
-                    auto* eff = new RE::Effect();
-                    eff->baseEffect = g.rep->baseEffect;
-                    eff->effectItem = g.rep->effectItem;  // area / duration
-                    eff->effectItem.magnitude = g.magnitude;
-                    eff->cost = g.rep->cost;
-                    CopyConditions(eff->conditions, g.rep->conditions);
-                    a_spell->effects.push_back(eff);
-                    if (g.rep->conditions.head) {
-                        ++conditioned;
-                    }
-                } else {
-                    AddEffect(a_spell, g.mgef, g.magnitude);
-                }
-                if (g.count > 1) {
-                    ++merged;
-                    unsupported += g.additive ? 0 : 1;
-                    SKSE::log::info("boxes: '{}' folded {} identical '{}' into one -> {:.1f} ({})",
-                        a_name, g.count, MgefLabel(g.mgef), g.magnitude,
-                        g.additive ? "summed" : "largest kept - magnitude does not add for this "
-                                                "archetype");
-                }
-            }
-            SKSE::log::debug(
-                "boxes: synth enchant ability '{}' (src {} -> out {} effect(s), {} conditioned, "
-                "{} group(s) folded, {} unsupported)",
-                a_name, effs.size(), a_spell->effects.size(), conditioned, merged, unsupported);
-            return true;
-        }
 
-        // The one ability form for a holder, created on first use. Never freed and
-        // never replaced: a factory form is registered in the form table, so
-        // deleting it would leave a dangling id a save could still resolve.
-        RE::SpellItem* EnsureSynthSpell(StatAbility& a_ability, const char* a_name)
-        {
-            if (a_ability.spell) {
-                return a_ability.spell;
-            }
-            auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
-            auto* spell = factory ? factory->Create() : nullptr;
-            if (!spell) {
-                SKSE::log::error("boxes: SpellItem factory create failed");
-                return nullptr;
-            }
-            spell->data.spellType = RE::MagicSystem::SpellType::kAbility;
-            spell->data.castingType = RE::MagicSystem::CastingType::kConstantEffect;
-            spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
-            spell->data.costOverride = 0;
-            spell->fullName = a_name;
-            a_ability.spell = spell;
-            a_ability.dirty = true;
-            SKSE::log::info("boxes: synth ability form '{}' = {:08X}", a_name, spell->GetFormID());
-            return spell;
-        }
 
-        // Take the ability off an actor if it holds it. Refilling effects under a
-        // live ability is what leaves orphaned actor-value modifiers behind, so
-        // every mutation path goes through here first.
-        bool DropAbilityFrom(RE::Actor* a_actor, const StatAbility& a_ability,
-            std::string_view a_key = "box")
-        {
-            if (!a_actor || !a_ability.spell || !a_actor->HasSpell(a_ability.spell)) {
-                return false;
-            }
-            RevokeAbility(a_actor, a_ability.spell, a_key);
-            return true;
-        }
 
         // --- Keyword passthrough -------------------------------------------------
         // Aggregate the contents' keywords onto the worn token so consumer mods
@@ -4093,19 +3764,6 @@ namespace CostumeFW
             }
         }
 
-        // Bring a holder's ability up to date with its contents: create the form
-        // once, and refill its effects only while it is on nobody.
-        void EnsureAbilityBuilt(RE::Actor* a_player, StatAbility& a_ability,
-            const std::vector<std::string>& a_contents, const char* a_name,
-            std::string_view a_key)
-        {
-            if (!EnsureSynthSpell(a_ability, a_name) || !a_ability.dirty) {
-                return;
-            }
-            DropAbilityFrom(a_player, a_ability, a_key);
-            a_ability.hasEffects = FillEnchantSpell(a_ability.spell, a_contents, a_name);
-            a_ability.dirty = false;
-        }
     }
 
     std::vector<WornItem> AbilityCatalog()
@@ -4362,24 +4020,6 @@ namespace CostumeFW
             }
         }
 
-        // Converge one synthesized ability: refill it if its contents changed,
-        // then grant or take it back. Unlike SyncSpell this ALWAYS runs the
-        // removal branch, so an ability can never be stranded on the player -
-        // not by a load, not by the master switch, not by an emptied box.
-        void SyncAbility(RE::Actor* a_player, StatAbility& a_ability,
-            const std::vector<std::string>& a_contents, const char* a_name, bool a_want,
-            std::string_view a_key)
-        {
-            EnsureAbilityBuilt(a_player, a_ability, a_contents, a_name, a_key);
-            if (!a_ability.spell) {
-                return;
-            }
-            if (a_want && a_ability.hasEffects) {
-                GrantAbility(a_player, a_ability.spell, a_key);
-            } else {
-                RevokeAbility(a_player, a_ability.spell, a_key);
-            }
-        }
     }
 
     void ApplyBoxAbilities()
@@ -4488,13 +4128,6 @@ namespace CostumeFW
         }
     }
 
-    bool FillContentEnchantSpell(RE::SpellItem* a_spell,
-        const std::vector<std::string>& a_contents, const char* a_name,
-        const FrozenEnchantLookup& a_frozen)
-    {
-        StoreLock lk;  // reads g_contentEnchants / g_statEnchantOff
-        return a_spell ? FillEnchantSpell(a_spell, a_contents, a_name, a_frozen) : false;
-    }
 
     void RebuildPersistAbility()
     {

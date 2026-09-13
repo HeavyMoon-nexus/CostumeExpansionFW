@@ -546,9 +546,6 @@ namespace CostumeFW
     using FrozenEnchantLookup =
         std::function<std::vector<EnchantEffectInfo>(const std::string& a_contentId)>;
 
-    bool FillContentEnchantSpell(RE::SpellItem* a_spell,
-        const std::vector<std::string>& a_contents, const char* a_name,
-        const FrozenEnchantLookup& a_frozen = {});
 
     // Custody history: one row per content id CEF has ever taken custody of, with
     // what last happened to it. The id is the only handle on a piece whose box
