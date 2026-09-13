@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Costume Expansion FW - FOMOD installer.
+
+  NOTE ON THE STRUCTURE: requiredInstallFiles is deliberately EMPTY. Files
+  listed there are installed no matter what the user picks, and the first step
+  can end the install ("stop, I still have box tokens on") - so the core files
+  have to be conditional on that answer too, or a cancelled install would still
+  drop a working mod on top of the one the user was told to fix first.
+
+  WHAT THE FIRST STEP CANNOT DO: a FOMOD cannot read a save, cannot tell which
+  version of CEF was installed before (CostumeFW.esp is in every version), and
+  cannot see what the player is wearing. The question is asked, not detected.
+  The real check is in the DLL, which knows the co-save version and what is
+  equipped, and refuses to start the new enchantment mechanism until the tokens
+  are off. This step exists to catch people BEFORE they break anything; the DLL
+  catches everyone, whatever they installed with.
+-->
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+
+  <moduleName>Costume Expansion FW</moduleName>
+
+  <!-- Empty on purpose - see the note above. -->
+  <requiredInstallFiles />
+
+  <installSteps order="Explicit">
+
+    <!-- ============================================================ -->
+    <installStep name="Before you install">
+      <optionalFileGroups order="Explicit">
+
+        <group name="Are you updating from 1.6.2 or earlier?" type="SelectExactlyOne">
+          <plugins order="Explicit">
+
+            <plugin name="Fresh install, or my box tokens are already off">
+              <description>Carry on with the install.
+
+1.6.3 changes how a costume's enchantments are given to you. The old way used a spell form that only existed while the game was running, so a bonus applied before you quit could not be taken back off on the next launch, and it stayed on your character. 1.6.3 fixes that, but it cannot clean up a bonus that is already stuck.
+
+If you are on a fresh install, or you have taken your box tokens off and saved, there is nothing to do here.</description>
+              <conditionFlags>
+                <flag name="proceed">yes</flag>
+              </conditionFlags>
+              <typeDescriptor><type name="Recommended" /></typeDescriptor>
+            </plugin>
+
+            <plugin name="Stop - I still have box tokens equipped">
+              <description>Nothing will be installed.
+
+Do this first, in the version you have now:
+
+1. Take off every box token.
+2. Check your health, magicka, stamina and resistances are back where they should be. The console command "cef av" lists anything CEF is still adding.
+3. Save.
+4. Run this installer again.
+
+If a bonus is still there after the tokens are off, it is already stuck and 1.6.3 will not remove it. "player.getavinfo health" tells you the number, and "player.modav health -N" takes it back off by hand. Do that before you update, so you are not guessing later which mod put it there.</description>
+              <conditionFlags>
+                <flag name="proceed">no</flag>
+              </conditionFlags>
+              <typeDescriptor><type name="Optional" /></typeDescriptor>
+            </plugin>
+
+          </plugins>
+        </group>
+
+        <group name="If you are updating" type="SelectAll">
+          <plugins order="Explicit">
+            <plugin name="Remove the old NPC add-on and VR patch first">
+              <description>Up to 1.6.2 the NPC add-on and the VR build were separate downloads. They are both in this installer now.
+
+If you still have them as separate mods, remove them before you install this. The VR patch matters most: it holds a DLL at the same path as this one, and depending on where it sits in your mod order it can put the old DLL back over the new one. Nothing in the installer can detect that for you, because the file has the same name either way.
+
+Your boxes and settings are not in those mods and are not affected.</description>
+              <typeDescriptor><type name="Required" /></typeDescriptor>
+            </plugin>
+          </plugins>
+        </group>
+
+      </optionalFileGroups>
+    </installStep>
+
+    <!-- ============================================================ -->
+    <installStep name="Runtime">
+      <visible>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+        </dependencies>
+      </visible>
+      <optionalFileGroups order="Explicit">
+        <group name="Which Skyrim are you on?" type="SelectExactlyOne">
+          <plugins order="Explicit">
+
+            <plugin name="Skyrim Special Edition / Anniversary Edition">
+              <description>The normal build. Pick this unless you play in VR.</description>
+              <conditionFlags><flag name="runtime">se</flag></conditionFlags>
+              <typeDescriptor><type name="Recommended" /></typeDescriptor>
+            </plugin>
+
+            <plugin name="Skyrim VR">
+              <description>The VR build of the DLL.
+
+The plugin, meshes, scripts and KID files are identical across SE, AE and VR - only the DLL differs, so this replaces it rather than adding anything.
+
+VR also needs SkyrimVRESL, and the in-game menu needs ImGui VR Helper. SkyUI VR on its own will not give you a CEF menu once the MCM is gone in 1.6.4.</description>
+              <conditionFlags><flag name="runtime">vr</flag></conditionFlags>
+              <typeDescriptor><type name="Optional" /></typeDescriptor>
+            </plugin>
+
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+
+    <!-- ============================================================ -->
+    <installStep name="Add-ons">
+      <visible>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+        </dependencies>
+      </visible>
+      <optionalFileGroups order="Explicit">
+        <group name="Optional" type="SelectAny">
+          <plugins order="Explicit">
+
+            <plugin name="NPC distribution">
+              <description>Lets you publish a costume to NPCs and keep it on them across saves. Adds CostumeFW_NPC.esp and the carrier meshes the published and NPC-persist slots need.
+
+Leave it off if you only dress your own character.</description>
+              <conditionFlags><flag name="npc">yes</flag></conditionFlags>
+              <typeDescriptor><type name="Optional" /></typeDescriptor>
+            </plugin>
+
+            <plugin name="Enchantment passthrough (adds one full plugin)">
+              <description>Keeps a costume's enchantments, armor rating and tempering working while the costume is in a box. This is on by default in CEF's settings, and from 1.6.3 it needs CostumeFW_Abilities.esp.
+
+That plugin is NOT light (ESL). It takes one of your 254 load-order slots. It has to be a full plugin: the abilities live at fixed form IDs that your saves point at, and the light form-ID range is too small to hold enough of them.
+
+If you would rather not spend the slot, untick this. CEF will then turn enchantment passthrough off and say so, rather than falling back to the old method - the old method is what put stuck bonuses on people's characters, and quietly using it again would be worse than not doing it at all. Your costumes still look exactly the same; they just stop carrying stats.
+
+Once you have used this, leave it installed. Your saves refer to those form IDs, and removing the plugin strands whatever was applied.</description>
+              <conditionFlags><flag name="ench">yes</flag></conditionFlags>
+              <typeDescriptor>
+                <dependencyType>
+                  <defaultType name="Recommended" />
+                  <patterns>
+                    <!--
+                      Already installed means abilities have been handed out and
+                      saves point at them. Unticking here would strand every one
+                      of them, so it is not offered as a choice any more.
+                    -->
+                    <pattern>
+                      <dependencies operator="And">
+                        <fileDependency file="CostumeFW_Abilities.esp" state="Active" />
+                      </dependencies>
+                      <type name="Required" />
+                    </pattern>
+                  </patterns>
+                </dependencyType>
+              </typeDescriptor>
+            </plugin>
+
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+
+  </installSteps>
+
+  <!-- ============================================================ -->
+  <conditionalFileInstalls>
+    <patterns>
+
+      <pattern>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="no" />
+        </dependencies>
+        <files>
+          <file source="canceled\install_canceled.txt"
+                destination="install_canceled.txt" priority="0" />
+        </files>
+      </pattern>
+
+      <pattern>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+        </dependencies>
+        <files>
+          <folder source="core" destination="" priority="0" />
+        </files>
+      </pattern>
+
+      <pattern>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+          <flagDependency flag="runtime" value="se" />
+        </dependencies>
+        <files>
+          <folder source="dll_se" destination="" priority="1" />
+        </files>
+      </pattern>
+
+      <pattern>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+          <flagDependency flag="runtime" value="vr" />
+        </dependencies>
+        <files>
+          <folder source="dll_vr" destination="" priority="1" />
+        </files>
+      </pattern>
+
+      <pattern>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+          <flagDependency flag="npc" value="yes" />
+        </dependencies>
+        <files>
+          <folder source="npc" destination="" priority="2" />
+        </files>
+      </pattern>
+
+      <pattern>
+        <dependencies operator="And">
+          <flagDependency flag="proceed" value="yes" />
+          <flagDependency flag="ench" value="yes" />
+        </dependencies>
+        <files>
+          <folder source="ench" destination="" priority="2" />
+        </files>
+      </pattern>
+
+    </patterns>
+  </conditionalFileInstalls>
+
+</config>

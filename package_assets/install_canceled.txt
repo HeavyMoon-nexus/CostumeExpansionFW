@@ -1,0 +1,50 @@
+Costume Expansion FW - nothing was installed
+============================================
+
+You told the installer you still have box tokens equipped, so it stopped. This
+folder is empty apart from this file. Your existing install, if you have one,
+was not touched.
+
+Why it asks
+-----------
+
+Up to 1.6.2, a costume's enchantments were handed to you through a spell that
+only existed while the game was running. Quit the game and that spell is gone,
+but the bonus it applied is written into your save, and there is nothing left
+for Skyrim to take it back off with. It stays on your character, and doing it
+again adds to it.
+
+1.6.3 replaces that mechanism so it cannot happen again. What it cannot do is
+clean up a bonus that is already stuck, because it has no way to tell its own
+leftovers from a bonus another mod applied on purpose.
+
+What to do
+----------
+
+Go back to the version you have now and:
+
+1. Take off every box token.
+2. Check your stats are back where they belong. The console command
+
+       cef av
+
+   lists every actor value something is currently modifying. Anything CEF is
+   still adding will be in that list.
+3. Save.
+4. Run this installer again and pick the first option.
+
+If a bonus is still there after the tokens are off, it is already stuck.
+1.6.3 will not remove it. To take it off by hand:
+
+       player.getavinfo health
+       player.modav health -250
+
+using whatever number the first command shows as the modifier. Do this before
+you update, while you still know which bonus came from where. Afterwards you
+would be guessing.
+
+If you changed your mind
+------------------------
+
+If you meant to install and picked the wrong option, just run the installer
+again. Nothing here needs undoing.

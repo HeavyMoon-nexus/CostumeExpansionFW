@@ -391,8 +391,25 @@ namespace CostumeFW::pool
                 return;
             }
             player->AddSpell(spell);
+            // Verify, the same way `off` does. Logging "granted" straight after
+            // AddSpell records that the call was MADE, not that it took - and a
+            // measurement built on that is worth nothing. The off path had this
+            // check from the start and the on path did not, which is the same
+            // asymmetry the design document has to avoid (§5.4).
+            if (!player->HasSpell(spell)) {
+                Print(std::format("[CEF pool] slot {} did NOT go on - AddSpell was refused", slot));
+                SKSE::log::error("pool: AddSpell did NOT take slot {} ({:08X})", slot,
+                    spell->GetFormID());
+                return;
+            }
             SKSE::log::info("pool: granted slot {} ({:08X}), {} effect(s)", slot,
                 spell->GetFormID(), spell->effects.size());
+            // A constant-effect ability lands a few seconds AFTER AddSpell, so an
+            // immediate `cef av` reads a clean zero and looks like a failure. That
+            // cost a false read on 2026-09-13.
+            Print(std::format("[CEF pool] slot {} granted - wait ~10s before `cef av`, the "
+                              "effect does not land instantly",
+                slot));
             Print(Describe(slot));
             return;
         }
