@@ -79,6 +79,23 @@ namespace CostumeFW::abilities
     // from `cef abilities alloc` so the registry can be exercised on its own.
     [[nodiscard]] RE::SpellItem* AbilityFor(const std::string& a_contentId);
 
-    // `cef abilities [state | list | alloc <id> | usage | verify]`
+    // A save written before the pool existed has just been loaded, and these
+    // contents were active in it. Main thread.
+    //
+    // There is nothing to PREVENT here, which is worth being clear about. The
+    // engine restores the actor's active effects before any CEF code runs, and
+    // a 1.6.2 save's effects point at runtime spells that no longer exist - so
+    // they are dropped, and whatever they applied is already part of the
+    // character by the time this is called. A form ID cannot be reserved in
+    // advance, so there is no way to catch them. The only release that could
+    // have stopped it is the one that wrote the save.
+    //
+    // So this reports. It names the numbers that are most likely stuck, in the
+    // actor-value spellings the console wants, and leaves the fixing to the
+    // player: CEF cannot tell its own leftovers from a bonus another mod
+    // applied on purpose, so it does not subtract anything by itself.
+    void ReportLegacySave(const std::vector<std::string>& a_contents);
+
+    // `cef abilities [state | list | alloc <id> | usage | legacy]`
     void AbilitiesCommand(const std::string& a_args);
 }

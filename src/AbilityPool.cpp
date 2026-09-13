@@ -1,13 +1,17 @@
 #include "AbilityPool.h"
 
 #include "AtomicWrite.h"
+#include "AvDiag.h"  // AvConsoleName - the legacy report must name actor values
 #include "ConsoleOut.h"
 #include "FormId.h"
 
 #include "RE/E/Effect.h"
 #include "RE/E/EffectSetting.h"
 #include "RE/E/EnchantmentItem.h"
+#include "RE/A/ActorValues.h"
+#include "RE/M/Misc.h"  // DebugNotification
 #include "RE/S/SpellItem.h"
+#include "RE/T/TESObjectARMO.h"
 #include "RE/T/TESCondition.h"
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESForm.h"
@@ -94,6 +98,14 @@ namespace CostumeFW::abilities
         std::unordered_map<std::string, int> g_byContent;  // content -> live slot
         State g_state = State::Uninitialized;
         std::string g_why;
+        std::string g_legacyReport;  // set when a pre-1.6.3 save is loaded
+
+        // A content id names an armor; the enchantment is whatever that armor
+        // carries. The old mechanism preferred a captured snapshot or the worn
+        // instance's enchantment over the base form's, so this is an
+        // approximation - which is why the legacy report says "estimates" and
+        // sends the reader to `cef av` for the real numbers.
+        const RE::EnchantmentItem* EnchantmentOf(const std::string& a_contentId);
 
         void Disable(std::string a_why)
         {
@@ -333,6 +345,21 @@ namespace CostumeFW::abilities
                 return false;
             }
             return true;
+        }
+
+        const RE::EnchantmentItem* EnchantmentOf(const std::string& a_contentId)
+        {
+            auto* form = LookupColon(a_contentId);
+            if (!form) {
+                return nullptr;
+            }
+            if (auto* asEnch = form->As<RE::EnchantmentItem>()) {
+                return asEnch;
+            }
+            if (auto* armo = form->As<RE::TESObjectARMO>()) {
+                return armo->formEnchanting;
+            }
+            return nullptr;
         }
 
         // ---------------------------------------------------------------
@@ -772,15 +799,7 @@ namespace CostumeFW::abilities
             return (s && !s->invalid) ? PoolSpell(it->second) : nullptr;
         }
 
-        auto* form = LookupColon(a_contentId);
-        const RE::EnchantmentItem* ench = nullptr;
-        if (form) {
-            if (auto* asEnch = form->As<RE::EnchantmentItem>()) {
-                ench = asEnch;
-            } else if (auto* armo = form->As<RE::TESObjectARMO>()) {
-                ench = armo->formEnchanting;
-            }
-        }
+        const auto* ench = EnchantmentOf(a_contentId);
         std::vector<RecipeEffect> effects;
         std::string why;
         if (!BuildRecipe(ench, effects, why)) {
@@ -830,6 +849,128 @@ namespace CostumeFW::abilities
         return PoolSpell(slot);
     }
 
+    void ReportLegacySave(const std::vector<std::string>& a_contents)
+    {
+        if (a_contents.empty()) {
+            return;  // nothing was worn, so nothing was applied, so nothing stuck
+        }
+
+        // Sum what the old mechanism would have been applying. Unconditional
+        // effects are separated from conditional ones because only the first
+        // group is certain: a conditional effect applied only if its condition
+        // happened to be true at the moment of the save, and saying "+40 frost
+        // resist is stuck" to someone who saved standing up would send them
+        // subtracting a number they never had.
+        std::unordered_map<std::uint32_t, float> certain;
+        std::unordered_map<std::uint32_t, float> possible;
+        int unreadable = 0;
+        int noStats = 0;
+
+        for (const auto& id : a_contents) {
+            std::vector<RecipeEffect> effects;
+            std::string why;
+            if (!BuildRecipe(EnchantmentOf(id), effects, why)) {
+                ++noStats;
+                continue;
+            }
+            for (const auto& e : effects) {
+                auto* form = LookupColon(e.mgef);
+                auto* mgef = form ? form->As<RE::EffectSetting>() : nullptr;
+                if (!mgef) {
+                    ++unreadable;
+                    continue;
+                }
+                const auto av = static_cast<std::uint32_t>(mgef->data.primaryAV);
+                if (av >= static_cast<std::uint32_t>(RE::ActorValue::kTotal)) {
+                    // A script effect or anything else that is not a plain
+                    // number on an actor value. Counted, not guessed at.
+                    ++unreadable;
+                    continue;
+                }
+                (e.conditions.empty() ? certain : possible)[av] += e.magnitude;
+            }
+        }
+
+        std::string out =
+            "[CEF] This save was made before 1.6.3.\n"
+            "\n"
+            "Up to 1.6.2 a costume's enchantment bonuses were applied through a spell that\n"
+            "only existed while the game was running. Loading the save in a new process\n"
+            "could not take them back off again, so whatever was applied when you saved is\n"
+            "now part of your character. 1.6.3 stops this happening from here on; it cannot\n"
+            "undo what is already there.\n";
+
+        const auto lines = [](const std::unordered_map<std::uint32_t, float>& a_map) {
+            std::vector<std::pair<std::string, float>> rows;
+            rows.reserve(a_map.size());
+            for (const auto& [av, total] : a_map) {
+                if (total != 0.0f) {
+                    rows.emplace_back(AvConsoleName(av), total);
+                }
+            }
+            std::sort(rows.begin(), rows.end(),
+                [](const auto& l, const auto& r) { return l.first < r.first; });
+            return rows;
+        };
+
+        const auto certainRows = lines(certain);
+        const auto possibleRows = lines(possible);
+
+        if (!certainRows.empty()) {
+            out += std::format("\nMost likely stuck, from the {} item(s) that were active:\n",
+                a_contents.size());
+            for (const auto& [name, total] : certainRows) {
+                out += std::format("  {:<22} {:+g}\n", name, total);
+            }
+        }
+        if (!possibleRows.empty()) {
+            out += "\nAnd these, but only if their condition was true at the moment you saved\n"
+                   "(sneaking, blocking, in combat and so on):\n";
+            for (const auto& [name, total] : possibleRows) {
+                out += std::format("  {:<22} {:+g}\n", name, total);
+            }
+        }
+        if (certainRows.empty() && possibleRows.empty()) {
+            out += std::format(
+                "\nNone of the {} active item(s) passed a plain numeric bonus through, so there\n"
+                "is probably nothing stuck. Check anyway.\n",
+                a_contents.size());
+        }
+        if (unreadable) {
+            out += std::format("\n{} effect(s) are not a simple number on an actor value and are\n"
+                               "not counted above.\n",
+                unreadable);
+        }
+
+        out +=
+            "\nThese are estimates from what the items hold now. Check the real numbers:\n"
+            "  cef av\n"
+            "and take one off with, for example:\n";
+        const auto& sample = !certainRows.empty() ? certainRows : possibleRows;
+        if (!sample.empty()) {
+            out += std::format("  player.modav {} -{:g}\n", sample.front().first,
+                sample.front().second);
+        } else {
+            out += "  player.modav health -250\n";
+        }
+        out +=
+            "\nCEF will not do that for you. It cannot tell its own leftovers from a bonus\n"
+            "another mod applied on purpose, and subtracting the wrong one is worse than\n"
+            "leaving it.\n";
+
+        g_legacyReport = out;
+
+        // The console is not open at load, so the log gets the whole thing and
+        // the screen gets one line that says where to find it.
+        std::istringstream iss(out);
+        std::string line;
+        while (std::getline(iss, line)) {
+            SKSE::log::warn("legacy: {}", line);
+        }
+        RE::DebugNotification("CEF: this save predates 1.6.3 - open the console and type: "
+                              "cef abilities legacy");
+    }
+
     void AbilitiesCommand(const std::string& a_args)
     {
         std::istringstream iss(a_args);
@@ -869,6 +1010,20 @@ namespace CostumeFW::abilities
             return;
         }
 
+        if (sub == "legacy") {
+            if (g_legacyReport.empty()) {
+                Print("[CEF abilities] this save was not made before 1.6.3 (or nothing was "
+                      "active in it) - nothing to report");
+                return;
+            }
+            std::istringstream rep(g_legacyReport);
+            std::string line;
+            while (std::getline(rep, line)) {
+                Print(line);
+            }
+            return;
+        }
+
         if (sub == "alloc") {
             std::string id;
             std::getline(iss, id);
@@ -885,6 +1040,6 @@ namespace CostumeFW::abilities
             return;
         }
 
-        Print("[CEF abilities] state | list | alloc <id> | usage");
+        Print("[CEF abilities] state | list | alloc <id> | usage | legacy");
     }
 }

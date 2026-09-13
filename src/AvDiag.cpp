@@ -209,4 +209,6 @@ namespace CostumeFW
             Emit("  (nothing modified - every actor value is at its base)");
         }
     }
+
+    std::string AvConsoleName(std::uint32_t a_index) { return AvName(a_index); }
 }

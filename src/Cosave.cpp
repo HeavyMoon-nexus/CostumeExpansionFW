@@ -2,6 +2,7 @@
 #include "BoxStore.h"
 #include "SkinRebind.h"
 #include "PublishStore.h"
+#include "AbilityPool.h"
 
 #include <cstdint>
 #include <string>
@@ -13,7 +14,15 @@ namespace CostumeFW
     {
         constexpr std::uint32_t kSignature = 'CEFW';   // co-save unique id
         constexpr std::uint32_t kRecordActive = 'ACTV';
-        constexpr std::uint32_t kVersion = 2;          // v2 adds the box token id
+        // v2 adds the box token id.
+        // v3 is the fixed ability pool. Nothing in the RECORD changed for v3 -
+        // the bump exists so a save can be told apart from one written by 1.6.2
+        // or earlier, because those carry enchantment bonuses applied through
+        // runtime spells that no longer exist and can no longer be removed. See
+        // abilities::ReportLegacySave: there is nothing to prevent by then, only
+        // something to tell the player about.
+        constexpr std::uint32_t kVersion = 3;
+        constexpr std::uint32_t kVersionAbilityPool = 3;
         // P2 (SMF): the hidden holding container's FormID, so an SMF-only session
         // can capture/return custody items without the MCM ever opening (the MCM
         // handoff becomes legacy adoption). Runtime refs are save-local - always
@@ -148,6 +157,7 @@ namespace CostumeFW
         void LoadCallback(SKSE::SerializationInterface* a_intfc)
         {
             g_unresolvedActives.clear();  // ROOT H: rebuilt from this load's failures
+            std::vector<std::string> legacyActive;
             std::uint32_t type = 0;
             std::uint32_t version = 0;
             std::uint32_t length = 0;
@@ -261,6 +271,9 @@ namespace CostumeFW
                     SKSE::log::error("cosave: corrupt record (count={}) - record skipped", count);
                     continue;
                 }
+                // Everything that was active in a PRE-POOL save, so the player
+                // can be told which bonuses are now stuck on them.
+                const bool prePool = version < kVersionAbilityPool;
                 for (std::uint32_t i = 0; i < count; ++i) {
                     std::string id;
                     std::string tokenId;
@@ -268,6 +281,13 @@ namespace CostumeFW
                         (version >= 2 && !ReadStringChecked(a_intfc, tokenId))) {
                         SKSE::log::error("cosave: corrupt record at item {}/{} - rest skipped", i, count);
                         break;
+                    }
+                    // Box contents AND persist contents. Persist has no token,
+                    // but its stats rode an ability of its own and stranded the
+                    // same way, so leaving it out would under-report exactly the
+                    // items a long-running character has been carrying longest.
+                    if (prePool) {
+                        legacyActive.push_back(id);
                     }
                     const bool ok = tokenId.empty() ? RegisterArmaById(id)
                                                      : RegisterBoxById(id, tokenId);
@@ -288,10 +308,13 @@ namespace CostumeFW
             // carrier manifest's persist fragment in line with THIS save's active
             // set (M2, CEF_STATE_SCOPE.md §3/§5 - a character switch changes the
             // set; the compare-skip keeps same-character reloads free).
-            SKSE::GetTaskInterface()->AddTask([] {
+            SKSE::GetTaskInterface()->AddTask([legacyActive = std::move(legacyActive)] {
                 Reconcile();
                 SyncPersistManifest();
                 ReapplyNpcBindings();
+                // After the reconcile, so the report is not competing with the
+                // load for the notification area.
+                abilities::ReportLegacySave(legacyActive);
             });
         }
 

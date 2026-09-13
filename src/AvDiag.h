@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace RE
@@ -30,4 +31,11 @@ namespace CostumeFW
     // otherwise the player - so an NPC's stranded modifiers are reachable by
     // clicking them, which is the one case `player.` cannot express.
     void AvReport(RE::Actor* a_actor, const std::string& a_arg);
+
+    // The console spelling of an actor value ("fireresist", "magickaratemult"),
+    // or "av<n>" when the engine has no name for it. Shared so a message that
+    // tells someone to type `player.modav <name> -250` uses the SAME name
+    // `cef av` printed - the whole reason `cef av` exists is that guessing the
+    // spelling reads a clean zero off the wrong actor value.
+    [[nodiscard]] std::string AvConsoleName(std::uint32_t a_index);
 }
