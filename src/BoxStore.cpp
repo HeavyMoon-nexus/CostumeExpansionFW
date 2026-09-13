@@ -4398,6 +4398,22 @@ namespace CostumeFW
             return false;
         }
         if (a_wear) {
+            // "Distribute token" off means the token is TAKEN OFF the player and
+            // its stats zeroed, and a box in that state pays no enchantments
+            // through (review 2026-09-11 N2). This function then added the token
+            // back and equipped it anyway - so CEF put a token on and refused to
+            // honour it, from two checkboxes in the same row of the same panel.
+            // Wearing is a request to use the box, and you cannot wear what you
+            // were not given: pressing Wear turns distribution on rather than
+            // resurrecting a parked token behind the switch's back. N2 still
+            // holds for the case it was written for - a token worn by some means
+            // that is not CEF, which ApplyBoxAbilities warns about and drops.
+            if (const int idx = FindBox(a_token); idx >= 0 && !g_boxes[idx].enabled) {
+                SKSE::log::info("boxes: '{}' is being worn, so its token distribution is turned "
+                                "back ON - a box cannot be worn with its token withheld",
+                    a_token);
+                SetBoxEnabled(a_token, true);  // json + token stats, before the equip
+            }
             const auto counts = player->GetInventoryCounts();
             const auto it = counts.find(obj);
             if (it == counts.end() || it->second <= 0) {
