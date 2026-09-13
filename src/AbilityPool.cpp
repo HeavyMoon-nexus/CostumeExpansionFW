@@ -793,16 +793,31 @@ namespace CostumeFW::abilities
                     kPoolPlugin);
                 SKSE::log::info("abilities: {}", g_why);
             } else {
-                // The dangerous half of 5.9. Saves already point at abilities in
-                // a plugin that is no longer there, and pretending the feature
-                // is merely "off" would let those saves keep loading while the
-                // modifiers they applied can never be taken back off.
+                // The dangerous half of 5.9, and the only state where SAVING is
+                // what does the damage. The forms are GONE, so the engine drops
+                // the active effects that named them without calling Finish()
+                // and the modifiers are already stranded the moment the save is
+                // up. The save on disk is still fine: it holds the references,
+                // and they resolve again as soon as the plugin is back. Save
+                // now and the numbers are written into the actor with nothing
+                // left anywhere to say what produced them.
+                //
+                // So the instruction is "do not save", not "put it back before
+                // loading" - this message can only be shown AFTER a save loads,
+                // which made the old wording advice nobody could still act on.
+                // It also has to say what the file IS: someone updating from
+                // 1.6.2 has never seen its name (test read-through 2026-09-14).
                 Disable(std::format(
-                    "{} is MISSING but {} has already handed out abilities. Your saves refer to "
-                    "forms in that plugin. Put it back - re-run the installer with enchantment "
-                    "passthrough ticked - before loading a save, or the bonuses it applied "
-                    "cannot be removed.",
-                    kPoolPlugin, kRegistryPath));
+                    "{0} is not loaded. It carries the enchantments your costumes pass through, "
+                    "and this save was made with it.\n\n"
+                    "Loading without it has already left those bonuses stuck on your character, "
+                    "and there is nothing left to say where they came from.\n\n"
+                    "DO NOT SAVE. Quit to desktop, turn {0} back on, and load this save again. "
+                    "The bonuses come off by themselves once it is there.\n\n"
+                    "Save while it is missing and the numbers are baked into that save for good.\n\n"
+                    "({0} is new in 1.6.3. Re-run the CEF installer and tick the enchantment "
+                    "option to get it back.)",
+                    kPoolPlugin));
             }
             return;
         }
