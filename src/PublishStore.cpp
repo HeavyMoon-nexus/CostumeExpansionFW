@@ -183,12 +183,32 @@ namespace CostumeFW
                     else RevokeAbility(a_actor, spell, manualKey);
                 }
             }
-            // Pool abilities are NOT converged here. SyncToActor converges the
-            // whole pool for an actor, so an actor must be converged exactly
-            // once per pass with everything it draws from - and an actor can
-            // wear more than one published costume. The caller groups by actor
-            // and does it; this only handles the manual ESP spell, which is
-            // per-costume and stacks on its own.
+            // The PLAYER is converged by ApplyBoxAbilities, which folds worn
+            // costumes in with their boxes and persist set.
+            if (a_actor == RE::PlayerCharacter::GetSingleton()) return;
+
+            // Converge from EVERY costume this actor wears, not just this one.
+            // SyncToActor converges the whole pool for an actor, so a set built
+            // from one binding would revoke the others - which is what made
+            // two published costumes on one wearer worth one. Built this way
+            // the answer does not depend on which binding asked, so the seven
+            // call sites can each call this without knowing about each other.
+            //
+            // a_equip is the caller's intent for THIS costume and overrides the
+            // binding flag in both directions, because some callers flip the
+            // flag before calling and some after.
+            std::vector<std::string> wanted = PublishStatsFor(a_actor);
+            if (a_equip) {
+                wanted.insert(wanted.end(), a_snap.contents.begin(), a_snap.contents.end());
+            } else {
+                std::erase_if(wanted, [&a_snap](const std::string& a_id) {
+                    return std::find(a_snap.contents.begin(), a_snap.contents.end(), a_id) !=
+                        a_snap.contents.end();
+                });
+            }
+            std::sort(wanted.begin(), wanted.end());
+            wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+            abilities::SyncToActor(a_actor, StatAdmittedContents(wanted));
         }
 
         std::shared_ptr<PubSnapshot> SharedBySlot(int a_slot)
@@ -1385,37 +1405,11 @@ namespace CostumeFW
         // still runs the removal branch, which is what a wearer left over
         // from a session that HAD the add-on needs.
         const bool grantable = CefEnabled() && NpcEspLoaded();
-        auto* player = RE::PlayerCharacter::GetSingleton();
-
-        // Group by ACTOR before converging. One NPC can wear two published
-        // costumes, and converging per BINDING would have the second call
-        // revoke what the first granted - the same mistake that left a player
-        // in two costumes getting the benefit of one.
-        std::vector<std::pair<RE::Actor*, std::vector<std::string>>> perActor;
         for (auto& binding : g_bindings) {
             const auto* snap = PubBySlot(binding.pubSlot);
             if (!snap) continue;
-            auto* actor = ResolveActor(binding);
-            if (!actor) continue;
-            ApplyManualAbility(actor, *snap, grantable && binding.wearer);
-            // The player is converged by ApplyBoxAbilities, which folds worn
-            // costumes in with their boxes and persist set.
-            if (actor == player) continue;
-            auto it = std::find_if(perActor.begin(), perActor.end(),
-                [actor](const auto& e) { return e.first == actor; });
-            if (it == perActor.end()) {
-                perActor.push_back({ actor, {} });
-                it = std::prev(perActor.end());
-            }
-            if (grantable && binding.wearer) {
-                const auto admitted = StatAdmittedContents(snap->contents);
-                it->second.insert(it->second.end(), admitted.begin(), admitted.end());
-            }
-        }
-        // Empty sets included, so a wearer can never be left holding an ability
-        // CEF has stopped granting.
-        for (auto& [actor, wanted] : perActor) {
-            abilities::SyncToActor(actor, wanted);
+            if (auto* actor = ResolveActor(binding))
+                ApplyManualAbility(actor, *snap, grantable && binding.wearer);
         }
     }
 
