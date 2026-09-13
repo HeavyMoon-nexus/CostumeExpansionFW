@@ -3666,12 +3666,9 @@ namespace CostumeFW
 
         // Per effect: either a LIVE source Effect (full fidelity: magnitude
         // + duration + conditions) or a flat {mgef, magnitude} snapshot.
-        struct PendingEffect
-        {
-            RE::EffectSetting* mgef{ nullptr };
-            float magnitude{ 0.0f };
-            const RE::Effect* live{ nullptr };
-        };
+        // The pool's type, so a content's effects go straight there with no
+        // conversion step to get wrong.
+        using PendingEffect = abilities::SourceEffect;
 
         // What ONE content's enchantment is worth right now.
         //
@@ -4435,6 +4432,15 @@ namespace CostumeFW
         // follow the same master-switch contract - converge them in the same
         // pass so a master toggle can never strand spells on an NPC (§7.6).
         SyncNpcAbilities();
+    }
+
+    std::vector<abilities::SourceEffect> ContentEffectsFor(const std::string& a_contentId)
+    {
+        StoreLock lk;
+        // No frozen lookup: that fallback belongs to a holder (a published
+        // costume carrying what each piece was worth at publish time), and a
+        // caller asking about one content by id has no holder in hand.
+        return ContentEffects(a_contentId, {}, "pool");
     }
 
     void RebuildBoxAbility(const std::string& a_token)

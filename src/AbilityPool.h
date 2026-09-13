@@ -6,7 +6,8 @@
 
 namespace RE
 {
-    class EnchantmentItem;
+    struct Effect;
+    class EffectSetting;
     class SpellItem;
 }
 
@@ -69,15 +70,33 @@ namespace CostumeFW::abilities
     };
     [[nodiscard]] Usage PoolUsage();
 
-    // The ability that carries a_contentId's enchantment, allocating one and
-    // writing the registry if this content has never had one. Returns nullptr
-    // when not Ready, when the content contributes no effects, when the pool is
-    // full, or when the recipe cannot be serialized faithfully - never a
-    // half-filled spell. Main thread only.
+    // One effect a content contributes: either a LIVE source Effect (full
+    // fidelity - magnitude, area, duration and the conditions that gate it) or
+    // a flat mgef+magnitude snapshot for the case where the original item is
+    // out of reach.
     //
-    // Phase 1 note: nothing calls this from the box path yet. It is reachable
-    // from `cef abilities alloc` so the registry can be exercised on its own.
-    [[nodiscard]] RE::SpellItem* AbilityFor(const std::string& a_contentId);
+    // The pool takes effects rather than a content id and a form to read them
+    // off, and that split is deliberate. Deciding what a content is worth is a
+    // five-source priority that belongs to BoxStore - the stored original's
+    // instance enchantment, the base form when the store verifiably holds the
+    // original, a flat snapshot, the bare base form, a holder's frozen copy -
+    // and getting it wrong drops player enchantments and tempering. The pool's
+    // job starts once that is decided: serialize it, allocate a slot, rebuild
+    // it after a restart. See BoxStore's ContentEffectsFor.
+    struct SourceEffect
+    {
+        RE::EffectSetting* mgef{ nullptr };  // used when live is null
+        float magnitude{ 0.0f };
+        const RE::Effect* live{ nullptr };
+    };
+
+    // The ability carrying these effects for a_contentId, allocating a slot and
+    // writing the registry if this content has never had one. Returns nullptr
+    // when not Ready, when there are no effects, when the pool is full, or when
+    // the recipe cannot be serialized faithfully - never a half-filled spell.
+    // Main thread only.
+    [[nodiscard]] RE::SpellItem* AbilityFor(const std::string& a_contentId,
+        const std::vector<SourceEffect>& a_effects);
 
     // A save written before the pool existed has just been loaded. Call AFTER
     // Reconcile, on the main thread: it reads the active set itself, because

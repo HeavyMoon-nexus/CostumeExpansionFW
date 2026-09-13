@@ -2,6 +2,7 @@
 
 #include "AtomicWrite.h"
 #include "AvDiag.h"  // AvConsoleName - the legacy report must name actor values
+#include "BoxStore.h"    // ContentEffectsFor - what a content is really worth
 #include "SkinRebind.h"  // ActiveSnapshot - what is worn RIGHT NOW
 #include "ConsoleOut.h"
 #include "FormId.h"
@@ -101,12 +102,6 @@ namespace CostumeFW::abilities
         std::string g_why;
         std::string g_legacyReport;  // set when a pre-1.6.3 save is loaded
 
-        // A content id names an armor; the enchantment is whatever that armor
-        // carries. The old mechanism preferred a captured snapshot or the worn
-        // instance's enchantment over the base form's, so this is an
-        // approximation - which is why the legacy report says "estimates" and
-        // sends the reader to `cef av` for the real numbers.
-        const RE::EnchantmentItem* EnchantmentOf(const std::string& a_contentId);
 
         void Disable(std::string a_why)
         {
@@ -223,22 +218,22 @@ namespace CostumeFW::abilities
         // faithfully fails the whole thing, and the caller grants nothing. A
         // half-restored condition is worse than no effect, because the player
         // gets a bonus under rules nobody chose.
-        bool BuildRecipe(const RE::EnchantmentItem* a_ench, std::vector<RecipeEffect>& a_out,
-            std::string& a_why)
+        bool BuildRecipe(const std::vector<SourceEffect>& a_src,
+            std::vector<RecipeEffect>& a_out, std::string& a_why)
         {
             a_out.clear();
-            if (!a_ench) {
-                a_why = "no enchantment";
+            if (a_src.empty()) {
+                a_why = "it contributes no effects";
                 return false;
             }
 
             // Collect every parameter that might be a form, across the whole
-            // enchantment, so the form table is walked once rather than per
-            // condition.
+            // set, so the form table is walked once rather than per condition.
             std::vector<std::uint64_t> candidates;
-            for (const auto* e : a_ench->effects) {
+            for (const auto& se : a_src) {
+                const auto* e = se.live;
                 if (!e) {
-                    continue;
+                    continue;  // a flat snapshot carries no conditions
                 }
                 for (const auto* c = e->conditions.head; c; c = c->next) {
                     for (int i = 0; i < 2; ++i) {
@@ -257,22 +252,24 @@ namespace CostumeFW::abilities
             }
             const auto resolved = ResolveParamForms(candidates);
 
-            for (const auto* e : a_ench->effects) {
-                if (!e || !e->baseEffect) {
+            for (const auto& se : a_src) {
+                const auto* e = se.live;
+                RE::EffectSetting* base = e ? e->baseEffect : se.mgef;
+                if (!base) {
                     continue;
                 }
                 RecipeEffect re;
-                re.mgef = MakeColonId(e->baseEffect);
+                re.mgef = MakeColonId(base);
                 if (re.mgef.find(':') == std::string::npos || re.mgef.back() == ':') {
                     a_why = std::format("magic effect {} has no defining plugin", re.mgef);
                     return false;
                 }
-                re.magnitude = e->effectItem.magnitude;
-                re.area = e->effectItem.area;
-                re.duration = e->effectItem.duration;
-                re.cost = e->cost;
+                re.magnitude = e ? e->effectItem.magnitude : se.magnitude;
+                re.area = e ? e->effectItem.area : 0u;
+                re.duration = e ? e->effectItem.duration : 0u;
+                re.cost = e ? e->cost : 0.0f;
 
-                for (const auto* c = e->conditions.head; c; c = c->next) {
+                for (const auto* c = e ? e->conditions.head : nullptr; c; c = c->next) {
                     // runOnRef is an ObjectRefHandle - a runtime handle into the
                     // reference table, with no stable identity to write down. A
                     // condition that uses one cannot be rebuilt, so the recipe
@@ -342,25 +339,10 @@ namespace CostumeFW::abilities
             }
 
             if (a_out.empty()) {
-                a_why = "the enchantment contributes no effects";
+                a_why = "none of its effects name a magic effect that resolves";
                 return false;
             }
             return true;
-        }
-
-        const RE::EnchantmentItem* EnchantmentOf(const std::string& a_contentId)
-        {
-            auto* form = LookupColon(a_contentId);
-            if (!form) {
-                return nullptr;
-            }
-            if (auto* asEnch = form->As<RE::EnchantmentItem>()) {
-                return asEnch;
-            }
-            if (auto* armo = form->As<RE::TESObjectARMO>()) {
-                return armo->formEnchanting;
-            }
-            return nullptr;
         }
 
         // ---------------------------------------------------------------
@@ -790,7 +772,8 @@ namespace CostumeFW::abilities
         return u;
     }
 
-    RE::SpellItem* AbilityFor(const std::string& a_contentId)
+    RE::SpellItem* AbilityFor(const std::string& a_contentId,
+        const std::vector<SourceEffect>& a_effects)
     {
         if (!Ready()) {
             return nullptr;
@@ -800,10 +783,9 @@ namespace CostumeFW::abilities
             return (s && !s->invalid) ? PoolSpell(it->second) : nullptr;
         }
 
-        const auto* ench = EnchantmentOf(a_contentId);
         std::vector<RecipeEffect> effects;
         std::string why;
-        if (!BuildRecipe(ench, effects, why)) {
+        if (!BuildRecipe(a_effects, effects, why)) {
             // The whole enchantment is refused, not the one effect that failed
             // (design 5.7). Half an enchantment is a different enchantment, and
             // the author did not design that one.
@@ -878,7 +860,7 @@ namespace CostumeFW::abilities
         for (const auto& id : contents) {
             std::vector<RecipeEffect> effects;
             std::string why;
-            if (!BuildRecipe(EnchantmentOf(id), effects, why)) {
+            if (!BuildRecipe(ContentEffectsFor(id), effects, why)) {
                 ++noStats;
                 continue;
             }
@@ -1078,7 +1060,7 @@ namespace CostumeFW::abilities
                 Print("[CEF abilities] usage: cef abilities alloc <FormID:Plugin.esp>");
                 return;
             }
-            auto* spell = AbilityFor(id);
+            auto* spell = AbilityFor(id, ContentEffectsFor(id));
             Print(spell ? std::format("[CEF abilities] {} -> {:08X}", id, spell->GetFormID())
                         : std::format("[CEF abilities] no ability for {} - see the log", id));
             return;

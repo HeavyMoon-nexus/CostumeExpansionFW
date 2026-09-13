@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AbilityPool.h"  // abilities::SourceEffect (the pool seam)
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -677,6 +679,15 @@ namespace CostumeFW
     // returns true when it verifiably does NOT - a removal that does not take
     // is warned about, because that is exactly the shape that strands an
     // actor-value modifier with nobody left to take it back off.
+    // What ONE content's enchantment is worth right now, by the full source
+    // priority (stored original's instance enchantment, the base form when the
+    // store verifiably holds the original, a flat snapshot, the bare base form,
+    // a holder's frozen copy). The ability pool allocates per content and needs
+    // this answer; reading armo->formEnchanting instead drops player
+    // enchantments, tempering and the conditions that gate an effect.
+    // Main thread only. Empty when the content passes no stats through.
+    std::vector<abilities::SourceEffect> ContentEffectsFor(const std::string& a_contentId);
+
     bool GrantAbility(RE::Actor* a_actor, RE::SpellItem* a_spell, std::string_view a_key);
     bool RevokeAbility(RE::Actor* a_actor, RE::SpellItem* a_spell, std::string_view a_key);
 
