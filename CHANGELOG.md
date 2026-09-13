@@ -9,7 +9,9 @@ was actually made of; the other seven turned up in the sweep that followed, and
 they are here because it is not worth asking you to update again for each one.
 
 **This is still an MCM release**, and everything in 1.6.2.1 and 1.6.2.2 is here
-too. From 1.6.3 the MCM is removed and SKSE Menu Framework becomes the UI.
+too. The MCM is still going, but later than those two releases said: it goes in
+1.6.4, not 1.6.3. 1.6.3 rebuilds how enchantment passthrough works, and that is
+enough for one release.
 Nothing you have set up changes: boxes, presets and settings live in
 `CEF_settings.json` and in your save, not in the menu. If you are on VR, SKSE
 Menu Framework needs
@@ -211,7 +213,11 @@ owns an item that storage no longer has.
 **This is the last release with MCM support**, and the one to be on if you are
 staying with the MCM - 1.6.2.1 was a source-only release, so everything in it
 is here too. From 1.6.3 the MCM is removed and SKSE Menu Framework becomes the
-UI. Nothing you have set up changes: boxes, presets and settings live in
+UI.
+(Correction, 2026-09-13: the MCM goes in 1.6.4, not 1.6.3. 1.6.3 rebuilds
+enchantment passthrough instead, so 1.6.2.2 is not the last release with a
+menu after all.)
+Nothing you have set up changes: boxes, presets and settings live in
 `CEF_settings.json` and in your save, not in the menu. If you are on VR, SKSE
 Menu Framework needs
 [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
@@ -269,7 +275,10 @@ which 1.6.0 added and which turned out to be sitting outside a few of the rules
 the rest of CEF follows.
 
 **This is the last release with MCM support.** From 1.6.3 the MCM is removed and
-SKSE Menu Framework becomes the UI. The MCM has been behind for a while: NPC
+SKSE Menu Framework becomes the UI.
+(Correction, 2026-09-13: the MCM goes in 1.6.4, not 1.6.3. 1.6.3 rebuilds
+enchantment passthrough instead.)
+The MCM has been behind for a while: NPC
 distribution, the capture blacklist, the Recovery page, box renaming and the
 per-item passthrough toggles were never added to it, and keeping two UIs in step
 was costing more than the second UI was worth. Nothing you have set up changes -
