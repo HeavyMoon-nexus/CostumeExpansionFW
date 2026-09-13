@@ -948,18 +948,38 @@ namespace CostumeFW::abilities
             }
         }
 
-        // Converge the WHOLE pool, not a remembered list. Every allocated
-        // ability is either wanted or taken off, so a content dropped from a
-        // box, a deleted box, the master switch and a load are all the same
-        // case - and none of them can leave an ability behind.
-        for (const auto& [content, slot] : g_byContent) {
+        // Converge the WHOLE pool - every slot that HOLDS an entry, not the
+        // live content->slot map. g_byContent names only the CURRENT slot for
+        // each content, so the moment RefreshContent tombstones a slot and
+        // points its content at a new generation, the old slot falls out of
+        // this loop and keeps whatever it was granted. Measured 2026-09-14
+        // (7.2 #19): slot 2 gen0 stayed GRANTED beside slot 12 gen1 and the
+        // actor was paid both, 250 + 333 = 583, and taking the box off could
+        // not remove it because nothing ever visited slot 2 again. A stranded
+        // modifier, arriving from the one path that MAKES stale slots - which
+        // is the exact failure this whole design exists to prevent.
+        //
+        // Walking all 1024 is free: the slot is an optional, and only the
+        // handful that hold an entry cost a form lookup.
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            const auto& e = g_slots[static_cast<std::size_t>(slot)];
+            if (!e) {
+                continue;  // never allocated - there is no form to touch
+            }
             auto* spell = PoolSpell(slot);
             if (!spell) {
                 continue;
             }
-            const auto& e = g_slots[static_cast<std::size_t>(slot)];
-            const bool grant = want.contains(content) && e && !e->invalid && !e->tombstone;
-            const std::string key = "content:" + content;
+            // Only the generation the content currently points at pays out.
+            // Every older one is revoked, which is how a tombstoned slot comes
+            // back off the actor it was granted to.
+            const auto live = g_byContent.find(e->content);
+            const bool current = live != g_byContent.end() && live->second == slot;
+            const bool grant =
+                current && !e->invalid && !e->tombstone && want.contains(e->content);
+            const std::string key =
+                current ? "content:" + e->content
+                        : std::format("content:{} (stale gen{})", e->content, e->generation);
             if (grant) {
                 GrantAbility(a_actor, spell, key);
             } else {
