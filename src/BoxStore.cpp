@@ -4057,6 +4057,11 @@ namespace CostumeFW
             wanted.insert(wanted.end(), admitted.begin(), admitted.end());
         };
 
+        // Said once per token for as long as the condition holds: ApplyBoxAbilities
+        // runs on every equip change, and a warning that repeats a hundred times
+        // is the same as no warning.
+        static std::unordered_set<std::string> s_saidTokenOff;
+
         for (const auto& b : g_boxes) {
             // With CEF disabled nothing is injected, so a worn token must not still
             // grant its contents' enchant/armor effects (only the persist spell was
@@ -4066,9 +4071,28 @@ namespace CostumeFW
             // ability only asked whether the token was worn - so a token put
             // on by any other means still granted the enchantments of a box
             // the user had turned off (review 2026-09-11 N2).
-            const bool worn = cefOn && b.enabled && TokenWorn(b.token);
+            const bool tokenWorn = cefOn && TokenWorn(b.token);
+            const bool worn = tokenWorn && b.enabled;
             if (worn) {
                 admit(b.contents, "a worn box");
+            }
+            // The display path is NOT gated by b.enabled, so an off box whose
+            // token is worn still SHOWS its costume while paying nothing. From
+            // the outside that is indistinguishable from an enchantment that
+            // broke, and until now it was the one drop the admit() gate above
+            // could not see - the silence it exists to prevent, on the branch
+            // that sat outside it. It cost a whole regression item before
+            // anyone thought to read the box definition (2026-09-14, 7.2 #3).
+            if (tokenWorn && !b.enabled && !b.contents.empty()) {
+                if (s_saidTokenOff.insert(b.token).second) {
+                    SKSE::log::warn(
+                        "boxes: '{}'{} is WORN but its token distribution is OFF - its {} "
+                        "content(s) are shown and pass NO stats through. Turn the box back on "
+                        "if its enchantments should apply.",
+                        b.token, b.label.empty() ? "" : " (" + b.label + ")", b.contents.size());
+                }
+            } else {
+                s_saidTokenOff.erase(b.token);
             }
             // Optional manual extra ability (dormant unless set in json). Still
             // an ESP-defined spell the user named, so it is not pool business.
