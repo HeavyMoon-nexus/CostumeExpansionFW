@@ -3664,6 +3664,105 @@ namespace CostumeFW
             a_spell->effects.clear();
         }
 
+        // Per effect: either a LIVE source Effect (full fidelity: magnitude
+        // + duration + conditions) or a flat {mgef, magnitude} snapshot.
+        struct PendingEffect
+        {
+            RE::EffectSetting* mgef{ nullptr };
+            float magnitude{ 0.0f };
+            const RE::Effect* live{ nullptr };
+        };
+
+        // What ONE content's enchantment is worth right now.
+        //
+        // Lifted out of FillEnchantSpell unchanged. The fixed ability pool
+        // allocates per CONTENT and needs exactly this answer, and this priority
+        // is not something to re-derive: it is the 2game.info fix (2026-08-20)
+        // plus the 2026-09-10 field report. Reading the base form alone would
+        // quietly drop player enchantments, tempering, and the conditions that
+        // gate an effect - which is the bug that fix was for.
+        std::vector<PendingEffect> ContentEffects(const std::string& c,
+            const FrozenEnchantLookup& a_frozen, const char* a_name)
+        {
+            std::vector<PendingEffect> effs;
+        const auto pushLive = [&effs](const RE::EnchantmentItem* a_ench) {
+            for (auto* e : a_ench->effects) {
+                if (e && e->baseEffect) {
+                    effs.push_back({ nullptr, 0.0f, e });
+                }
+            }
+        };
+            if (g_statEnchantOff.contains(c)) {
+                return effs;  // item-data toggle: enchant passthrough OFF
+            }
+            // Source priority (2026-08-20 conditions fix): the stored
+            // original's instance enchantment, else - when the store
+            // verifiably holds the original, so no re-enchant replaced the
+            // base - the base form's enchantment, both at full fidelity.
+            // Then the flat snapshot (original unreachable: other-character
+            // persist, cross-save copy), and last the bare base form.
+            auto* armo = ResolveArmo(c);
+            const auto stored = FindStoredEnchant(c);
+            if (stored.instance) {
+                pushLive(stored.instance);
+                return effs;  // this content is done
+            }
+            if (stored.inStore && armo && armo->formEnchanting) {
+                pushLive(armo->formEnchanting);
+                return effs;  // this content is done
+            }
+            const auto snap = g_contentEnchants.find(c);
+            if (snap != g_contentEnchants.end()) {
+                // The snapshot is FLAT: it cannot carry the conditions or
+                // duration that gate an effect. When it is merely a copy of
+                // the base enchantment, the live form is the SAME effects at
+                // full fidelity - take that instead, or a conditional
+                // enchant silently becomes always-on the moment the stored
+                // original goes missing. Field-reported 2026-09-10:
+                // disabling a costume's plugin for one session makes the
+                // engine strip the captured item out of the hidden store,
+                // which drops this content from source 2 to here, and a
+                // "while sneaking" bonus started applying while standing.
+                if (armo && armo->formEnchanting &&
+                    SnapshotMatchesEnchant(snap->second, armo->formEnchanting)) {
+                    pushLive(armo->formEnchanting);
+                    return effs;  // this content is done
+                }
+                for (const auto& e : snap->second) {
+                    if (auto* mgef = ResolveMgef(e.mgef)) {
+                        effs.push_back({ mgef, e.magnitude, nullptr });
+                    }
+                }
+            } else if (armo && armo->formEnchanting) {
+                pushLive(armo->formEnchanting);
+                return effs;  // this content is done
+            }
+            // 5th and last, per content: a frozen copy the HOLDER carries -
+            // today only a published costume, which froze what each piece
+            // was worth at publish time. Flat by construction, so it is
+            // reached only when all four live sources came up empty for
+            // THIS content, and never in place of one of them (2026-09-11
+            // F01/F02). A published piece whose live sources are gone is
+            // worth its frozen value; a piece whose sources are fine is
+            // unaffected by any other piece's state.
+            if (a_frozen && effs.empty()) {
+                int recovered = 0;
+                for (const auto& e : a_frozen(c)) {
+                    if (auto* mgef = ResolveMgef(e.mgef)) {
+                        effs.push_back({ mgef, e.magnitude, nullptr });
+                        ++recovered;
+                    }
+                }
+                if (recovered > 0) {
+                    SKSE::log::info(
+                        "boxes: '{}' fell back to its frozen snapshot for '{}' ({} effect(s), "
+                        "flat - any conditions it had are not in that copy)",
+                        c, a_name, recovered);
+                }
+            }
+            return effs;
+        }
+
         // (Re)fill a synthesized ability with a content list's enchantment effects.
         // Per content, uses the CAPTURED snapshot (covers player/instance
         // enchantments) if present, else the base ARMO's own enchantment. Returns
@@ -3678,20 +3777,7 @@ namespace CostumeFW
         {
             // Per effect: either a LIVE source Effect (full fidelity: magnitude
             // + duration + conditions) or a flat {mgef, magnitude} snapshot.
-            struct PendingEffect
-            {
-                RE::EffectSetting* mgef{ nullptr };
-                float magnitude{ 0.0f };
-                const RE::Effect* live{ nullptr };
-            };
             std::vector<PendingEffect> effs;
-            const auto pushLive = [&effs](const RE::EnchantmentItem* a_ench) {
-                for (auto* e : a_ench->effects) {
-                    if (e && e->baseEffect) {
-                        effs.push_back({ nullptr, 0.0f, e });
-                    }
-                }
-            };
             // r3 (re-review P1-2): single ability choke - box AND persist
             // ability synthesis skip quarantined contents here.
             const auto admitted = StatAdmittedContents(a_contents);
@@ -3711,75 +3797,9 @@ namespace CostumeFW
                 }
             }
             for (const auto& c : admitted) {
-                if (g_statEnchantOff.contains(c)) {
-                    continue;  // item-data toggle: enchant passthrough OFF
-                }
-                // Source priority (2026-08-20 conditions fix): the stored
-                // original's instance enchantment, else - when the store
-                // verifiably holds the original, so no re-enchant replaced the
-                // base - the base form's enchantment, both at full fidelity.
-                // Then the flat snapshot (original unreachable: other-character
-                // persist, cross-save copy), and last the bare base form.
-                const std::size_t before = effs.size();
-                auto* armo = ResolveArmo(c);
-                const auto stored = FindStoredEnchant(c);
-                if (stored.instance) {
-                    pushLive(stored.instance);
-                    continue;
-                }
-                if (stored.inStore && armo && armo->formEnchanting) {
-                    pushLive(armo->formEnchanting);
-                    continue;
-                }
-                const auto snap = g_contentEnchants.find(c);
-                if (snap != g_contentEnchants.end()) {
-                    // The snapshot is FLAT: it cannot carry the conditions or
-                    // duration that gate an effect. When it is merely a copy of
-                    // the base enchantment, the live form is the SAME effects at
-                    // full fidelity - take that instead, or a conditional
-                    // enchant silently becomes always-on the moment the stored
-                    // original goes missing. Field-reported 2026-09-10:
-                    // disabling a costume's plugin for one session makes the
-                    // engine strip the captured item out of the hidden store,
-                    // which drops this content from source 2 to here, and a
-                    // "while sneaking" bonus started applying while standing.
-                    if (armo && armo->formEnchanting &&
-                        SnapshotMatchesEnchant(snap->second, armo->formEnchanting)) {
-                        pushLive(armo->formEnchanting);
-                        continue;
-                    }
-                    for (const auto& e : snap->second) {
-                        if (auto* mgef = ResolveMgef(e.mgef)) {
-                            effs.push_back({ mgef, e.magnitude, nullptr });
-                        }
-                    }
-                } else if (armo && armo->formEnchanting) {
-                    pushLive(armo->formEnchanting);
-                    continue;
-                }
-                // 5th and last, per content: a frozen copy the HOLDER carries -
-                // today only a published costume, which froze what each piece
-                // was worth at publish time. Flat by construction, so it is
-                // reached only when all four live sources came up empty for
-                // THIS content, and never in place of one of them (2026-09-11
-                // F01/F02). A published piece whose live sources are gone is
-                // worth its frozen value; a piece whose sources are fine is
-                // unaffected by any other piece's state.
-                if (a_frozen && effs.size() == before) {
-                    int recovered = 0;
-                    for (const auto& e : a_frozen(c)) {
-                        if (auto* mgef = ResolveMgef(e.mgef)) {
-                            effs.push_back({ mgef, e.magnitude, nullptr });
-                            ++recovered;
-                        }
-                    }
-                    if (recovered > 0) {
-                        SKSE::log::info(
-                            "boxes: '{}' fell back to its frozen snapshot for '{}' ({} effect(s), "
-                            "flat - any conditions it had are not in that copy)",
-                            c, a_name, recovered);
-                    }
-                }
+                auto part = ContentEffects(c, a_frozen, a_name);
+                effs.insert(effs.end(), std::make_move_iterator(part.begin()),
+                    std::make_move_iterator(part.end()));
             }
             RetireSynthEffects(a_spell);
             if (effs.empty()) {
