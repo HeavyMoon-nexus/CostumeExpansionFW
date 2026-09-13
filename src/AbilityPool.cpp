@@ -978,15 +978,41 @@ namespace CostumeFW::abilities
 
         g_legacyReport = out;
 
-        // The console is not open at load, so the log gets the whole thing and
-        // the screen gets one line that says where to find it.
+        // The console is not open at load, so the log takes the whole thing.
         std::istringstream iss(out);
         std::string line;
         while (std::getline(iss, line)) {
             SKSE::log::warn("legacy: {}", line);
         }
-        RE::DebugNotification("CEF: this save predates 1.6.3 - open the console and type: "
-                              "cef abilities legacy");
+
+        // A corner notification was the first try and it was gone before it
+        // could be read. This is not a routine "box updated" message - it is
+        // the one chance to tell someone that numbers are stuck on their
+        // character - so it asks for a click. It fires ONCE per save: the next
+        // save written by this build is version 3 and never reports again.
+        std::string box = "Costume Expansion FW\n\nThis save was made before 1.6.3. ";
+        if (!certainRows.empty() || !possibleRows.empty()) {
+            box += "Enchantment bonuses applied by the old\nmechanism could not be removed when "
+                   "it loaded, so they are still on your\ncharacter:\n";
+            for (const auto& [name, total] : certainRows) {
+                box += std::format("\n    {}  {:+g}", name, total);
+            }
+            for (const auto& [name, total] : possibleRows) {
+                box += std::format("\n    {}  {:+g}  (only if its condition was on when you saved)",
+                    name, total);
+            }
+            box += "\n\n";
+        } else {
+            box += "Nothing is worn right now, so this load added\nnothing - but anything left "
+                   "behind by earlier sessions is still there.\n\n";
+        }
+        box += "Type  cef abilities legacy  in the console for the full explanation and\n"
+               "how to take them off. CEF will not do that for you: it cannot tell its\n"
+               "own leftovers from a bonus another mod applied on purpose.";
+
+        // Not immediately: the load sequence is still settling and a message box
+        // thrown at a fading-in UI is a message box nobody sees.
+        RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
     }
 
     void AbilitiesCommand(const std::string& a_args)
