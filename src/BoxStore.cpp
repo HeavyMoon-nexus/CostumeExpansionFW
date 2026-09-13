@@ -4,6 +4,8 @@
 #include "PublishStore.h"
 #include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
 #include "StoreLock.h"
+#include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
+#include "FormId.h"       // MakeColonId (shared with the ability pool)
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "nifcarrier/NifCarrierCore.h"
 
@@ -274,33 +276,9 @@ namespace CostumeFW
             return out;
         }
 
-        // Write a_data to a_path via a sibling ".tmp" + atomic rename, so a CTD /
-        // process kill mid-write can never leave a truncated file at a_path (the
-        // old trunc-overwrite could destroy CEF_settings.json - Codex review
-        // 2026-07-05 A-1). MoveFileEx(REPLACE_EXISTING) is atomic on NTFS and is
-        // hooked by MO2's usvfs like the rest of the Win32 file API.
-        bool WriteFileAtomic(const char* a_path, const std::string& a_data)
-        {
-            const std::string tmp = std::string(a_path) + ".tmp";
-            {
-                std::ofstream f(tmp, std::ios::trunc | std::ios::binary);
-                if (!f) {
-                    return false;
-                }
-                f << a_data;
-                f.flush();
-                if (!f.good()) {
-                    return false;
-                }
-            }
-            if (!MoveFileExA(tmp.c_str(), a_path, MOVEFILE_REPLACE_EXISTING)) {
-                SKSE::log::error("atomic write: MoveFileEx failed ({}) for {}",
-                    GetLastError(), a_path);
-                DeleteFileA(tmp.c_str());
-                return false;
-            }
-            return true;
-        }
+        // WriteFileAtomic moved to src/AtomicWrite.h - the ability registry needs
+        // the same guarantee, and a second copy of it would be a second place to
+        // fix.
 
         void WriteJson(bool a_writeManifest = true)
         {
@@ -453,26 +431,9 @@ namespace CostumeFW
             return name.size() >= 9 && ::_strnicmp(name.data(), "CostumeFW", 9) == 0;
         }
 
-        // Build the project's colon-form id "XXXXXX:Plugin.esp" from a form: its
-        // plugin-local FormID (ESL-masked) + defining plugin filename.
-        std::string MakeColonId(RE::TESForm* a_form)
-        {
-            // No-file safety (review P1-4): TESForm::GetLocalFormID()
-            // dereferences GetFile(0) UNCHECKED (TESForm.h:292-300) - calling
-            // it on a runtime/no-file form is the null-deref behind the
-            // original "+ Add worn item" CTD. Such forms get their raw
-            // 8-digit FormID and an empty plugin: same textual shape as
-            // before, produced without touching the missing file, and
-            // unresolvable by design (formatter never truncates - the old
-            // char[8] bug).
-            if (!a_form) {
-                return policy::FormatColonId(0, {});
-            }
-            const auto* file = a_form->GetFile(0);
-            const std::uint32_t local = file ? a_form->GetLocalFormID() : a_form->GetFormID();
-            return policy::FormatColonId(local,
-                file ? std::string_view(file->GetFilename()) : std::string_view{});
-        }
+        // MakeColonId moved to src/FormId.h (the ability pool needs it too). Call
+        // sites are unchanged: it is still CostumeFW::MakeColonId, just one
+        // namespace further out.
 
         // v1.2.1 plugin consolidation: CostumeFW_Boxes.esp and
         // CostumeFW_Boxes_FSMPCarrier_001.esp were merged into CostumeFW.esp
