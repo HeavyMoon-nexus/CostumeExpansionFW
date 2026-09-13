@@ -106,10 +106,18 @@ namespace CostumeFW::abilities
         std::string g_legacyReport;  // set when a pre-1.6.3 save is loaded
 
 
+        // Set by Disable() and not by the benign "the ability plugin is not
+        // installed" path, which lands in the same state. One is a fault the
+        // user has to act on; the other is a choice they made in the installer,
+        // and a message box every load for that is how a mod teaches people to
+        // dismiss its message boxes.
+        bool g_faulted = false;
+
         void Disable(std::string a_why)
         {
             g_state = State::DisabledSafe;
             g_why = std::move(a_why);
+            g_faulted = true;
             SKSE::log::error("abilities: DISABLED - {}", g_why);
         }
 
@@ -758,8 +766,20 @@ namespace CostumeFW::abilities
                 [](const auto& s) { return s.has_value(); });
 
         if (!registryOk) {
-            Disable(why + ". Enchantment passthrough is off until this is sorted out; nothing "
-                          "has been changed on your character.");
+            // "Nothing has been changed" was true and not enough. With the
+            // registry refused, nothing is hydrated, so every pool spell is the
+            // EMPTY form the plugin ships - and a save that already holds one
+            // restores an active effect with no effects to end. Measured
+            // 2026-09-14 (7.2 #20): +333 Health stayed after every piece of
+            // equipment came off, with nothing in the Active Effects list to
+            // point at. It comes back off the moment the registry is readable
+            // again, so the recovery is the important half of this message.
+            Disable(why +
+                ". Enchantment passthrough is off until this is sorted out. Nothing has been "
+                "changed on your character - but a bonus that was ALREADY applied stays on and "
+                "cannot be taken off while this is broken, because the ability it came from has "
+                "no effects to end. Type  cef abilities restore  to put the last good copy back, "
+                "then restart.");
             return;
         }
 
@@ -817,6 +837,25 @@ namespace CostumeFW::abilities
     State CurrentState() { return g_state; }
     bool Ready() { return g_state == State::Ready; }
     std::string DisabledReason() { return g_state == State::Ready ? std::string{} : g_why; }
+
+    // DisabledReason() was declared, defined, and called from NOWHERE, so a pool
+    // that refused to load said so in the log and only there. The failure it
+    // reports is invisible in game - a stranded modifier appears in no menu, not
+    // even Active Effects (measured 7.2 #20) - and nobody opens a log they have
+    // no reason to suspect. Once per process: the registry is read at
+    // kDataLoaded and the answer cannot change until the next launch.
+    void ReportStateToUser()
+    {
+        static bool s_told = false;
+        if (s_told || !g_faulted || g_why.empty()) {
+            return;
+        }
+        s_told = true;
+        const std::string box = "Costume Expansion FW\n\n" + g_why;
+        // Same delay as the legacy report: a message box thrown at a fading-in
+        // UI is a message box nobody sees.
+        RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
+    }
 
     Usage PoolUsage()
     {
@@ -1195,6 +1234,43 @@ namespace CostumeFW::abilities
             if (shown == 0) {
                 Print("[CEF abilities] nothing allocated yet");
             }
+            return;
+        }
+
+        if (sub == "restore") {
+            namespace fs = std::filesystem;
+            // Only when the pool is disabled. Rolling the registry back while it
+            // is working would un-allocate slots that live saves already name,
+            // and hand them to different content later - the wrong-number case
+            // design 5.2 exists to avoid, arrived at through the rescue lever.
+            if (Ready()) {
+                Print("[CEF abilities] the registry is fine - nothing to restore. This only "
+                      "puts the last good copy back when the pool is DISABLED.");
+                return;
+            }
+            const fs::path cur{ kRegistryPath };
+            const fs::path bak{ std::string(kRegistryPath) + ".bak1" };
+            std::error_code ec;
+            if (!fs::exists(bak, ec)) {
+                Print(std::format("[CEF abilities] there is no {} to restore from", bak.string()));
+                return;
+            }
+            // Keep whatever is there now. It is the only copy of what went
+            // wrong, and someone who restores the wrong thing has no way back.
+            ec.clear();
+            fs::copy_file(cur, fs::path{ std::string(kRegistryPath) + ".broken" },
+                fs::copy_options::overwrite_existing, ec);
+            ec.clear();
+            fs::copy_file(bak, cur, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                Print(std::format("[CEF abilities] could not restore it: {}", ec.message()));
+                SKSE::log::error("abilities: restore failed - {}", ec.message());
+                return;
+            }
+            Print("[CEF abilities] the last good registry is back. RESTART the game - the "
+                  "abilities are rebuilt at load, so nothing changes until then.");
+            SKSE::log::info("abilities: restored {} from .bak1 (the broken one is kept beside it "
+                            "as .broken)", kRegistryPath);
             return;
         }
 

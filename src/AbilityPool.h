@@ -62,6 +62,11 @@ namespace CostumeFW::abilities
     // Empty when Ready. Otherwise one sentence a user can act on.
     [[nodiscard]] std::string DisabledReason();
 
+    // Put a BROKEN pool's reason in front of the user, once per process. Call it
+    // after a save finishes loading. Silent for the benign "the ability plugin
+    // is not installed" case, which is a choice and not a fault.
+    void ReportStateToUser();
+
     // Pool accounting, for the UI and the log (design 5.2).
     struct Usage
     {

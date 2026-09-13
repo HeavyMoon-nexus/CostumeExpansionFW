@@ -308,6 +308,8 @@ namespace CostumeFW
                 // After the reconcile, so the report is not competing with the
                 // load for the notification area.
                 abilities::ReportLegacySave(prePoolSave);
+                // A pool that refused to load said so in the log and nowhere else.
+                abilities::ReportStateToUser();
             });
         }
 
