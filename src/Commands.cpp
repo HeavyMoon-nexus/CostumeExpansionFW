@@ -5,7 +5,6 @@
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "AvDiag.h"
 #include "AbilityPool.h"
-#include "AbilityPoolSpike.h"  // SPIKE: the §7.1 measurement rig, kept for C7 (NPC)
 
 #include "RE/S/Script.h"
 #include "RE/C/Console.h"
@@ -121,7 +120,7 @@ namespace CostumeFW
         if (afterPrefix.empty()) {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av | abilities | poolspike");
+                  "slottest | invisdiag | av | abilities");
             return;
         }
 
@@ -577,14 +576,10 @@ namespace CostumeFW
                 [targetActor, rest] { AvReport(targetActor, rest); });
         } else if (sub == "abilities") {
             SKSE::GetTaskInterface()->AddTask([a_target, rest] { abilities::AbilitiesCommand(a_target, rest); });
-        } else if (sub == "poolspike") {
-            // SPIKE. Touches nothing but CEFTest_AbilityPool.esp.
-            SKSE::GetTaskInterface()->AddTask(
-                [a_target, rest] { poolspike::PoolCommand(a_target, rest); });
         } else {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av | abilities | poolspike");
+                  "slottest | invisdiag | av | abilities");
         }
     }
 }

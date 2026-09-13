@@ -5,7 +5,6 @@
 
 #include "logger.h"
 #include "AbilityPool.h"
-#include "AbilityPoolSpike.h"  // SPIKE: the §7.1 measurement rig, kept for C7 (NPC)
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Commands.h"
@@ -360,7 +359,6 @@ namespace
             // stranded its modifier exactly the way the old runtime spells did.
             // AddTask would run it after the load and measure nothing.
             CostumeFW::abilities::InitAtDataLoaded();
-            CostumeFW::poolspike::HydrateAtDataLoaded();
             Load3DHook::Install();
             // VR: PlayerCharacter's vtable inserts virtuals before Update, so the
             // SE/AE index 0xAD would land on the wrong function - VR keeps the
