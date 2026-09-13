@@ -168,6 +168,30 @@ namespace CostumeFW::abilities
             return out;
         }
 
+        // The condition functions whose parameters include a STRING - a Papyrus
+        // variable name - rather than a form or a number. Their addresses change
+        // between launches like any other pointer, and unlike a form there is
+        // nothing to look the value back up by.
+        //
+        // CEF refuses these rather than reaching for a way to store the string,
+        // and that is a decision, not a gap. A condition like this gates an
+        // effect on another mod's SCRIPT STATE: measured on Devious Devices'
+        // zadx_EnchSlowBoots, whose third condition reads a quest variable in
+        // DD's own quest. Copying that into a costume box would produce an
+        // effect switching on and off according to a variable with nothing to do
+        // with the box. Named here so the refusal can say what it means instead
+        // of printing a number at someone.
+        constexpr const char* ScriptStateFunction(std::uint16_t a_fn)
+        {
+            switch (a_fn) {
+            case 53: return "GetScriptVariable";
+            case 79: return "GetQuestVariable";
+            case 629: return "GetVMQuestVariable";
+            case 630: return "GetVMScriptVariable";
+            default: return nullptr;
+            }
+        }
+
         // Above the null page and pointer-aligned. Every integer parameter the
         // condition functions actually use is tiny (an actor value index, an
         // equipped-item-type enum, 0/1/2), so this only ever nominates real
@@ -281,10 +305,20 @@ namespace CostumeFW::abilities
                             // understand. Either way the bits are meaningless
                             // next launch.
                             if (LooksLikePointer(raw)) {
-                                a_why = std::format(
-                                    "condition function {} has a parameter that looks like a form "
-                                    "but matches none",
-                                    rc.function);
+                                if (const char* fn = ScriptStateFunction(rc.function)) {
+                                    a_why = std::format(
+                                        "it reads another mod's script state ({}), which is not "
+                                        "something a box can carry - the effect would switch on "
+                                        "and off according to a variable that has nothing to do "
+                                        "with the box",
+                                        fn);
+                                } else {
+                                    a_why = std::format(
+                                        "condition function {} takes a parameter that is neither a "
+                                        "number nor a form CEF can identify (effect {}, condition "
+                                        "{}, parameter {}), so it cannot be rebuilt after a restart",
+                                        rc.function, a_out.size(), re.conditions.size(), i + 1);
+                                }
                                 return false;
                             }
                         }
@@ -750,7 +784,10 @@ namespace CostumeFW::abilities
         std::vector<RecipeEffect> effects;
         std::string why;
         if (!BuildRecipe(ench, effects, why)) {
-            SKSE::log::info("abilities: no ability for {} - {}", a_contentId, why);
+            // The whole enchantment is refused, not the one effect that failed
+            // (design 5.7). Half an enchantment is a different enchantment, and
+            // the author did not design that one.
+            SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId, why);
             return nullptr;
         }
 
