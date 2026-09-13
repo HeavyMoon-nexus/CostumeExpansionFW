@@ -4390,6 +4390,33 @@ namespace CostumeFW
             return;
         }
         const bool cefOn = CefEnabled();  // ROOT G: master switch gates box abilities too
+
+        // Which CONTENTS should be paying out right now. One ability per
+        // content, not one per box: two pieces carrying the same enchantment
+        // are two abilities and are worth two, where a single spell holding
+        // both had them collapsed into one by the engine (eb6feb3). The folding
+        // that worked around that is not needed on this path and is not done.
+        std::vector<std::string> wanted;
+        const auto admit = [&wanted](const std::vector<std::string>& a_ids, const char* a_what) {
+            const auto admitted = StatAdmittedContents(a_ids);
+            // Name what got dropped. This gate is the one place a content can
+            // stop contributing stats with nothing said anywhere - the reason
+            // "my enchantment stopped applying" had no log line to look at
+            // (test run 2026-09-10). A drop here is normal after a plugin is
+            // disabled or blacklisted; it is the SILENCE that is the problem.
+            if (admitted.size() != a_ids.size()) {
+                for (const auto& c : a_ids) {
+                    if (std::find(admitted.begin(), admitted.end(), c) == admitted.end()) {
+                        SKSE::log::warn(
+                            "boxes: '{}' contributes no stats to {} - not admitted right now "
+                            "(unresolved plugin, or blocked by the capture blacklist)",
+                            c, a_what);
+                    }
+                }
+            }
+            wanted.insert(wanted.end(), admitted.begin(), admitted.end());
+        };
+
         for (const auto& b : g_boxes) {
             // With CEF disabled nothing is injected, so a worn token must not still
             // grant its contents' enchant/armor effects (only the persist spell was
@@ -4400,37 +4427,32 @@ namespace CostumeFW
             // on by any other means still granted the enchantments of a box
             // the user had turned off (review 2026-09-11 N2).
             const bool worn = cefOn && b.enabled && TokenWorn(b.token);
-            const std::string key = "box:" + b.token;
-            // Synthesized ENCHANT ability (armor/weight are on the token's fields).
-            SyncAbility(player, g_boxSpells[b.token], b.contents, "Costume Stats", worn, key);
-            // Optional manual extra ability (dormant unless set in json).
+            if (worn) {
+                admit(b.contents, "a worn box");
+            }
+            // Optional manual extra ability (dormant unless set in json). Still
+            // an ESP-defined spell the user named, so it is not pool business.
             if (!b.ability.empty()) {
                 SyncSpell(player, ResolveSpell(b.ability), worn, "manual:" + b.ability);
             }
         }
-        // Abilities whose box is gone (deleted, or its token handed to a publish
-        // slot): the form is kept for reuse, but it must not stay on the player.
-        for (auto& [token, ability] : g_boxSpells) {
-            if (FindBox(token) >= 0) {
-                continue;
-            }
-            if (DropAbilityFrom(player, ability, "box:" + token)) {
-                SKSE::log::info("boxes: dropped the stat ability of freed box '{}'", token);
-            }
-            // Its contents no longer exist. Marking it stale here is what stops
-            // the OLD effect list being granted if this token is later handed to
-            // a new box that never went through RebuildBoxAbility itself.
-            ability.dirty = true;
+        // Persist class: no token, always shown while CEF is enabled. Built from
+        // THIS SAVE'S ACTIVE set, not the shared catalog (M2) - a non-active
+        // entry another character cataloged must not grant effects here.
+        if (cefOn) {
+            admit(ActivePersistIds(), "persist");
         }
-        // Persist class: no token, always shown while CEF is enabled -> grant its
-        // aggregate enchant ability whenever CEF is on. Built from THIS SAVE'S
-        // ACTIVE set, not the shared catalog (M2) - a non-active entry another
-        // character cataloged must not grant effects here.
-        SyncAbility(player, g_persistAbility, ActivePersistIds(),
-            "Costume Stats (Persist)", cefOn, "persist");
+
+        // One convergence over the whole pool. A content dropped from a box, a
+        // deleted box, a box whose token was handed to a publish slot, the
+        // master switch, a load: all of them are "not in wanted", and none of
+        // them needs a path of its own to avoid stranding an ability.
+        abilities::SyncToActor(player, wanted);
+
         // Publish bindings (NPC wearers + the player wearing a publish token)
         // follow the same master-switch contract - converge them in the same
-        // pass so a master toggle can never strand spells on an NPC (§7.6).
+        // pass so a master toggle can never strand spells on an NPC (7.6).
+        // Still on the old synthesized spells until phase 4.
         SyncNpcAbilities();
     }
 
@@ -4446,14 +4468,18 @@ namespace CostumeFW
     void RebuildBoxAbility(const std::string& a_token)
     {
         StoreLock lk;
-        auto it = g_boxSpells.find(a_token);
-        if (it == g_boxSpells.end()) {
-            return;  // not built yet; ApplyBoxAbilities builds it fresh
+        const int idx = FindBox(a_token);
+        if (idx < 0) {
+            return;
         }
-        // Take it off NOW - the refill must not run under a live ability - and
-        // mark it stale. The FORM stays: it is the same one the save may hold.
-        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), it->second, "box:" + a_token);
-        it->second.dirty = true;  // next ApplyBoxAbilities refills + reapplies
+        // Re-derive each content's recipe. A content whose enchantment actually
+        // changed gets a NEW slot at the next generation rather than having its
+        // recipe rewritten, because a save may hold an active effect built from
+        // the old one. Nothing is granted or removed here: the next
+        // ApplyBoxAbilities converges the whole pool anyway.
+        for (const auto& c : g_boxes[static_cast<std::size_t>(idx)].contents) {
+            abilities::RefreshContent(c);
+        }
     }
 
     bool FillContentEnchantSpell(RE::SpellItem* a_spell,
@@ -4467,8 +4493,9 @@ namespace CostumeFW
     void RebuildPersistAbility()
     {
         StoreLock lk;
-        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), g_persistAbility, "persist");
-        g_persistAbility.dirty = true;  // next ApplyBoxAbilities refills + reapplies
+        for (const auto& c : ActivePersistIds()) {
+            abilities::RefreshContent(c);
+        }
     }
 
     void InvalidateStatAbilities()

@@ -6,6 +6,7 @@
 
 namespace RE
 {
+    class Actor;
     struct Effect;
     class EffectSetting;
     class SpellItem;
@@ -97,6 +98,29 @@ namespace CostumeFW::abilities
     // Main thread only.
     [[nodiscard]] RE::SpellItem* AbilityFor(const std::string& a_contentId,
         const std::vector<SourceEffect>& a_effects);
+
+    // Converge an actor: every content in a_wanted gets its ability, every
+    // other allocated ability comes off. Allocates for a content that has none
+    // yet. Main thread only.
+    //
+    // Convergence is over the WHOLE pool rather than a remembered per-box list,
+    // which is what makes it idempotent: a content dropped from a box, a box
+    // deleted, the master switch turned off, a load - all of them are just
+    // "not in a_wanted any more", with nothing to keep in step and nothing to
+    // strand. The old per-box ability needed four separate paths to guarantee
+    // the same thing.
+    void SyncToActor(RE::Actor* a_actor, const std::vector<std::string>& a_wanted);
+
+    // Re-derive a content's recipe. If it differs from the one on record, a NEW
+    // slot is allocated at the next generation and the old one is tombstoned.
+    //
+    // The old recipe is never edited in place, because a save may still hold an
+    // active effect built from it: rewriting it under that save would change
+    // what an existing bonus is worth without the engine ever being told. Call
+    // this when a content's enchantment may have changed - a re-enchant, a
+    // capture, a settings reload - not on the hot path, where re-deriving costs
+    // a walk of the form table for anything with conditions.
+    void RefreshContent(const std::string& a_contentId);
 
     // A save written before the pool existed has just been loaded. Call AFTER
     // Reconcile, on the main thread: it reads the active set itself, because

@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace CostumeFW::abilities
@@ -413,6 +414,26 @@ namespace CostumeFW::abilities
             return true;
         }
 
+        nlohmann::json EffectsJson(const std::vector<RecipeEffect>& a_effects)
+        {
+            auto eff = nlohmann::json::array();
+            for (const auto& e : a_effects) {
+                nlohmann::json ej;
+                ej["mgef"] = e.mgef;
+                ej["magnitude"] = e.magnitude;
+                ej["area"] = e.area;
+                ej["duration"] = e.duration;
+                ej["cost"] = e.cost;
+                auto cond = nlohmann::json::array();
+                for (const auto& c : e.conditions) {
+                    cond.push_back(ToJson(c));
+                }
+                ej["conditions"] = cond;
+                eff.push_back(ej);
+            }
+            return eff;
+        }
+
         nlohmann::json AbilitiesArray()
         {
             auto arr = nlohmann::json::array();
@@ -426,22 +447,7 @@ namespace CostumeFW::abilities
                 j["content"] = s->content;
                 j["generation"] = s->generation;
                 j["tombstone"] = s->tombstone;
-                auto eff = nlohmann::json::array();
-                for (const auto& e : s->effects) {
-                    nlohmann::json ej;
-                    ej["mgef"] = e.mgef;
-                    ej["magnitude"] = e.magnitude;
-                    ej["area"] = e.area;
-                    ej["duration"] = e.duration;
-                    ej["cost"] = e.cost;
-                    auto cond = nlohmann::json::array();
-                    for (const auto& c : e.conditions) {
-                        cond.push_back(ToJson(c));
-                    }
-                    ej["conditions"] = cond;
-                    eff.push_back(ej);
-                }
-                j["effects"] = eff;
+                j["effects"] = EffectsJson(s->effects);
                 arr.push_back(j);
             }
             return arr;
@@ -668,6 +674,62 @@ namespace CostumeFW::abilities
             s->invalid = false;
             return true;
         }
+
+        // Take the next free slot for a content and make it live: build the
+        // recipe, write the registry, fill the spell.
+        RE::SpellItem* Allocate(const std::string& a_contentId,
+            const std::vector<SourceEffect>& a_effects, std::uint32_t a_generation)
+        {
+            std::vector<RecipeEffect> effects;
+            std::string why;
+            if (!BuildRecipe(a_effects, effects, why)) {
+                // The WHOLE enchantment is refused, not the one effect that
+                // failed (design 5.7). Half an enchantment is a different
+                // enchantment, and the author did not design that one.
+                SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId, why);
+                return nullptr;
+            }
+
+            // Monotonic: never reuse a slot, not even a tombstoned one. An old
+            // save can still name it, and handing that id to different content
+            // would apply someone else's bonus rather than none at all - a
+            // wrong number is harder to notice than a missing one (design 5.2).
+            int slot = -1;
+            for (int i = 0; i < kPoolSize; ++i) {
+                if (!g_slots[static_cast<std::size_t>(i)]) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot < 0) {
+                SKSE::log::error("abilities: the pool is full ({} slots). New content keeps its "
+                                 "looks and loses its stats; everything already allocated is "
+                                 "unaffected.",
+                    kPoolSize);
+                return nullptr;
+            }
+
+            Entry e;
+            e.content = a_contentId;
+            e.generation = a_generation;
+            e.effects = std::move(effects);
+            g_slots[static_cast<std::size_t>(slot)] = std::move(e);
+
+            // Registry BEFORE the form (design 6). A slot in use but not on
+            // disk would be handed out again next launch, to different content,
+            // while a save still points at it.
+            if (!SaveRegistry()) {
+                g_slots[static_cast<std::size_t>(slot)].reset();
+                return nullptr;
+            }
+            if (!Hydrate(slot)) {
+                return nullptr;
+            }
+            g_byContent[a_contentId] = slot;
+            SKSE::log::info("abilities: {} -> slot {} gen{} ({} effect(s))", a_contentId, slot,
+                a_generation, g_slots[static_cast<std::size_t>(slot)]->effects.size());
+            return PoolSpell(slot);
+        }
     }
 
     // -------------------------------------------------------------------
@@ -782,55 +844,98 @@ namespace CostumeFW::abilities
             const auto& s = g_slots[static_cast<std::size_t>(it->second)];
             return (s && !s->invalid) ? PoolSpell(it->second) : nullptr;
         }
+        return Allocate(a_contentId, a_effects, 0);
+    }
 
-        std::vector<RecipeEffect> effects;
-        std::string why;
-        if (!BuildRecipe(a_effects, effects, why)) {
-            // The whole enchantment is refused, not the one effect that failed
-            // (design 5.7). Half an enchantment is a different enchantment, and
-            // the author did not design that one.
-            SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId, why);
-            return nullptr;
+    void RefreshContent(const std::string& a_contentId)
+    {
+        if (!Ready()) {
+            return;
+        }
+        const auto it = g_byContent.find(a_contentId);
+        if (it == g_byContent.end()) {
+            return;  // never allocated; the next SyncToActor builds it fresh
+        }
+        const int slot = it->second;
+        auto& cur = g_slots[static_cast<std::size_t>(slot)];
+        if (!cur) {
+            return;
         }
 
-        // Monotonic: never reuse a slot, not even a tombstoned one. An old save
-        // can still name it, and handing that id to a different content would
-        // apply someone else's bonus rather than nothing at all - a wrong number
-        // is harder to notice than a missing one (design 5.2).
-        int slot = -1;
-        for (int i = 0; i < kPoolSize; ++i) {
-            if (!g_slots[static_cast<std::size_t>(i)]) {
-                slot = i;
-                break;
+        const auto source = ContentEffectsFor(a_contentId);
+        std::vector<RecipeEffect> rebuilt;
+        std::string why;
+        if (!BuildRecipe(source, rebuilt, why)) {
+            // It passes no stats through any more: un-enchanted, its plugin
+            // turned off, its per-item toggle turned off. The slot's RECIPE is
+            // left exactly as it is and only tombstoned, because a save may
+            // still hold an active effect built from it, and that effect has to
+            // keep resolving to the same numbers until it is taken off.
+            if (!cur->tombstone) {
+                cur->tombstone = true;
+                g_byContent.erase(a_contentId);
+                SaveRegistry();
+                SKSE::log::info(
+                    "abilities: {} passes no stats through any more ({}) - slot {} tombstoned",
+                    a_contentId, why, slot);
+            }
+            return;
+        }
+        if (EffectsJson(rebuilt) == EffectsJson(cur->effects)) {
+            return;  // unchanged, which is the usual answer
+        }
+
+        // Changed - a re-enchant, a temper, a different captured original. The
+        // old recipe is NOT edited in place for the same reason: a save may
+        // hold an effect built from it, and rewriting it there would change
+        // what an existing bonus is worth with nothing ever told about it. Take
+        // the next generation in a new slot instead (design 5.2).
+        const auto generation = cur->generation + 1;
+        cur->tombstone = true;
+        g_byContent.erase(a_contentId);
+        SKSE::log::info("abilities: {} changed - slot {} tombstoned, taking generation {}",
+            a_contentId, slot, generation);
+        Allocate(a_contentId, source, generation);
+    }
+
+    void SyncToActor(RE::Actor* a_actor, const std::vector<std::string>& a_wanted)
+    {
+        if (!a_actor || !Ready()) {
+            return;
+        }
+        std::unordered_set<std::string> want(a_wanted.begin(), a_wanted.end());
+
+        // Allocate for anything wanted that has never had an ability. Only for
+        // the ones with no slot: re-deriving a recipe costs a walk of the form
+        // table for anything with conditions, and this runs on every equip
+        // change. A content whose enchantment actually changed comes through
+        // RefreshContent instead.
+        for (const auto& c : want) {
+            if (!g_byContent.contains(c)) {
+                Allocate(c, ContentEffectsFor(c), 0);
             }
         }
-        if (slot < 0) {
-            SKSE::log::error("abilities: the pool is full ({} of {} used). New content keeps its "
-                             "looks and loses its stats; existing content is unaffected.",
-                kPoolSize, kPoolSize);
-            return nullptr;
-        }
 
-        Entry e;
-        e.content = a_contentId;
-        e.effects = std::move(effects);
-        g_slots[static_cast<std::size_t>(slot)] = std::move(e);
-
-        // Save BEFORE building the form (design 6): a slot that is in use but
-        // not on disk would be handed out again next launch, to different
-        // content, while a save still points at it.
-        if (!SaveRegistry()) {
-            g_slots[static_cast<std::size_t>(slot)].reset();
-            return nullptr;
+        // Converge the WHOLE pool, not a remembered list. Every allocated
+        // ability is either wanted or taken off, so a content dropped from a
+        // box, a deleted box, the master switch and a load are all the same
+        // case - and none of them can leave an ability behind.
+        for (const auto& [content, slot] : g_byContent) {
+            auto* spell = PoolSpell(slot);
+            if (!spell) {
+                continue;
+            }
+            const auto& e = g_slots[static_cast<std::size_t>(slot)];
+            const bool grant = want.contains(content) && e && !e->invalid && !e->tombstone;
+            const std::string key = "content:" + content;
+            if (grant) {
+                GrantAbility(a_actor, spell, key);
+            } else {
+                RevokeAbility(a_actor, spell, key);
+            }
         }
-        if (!Hydrate(slot)) {
-            return nullptr;
-        }
-        g_byContent[a_contentId] = slot;
-        SKSE::log::info("abilities: {} -> slot {} ({} effect(s))", a_contentId, slot,
-            g_slots[static_cast<std::size_t>(slot)]->effects.size());
-        return PoolSpell(slot);
     }
+
 
     void ReportLegacySave(bool a_prePoolSave)
     {
