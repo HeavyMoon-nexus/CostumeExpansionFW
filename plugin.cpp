@@ -4,7 +4,8 @@
 // Real seed/config/co-save driven flow continues to replace this test driver.
 
 #include "logger.h"
-#include "AbilityPool.h"  // SPIKE: fixed-ability-pool experiment (design §7.1)
+#include "AbilityPool.h"
+#include "AbilityPoolSpike.h"  // SPIKE: the §7.1 measurement rig, kept for C7 (NPC)
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Commands.h"
@@ -353,7 +354,13 @@ namespace
             // the load and measure the wrong thing. Reads one small json and
             // touches only CEFTest_AbilityPool.esp - it is a no-op for anyone
             // who does not have that test plugin enabled.
-            CostumeFW::pool::HydrateAtDataLoaded();
+            // SYNCHRONOUS, and here rather than in a task, on purpose: every
+            // pool ability has to carry its effects BEFORE a save can be read.
+            // Measured 2026-09-13 - an ability filled after the save was up
+            // stranded its modifier exactly the way the old runtime spells did.
+            // AddTask would run it after the load and measure nothing.
+            CostumeFW::abilities::InitAtDataLoaded();
+            CostumeFW::poolspike::HydrateAtDataLoaded();
             Load3DHook::Install();
             // VR: PlayerCharacter's vtable inserts virtuals before Update, so the
             // SE/AE index 0xAD would land on the wrong function - VR keeps the

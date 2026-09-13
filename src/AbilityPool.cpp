@@ -1,60 +1,110 @@
-// SPIKE ONLY - see AbilityPool.h. Throwaway code; measured, then deleted.
-
 #include "AbilityPool.h"
 
+#include "AtomicWrite.h"
 #include "ConsoleOut.h"
+#include "FormId.h"
 
-#include "RE/A/Actor.h"
 #include "RE/E/Effect.h"
 #include "RE/E/EffectSetting.h"
 #include "RE/E/EnchantmentItem.h"
-#include "RE/P/PlayerCharacter.h"
 #include "RE/S/SpellItem.h"
+#include "RE/T/TESCondition.h"
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESForm.h"
-#include "RE/T/TESObjectREFR.h"
 
 #include <nlohmann/json.hpp>
 
-#include <array>
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
-#include <format>
 #include <fstream>
+#include <format>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
-namespace CostumeFW::pool
+namespace CostumeFW::abilities
 {
     namespace
     {
         void Print(std::string_view a_msg) { ConsolePrint(a_msg); }
 
-        constexpr const char* kPoolPlugin = "CEFTest_AbilityPool.esp";
+        constexpr const char* kPoolPlugin = "CostumeFW_Abilities.esp";
         constexpr std::uint32_t kPoolBase = 0x800;
-        constexpr int kPoolSize = 8;
+        constexpr int kPoolSize = 1024;  // must match tools/make_ability_pool.py
 
-        // The registry lives OUTSIDE the save, on purpose. That is the one idea
-        // in the pool design that makes the ordering possible at all: the shape
-        // a save's ActiveEffect expects has to be known BEFORE that save is
-        // read, so it cannot itself come out of the save. Production keeps a
-        // serialized recipe here (design §4); the spike keeps a pointer to a
-        // source enchantment and clones it, which measures the same thing
-        // without having to settle condition serialization first.
-        constexpr const char* kRegistryPath = "Data\\SKSE\\Plugins\\CEF_pooltest.json";
+        constexpr const char* kRegistryPath = "Data\\SKSE\\Plugins\\CEF_abilities.json";
+        constexpr int kSchema = 1;
 
-        struct Recipe
+        // ---------------------------------------------------------------
+        // Recipe
+        // ---------------------------------------------------------------
+
+        // A condition parameter is a void* that the engine reads as a small
+        // integer for some functions and as a TESForm* for others - about four
+        // in ten of the conditional wearable enchantments in a heavy load order
+        // use the form kind (WornHasKeyword, GetEquipped, IsSpellTarget,
+        // GetGlobalValue...). A pointer is a different address next launch, so
+        // storing the raw bits would restore a condition pointing at whatever
+        // happens to live there. BoxStore's SameConditionData compares these as
+        // raw bits and says so; that is right for COMPARING and wrong for
+        // saving, which is why none of this reuses it.
+        struct RecipeParam
         {
-            std::string source;   // "XXXXXX:Plugin.esp" of an ENCH to clone
-            bool early{ true };   // hydrate at kDataLoaded, or only on command
+            bool isForm{ false };
+            std::string form;          // colon id when isForm
+            std::uint64_t raw{ 0 };    // the bits otherwise
         };
 
-        std::array<std::optional<Recipe>, kPoolSize> g_slots{};
+        struct RecipeCondition
+        {
+            std::uint16_t function{ 0 };
+            std::uint8_t flags{ 0 };
+            std::uint8_t object{ 0 };
+            std::uint32_t dataID{ 0 };
+            bool compareIsGlobal{ false };
+            float compareFloat{ 0.0f };
+            std::string compareGlobal;
+            RecipeParam params[2];
+        };
 
-        // --- forms ------------------------------------------------------------
+        struct RecipeEffect
+        {
+            std::string mgef;
+            float magnitude{ 0.0f };
+            std::uint32_t area{ 0 };
+            std::uint32_t duration{ 0 };
+            float cost{ 0.0f };
+            std::vector<RecipeCondition> conditions;
+        };
+
+        struct Entry
+        {
+            std::string content;              // the content this was built for
+            std::uint32_t generation{ 0 };    // a changed source gets a NEW slot
+            bool tombstone{ false };
+            bool invalid{ false };            // hydration failed; grant nothing
+            std::vector<RecipeEffect> effects;
+        };
+
+        std::vector<std::optional<Entry>> g_slots(kPoolSize);
+        std::unordered_map<std::string, int> g_byContent;  // content -> live slot
+        State g_state = State::Uninitialized;
+        std::string g_why;
+
+        void Disable(std::string a_why)
+        {
+            g_state = State::DisabledSafe;
+            g_why = std::move(a_why);
+            SKSE::log::error("abilities: DISABLED - {}", g_why);
+        }
+
+        // ---------------------------------------------------------------
+        // Forms
+        // ---------------------------------------------------------------
 
         RE::TESForm* LookupColon(const std::string& a_id)
         {
@@ -77,363 +127,727 @@ namespace CostumeFW::pool
             if (a_slot < 0 || a_slot >= kPoolSize) {
                 return nullptr;
             }
-            auto* form = LookupColon(
-                std::format("{:06X}:{}", kPoolBase + static_cast<std::uint32_t>(a_slot), kPoolPlugin));
+            auto* form = LookupColon(std::format(
+                "{:06X}:{}", kPoolBase + static_cast<std::uint32_t>(a_slot), kPoolPlugin));
             return form ? form->As<RE::SpellItem>() : nullptr;
         }
 
-        // Deep-copy a condition chain: ~TESCondition deletes the whole chain, so
-        // sharing nodes with the source form would hand the engine a double free.
-        // Node data is plain; the param FORM pointers stay shared - forms outlive
-        // spells. Same rule as BoxStore's copy.
-        void CopyConditions(RE::TESCondition& a_dst, const RE::TESCondition& a_src)
+        // Turn condition parameters that are really form pointers into colon
+        // ids, in ONE pass over the form table per recipe.
+        //
+        // Two things this deliberately does NOT do. It does not build a
+        // persistent pointer->id index: a heavy load order holds millions of
+        // forms and that map would cost more memory than the whole plugin, and
+        // memory balloons have been misattributed to CEF enough times already.
+        // And it never DEREFERENCES a candidate - the pass compares addresses
+        // by value, so a parameter that was a small integer all along is simply
+        // never matched. Dereferencing to ask "are you a form?" is how you
+        // crash on the parameter that was the number 2.
+        std::unordered_map<std::uint64_t, std::string> ResolveParamForms(
+            const std::vector<std::uint64_t>& a_candidates)
         {
-            RE::TESConditionItem** tail = &a_dst.head;
-            for (auto* cur = a_src.head; cur; cur = cur->next) {
-                auto* node = new RE::TESConditionItem();
-                node->data = cur->data;
-                node->next = nullptr;
-                *tail = node;
-                tail = &node->next;
+            std::unordered_map<std::uint64_t, std::string> out;
+            if (a_candidates.empty()) {
+                return out;
             }
+            const auto& [map, lock] = RE::TESForm::GetAllForms();
+            [[maybe_unused]] const RE::BSReadWriteLock l{ lock };
+            if (!map) {
+                return out;
+            }
+            for (const auto& [id, form] : *map) {
+                if (!form) {
+                    continue;
+                }
+                const auto addr = reinterpret_cast<std::uint64_t>(form);
+                if (std::find(a_candidates.begin(), a_candidates.end(), addr) !=
+                    a_candidates.end()) {
+                    out.emplace(addr, MakeColonId(form));
+                }
+            }
+            return out;
         }
 
-        // --- registry ---------------------------------------------------------
-
-        void LoadRegistry()
+        // Above the null page and pointer-aligned. Every integer parameter the
+        // condition functions actually use is tiny (an actor value index, an
+        // equipped-item-type enum, 0/1/2), so this only ever nominates real
+        // addresses - and nominating a wrong one costs nothing, because the
+        // pass above simply will not match it.
+        constexpr bool LooksLikePointer(std::uint64_t a_value)
         {
-            g_slots = {};
-            std::ifstream in(kRegistryPath);
-            if (!in) {
-                return;
+            return a_value >= 0x10000 && (a_value & 7) == 0;
+        }
+
+        // ---------------------------------------------------------------
+        // Building a recipe
+        // ---------------------------------------------------------------
+
+        // No partial recipes (design 5.7): one field that cannot be written
+        // faithfully fails the whole thing, and the caller grants nothing. A
+        // half-restored condition is worse than no effect, because the player
+        // gets a bonus under rules nobody chose.
+        bool BuildRecipe(const RE::EnchantmentItem* a_ench, std::vector<RecipeEffect>& a_out,
+            std::string& a_why)
+        {
+            a_out.clear();
+            if (!a_ench) {
+                a_why = "no enchantment";
+                return false;
             }
-            nlohmann::json doc;
+
+            // Collect every parameter that might be a form, across the whole
+            // enchantment, so the form table is walked once rather than per
+            // condition.
+            std::vector<std::uint64_t> candidates;
+            for (const auto* e : a_ench->effects) {
+                if (!e) {
+                    continue;
+                }
+                for (const auto* c = e->conditions.head; c; c = c->next) {
+                    for (int i = 0; i < 2; ++i) {
+                        const auto raw = reinterpret_cast<std::uint64_t>(c->data.functionData.params[i]);
+                        if (LooksLikePointer(raw)) {
+                            candidates.push_back(raw);
+                        }
+                    }
+                    if (c->data.flags.global) {
+                        const auto raw = reinterpret_cast<std::uint64_t>(c->data.comparisonValue.g);
+                        if (LooksLikePointer(raw)) {
+                            candidates.push_back(raw);
+                        }
+                    }
+                }
+            }
+            const auto resolved = ResolveParamForms(candidates);
+
+            for (const auto* e : a_ench->effects) {
+                if (!e || !e->baseEffect) {
+                    continue;
+                }
+                RecipeEffect re;
+                re.mgef = MakeColonId(e->baseEffect);
+                if (re.mgef.find(':') == std::string::npos || re.mgef.back() == ':') {
+                    a_why = std::format("magic effect {} has no defining plugin", re.mgef);
+                    return false;
+                }
+                re.magnitude = e->effectItem.magnitude;
+                re.area = e->effectItem.area;
+                re.duration = e->effectItem.duration;
+                re.cost = e->cost;
+
+                for (const auto* c = e->conditions.head; c; c = c->next) {
+                    // runOnRef is an ObjectRefHandle - a runtime handle into the
+                    // reference table, with no stable identity to write down. A
+                    // condition that uses one cannot be rebuilt, so the recipe
+                    // is refused rather than rebuilt without it: dropping the
+                    // "run on" target silently re-points the condition at the
+                    // subject, which is a different rule.
+                    if (c->data.runOnRef) {
+                        a_why = "a condition runs on a specific reference, which cannot be saved";
+                        return false;
+                    }
+                    RecipeCondition rc;
+                    rc.function = static_cast<std::uint16_t>(c->data.functionData.function.get());
+                    rc.flags = *reinterpret_cast<const std::uint8_t*>(&c->data.flags);
+                    rc.object = static_cast<std::uint8_t>(c->data.object.get());
+                    rc.dataID = c->data.dataID;
+
+                    rc.compareIsGlobal = c->data.flags.global;
+                    if (rc.compareIsGlobal) {
+                        const auto raw =
+                            reinterpret_cast<std::uint64_t>(c->data.comparisonValue.g);
+                        const auto it = resolved.find(raw);
+                        if (it == resolved.end()) {
+                            a_why = "a condition compares against a global that cannot be identified";
+                            return false;
+                        }
+                        rc.compareGlobal = it->second;
+                    } else {
+                        rc.compareFloat = c->data.comparisonValue.f;
+                    }
+
+                    for (int i = 0; i < 2; ++i) {
+                        const auto raw =
+                            reinterpret_cast<std::uint64_t>(c->data.functionData.params[i]);
+                        const auto it = resolved.find(raw);
+                        if (it != resolved.end()) {
+                            rc.params[i].isForm = true;
+                            rc.params[i].form = it->second;
+                        } else {
+                            rc.params[i].raw = raw;
+                            // A value that looked like a pointer and matched no
+                            // form is the dangerous case: either a form from a
+                            // plugin that is not loaded, or something we do not
+                            // understand. Either way the bits are meaningless
+                            // next launch.
+                            if (LooksLikePointer(raw)) {
+                                a_why = std::format(
+                                    "condition function {} has a parameter that looks like a form "
+                                    "but matches none",
+                                    rc.function);
+                                return false;
+                            }
+                        }
+                    }
+                    re.conditions.push_back(std::move(rc));
+                }
+                a_out.push_back(std::move(re));
+            }
+
+            if (a_out.empty()) {
+                a_why = "the enchantment contributes no effects";
+                return false;
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Registry
+        // ---------------------------------------------------------------
+
+        std::uint64_t Fnv1a(std::string_view a_text)
+        {
+            std::uint64_t h = 1469598103934665603ull;
+            for (const unsigned char c : a_text) {
+                h ^= c;
+                h *= 1099511628211ull;
+            }
+            return h;
+        }
+
+        nlohmann::json ToJson(const RecipeCondition& a_c)
+        {
+            nlohmann::json j;
+            j["fn"] = a_c.function;
+            j["flags"] = a_c.flags;
+            j["object"] = a_c.object;
+            j["dataID"] = a_c.dataID;
+            if (a_c.compareIsGlobal) {
+                j["global"] = a_c.compareGlobal;
+            } else {
+                j["value"] = a_c.compareFloat;
+            }
+            auto arr = nlohmann::json::array();
+            for (const auto& p : a_c.params) {
+                nlohmann::json pj;
+                if (p.isForm) {
+                    pj["form"] = p.form;
+                } else {
+                    pj["raw"] = p.raw;
+                }
+                arr.push_back(pj);
+            }
+            j["params"] = arr;
+            return j;
+        }
+
+        bool FromJson(const nlohmann::json& a_j, RecipeCondition& a_out)
+        {
             try {
-                in >> doc;
-            } catch (const std::exception& e) {
-                SKSE::log::error("pool: registry unreadable ({}) - no slots restored", e.what());
-                return;
-            }
-            if (!doc.contains("slots") || !doc["slots"].is_object()) {
-                return;
-            }
-            for (auto it = doc["slots"].begin(); it != doc["slots"].end(); ++it) {
-                int slot = -1;
-                try {
-                    slot = std::stoi(it.key());
-                } catch (...) {
-                    continue;
+                a_out.function = a_j.at("fn").get<std::uint16_t>();
+                a_out.flags = a_j.at("flags").get<std::uint8_t>();
+                a_out.object = a_j.at("object").get<std::uint8_t>();
+                a_out.dataID = a_j.at("dataID").get<std::uint32_t>();
+                if (a_j.contains("global")) {
+                    a_out.compareIsGlobal = true;
+                    a_out.compareGlobal = a_j.at("global").get<std::string>();
+                } else {
+                    a_out.compareFloat = a_j.at("value").get<float>();
                 }
-                if (slot < 0 || slot >= kPoolSize || !it.value().is_object()) {
-                    continue;
+                const auto& arr = a_j.at("params");
+                for (std::size_t i = 0; i < 2 && i < arr.size(); ++i) {
+                    if (arr[i].contains("form")) {
+                        a_out.params[i].isForm = true;
+                        a_out.params[i].form = arr[i].at("form").get<std::string>();
+                    } else {
+                        a_out.params[i].raw = arr[i].at("raw").get<std::uint64_t>();
+                    }
                 }
-                Recipe r;
-                r.source = it.value().value("source", std::string{});
-                r.early = it.value().value("early", true);
-                if (!r.source.empty()) {
-                    g_slots[static_cast<std::size_t>(slot)] = r;
-                }
+            } catch (const std::exception&) {
+                return false;
             }
+            return true;
         }
 
-        void SaveRegistry()
+        nlohmann::json AbilitiesArray()
         {
-            nlohmann::json doc;
-            doc["slots"] = nlohmann::json::object();
+            auto arr = nlohmann::json::array();
             for (int i = 0; i < kPoolSize; ++i) {
                 const auto& s = g_slots[static_cast<std::size_t>(i)];
                 if (!s) {
                     continue;
                 }
                 nlohmann::json j;
-                j["source"] = s->source;
-                j["early"] = s->early;
-                doc["slots"][std::to_string(i)] = j;
+                j["slot"] = i;
+                j["content"] = s->content;
+                j["generation"] = s->generation;
+                j["tombstone"] = s->tombstone;
+                auto eff = nlohmann::json::array();
+                for (const auto& e : s->effects) {
+                    nlohmann::json ej;
+                    ej["mgef"] = e.mgef;
+                    ej["magnitude"] = e.magnitude;
+                    ej["area"] = e.area;
+                    ej["duration"] = e.duration;
+                    ej["cost"] = e.cost;
+                    auto cond = nlohmann::json::array();
+                    for (const auto& c : e.conditions) {
+                        cond.push_back(ToJson(c));
+                    }
+                    ej["conditions"] = cond;
+                    eff.push_back(ej);
+                }
+                j["effects"] = eff;
+                arr.push_back(j);
             }
-            std::error_code ec;
-            std::filesystem::create_directories(
-                std::filesystem::path(kRegistryPath).parent_path(), ec);
-            std::ofstream out(kRegistryPath, std::ios::trunc);
-            if (!out) {
-                SKSE::log::error("pool: could not write {}", kRegistryPath);
-                return;
-            }
-            out << doc.dump(2);
+            return arr;
         }
 
-        // --- the ability itself -----------------------------------------------
-
-        // Take it off and PROVE it came off before touching the effect list.
-        // Rewriting the list under a live ability is what strands a modifier:
-        // the engine holds pointers to the Effects the active effect was built
-        // from, and nothing ever runs to undo what they applied. This is design
-        // §5.4, and it is also the confound that cost a measurement in the token
-        // spike - so it is in from the first line here.
-        bool EnsureOff(RE::SpellItem* a_spell, const char* a_why)
+        // Rotate two generations before replacing. The registry is the only
+        // record of which ability a save is pointing at: lose it and the saves
+        // are not recoverable by inspection, because a pool spell says nothing
+        // about who it was for. Losing settings loses a preference; losing this
+        // loses the mapping.
+        void RotateBackups()
         {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player || !a_spell || !player->HasSpell(a_spell)) {
-                return true;
-            }
-            player->RemoveSpell(a_spell);
-            if (player->HasSpell(a_spell)) {
-                SKSE::log::error("pool: RemoveSpell did NOT take {:08X} off ({}) - refusing to "
-                                 "touch its effects, the measurement would be worthless",
-                    a_spell->GetFormID(), a_why);
+            namespace fs = std::filesystem;
+            const fs::path cur{ kRegistryPath };
+            std::error_code ec;
+            fs::remove(fs::path{ std::string(kRegistryPath) + ".bak2" }, ec);
+            fs::rename(fs::path{ std::string(kRegistryPath) + ".bak1" },
+                fs::path{ std::string(kRegistryPath) + ".bak2" }, ec);
+            fs::copy_file(cur, fs::path{ std::string(kRegistryPath) + ".bak1" },
+                fs::copy_options::overwrite_existing, ec);
+        }
+
+        bool SaveRegistry()
+        {
+            nlohmann::json doc;
+            doc["schema"] = kSchema;
+            const auto arr = AbilitiesArray();
+            const auto body = arr.dump();
+            doc["checksum"] = std::format("{:016x}", Fnv1a(body));
+            doc["abilities"] = arr;
+
+            RotateBackups();
+            if (!WriteFileAtomic(kRegistryPath, doc.dump(2))) {
+                SKSE::log::error("abilities: could not write {} - no new allocation is in effect",
+                    kRegistryPath);
                 return false;
             }
             return true;
         }
 
-        // Fill a pool spell from its recipe. The old Effect objects are
-        // deliberately leaked rather than deleted: the engine may still hold
-        // pointers into them, and this code is thrown away anyway.
-        bool Hydrate(int a_slot, const char* a_why)
+        // Returns false only for a registry that EXISTS and is broken. A
+        // missing file is a first run.
+        bool LoadRegistry(std::string& a_why)
         {
-            const auto& rec = g_slots[static_cast<std::size_t>(a_slot)];
-            if (!rec) {
+            g_slots.assign(kPoolSize, std::nullopt);
+            g_byContent.clear();
+
+            std::ifstream in(kRegistryPath);
+            if (!in) {
+                return true;
+            }
+            nlohmann::json doc;
+            try {
+                in >> doc;
+            } catch (const std::exception& e) {
+                a_why = std::format("{} is not readable ({})", kRegistryPath, e.what());
                 return false;
+            }
+            const int schema = doc.value("schema", 0);
+            if (schema != kSchema) {
+                a_why = std::format("{} is schema {}, this build reads {}", kRegistryPath, schema,
+                    kSchema);
+                return false;
+            }
+            if (!doc.contains("abilities") || !doc["abilities"].is_array()) {
+                a_why = std::format("{} has no abilities list", kRegistryPath);
+                return false;
+            }
+            const auto stored = doc.value("checksum", std::string{});
+            const auto actual = std::format("{:016x}", Fnv1a(doc["abilities"].dump()));
+            if (stored != actual) {
+                a_why = std::format("{} does not match its own checksum - it has been edited or "
+                                    "truncated (a copy of the last two good ones is beside it)",
+                    kRegistryPath);
+                return false;
+            }
+
+            for (const auto& j : doc["abilities"]) {
+                const int slot = j.value("slot", -1);
+                if (slot < 0 || slot >= kPoolSize) {
+                    a_why = std::format("{} refers to slot {}, which is outside the pool",
+                        kRegistryPath, slot);
+                    return false;
+                }
+                Entry e;
+                e.content = j.value("content", std::string{});
+                e.generation = j.value("generation", 0u);
+                e.tombstone = j.value("tombstone", false);
+                for (const auto& ej : j.value("effects", nlohmann::json::array())) {
+                    RecipeEffect re;
+                    re.mgef = ej.value("mgef", std::string{});
+                    re.magnitude = ej.value("magnitude", 0.0f);
+                    re.area = ej.value("area", 0u);
+                    re.duration = ej.value("duration", 0u);
+                    re.cost = ej.value("cost", 0.0f);
+                    for (const auto& cj : ej.value("conditions", nlohmann::json::array())) {
+                        RecipeCondition rc;
+                        if (!FromJson(cj, rc)) {
+                            a_why = std::format("{} has a condition this build cannot read (slot "
+                                                "{})",
+                                kRegistryPath, slot);
+                            return false;
+                        }
+                        re.conditions.push_back(std::move(rc));
+                    }
+                    e.effects.push_back(std::move(re));
+                }
+                if (!e.tombstone && !e.content.empty()) {
+                    g_byContent[e.content] = slot;
+                }
+                g_slots[static_cast<std::size_t>(slot)] = std::move(e);
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Hydration
+        // ---------------------------------------------------------------
+
+        void ApplyCondition(RE::TESConditionItem* a_node, const RecipeCondition& a_c, bool& a_ok)
+        {
+            a_node->data.functionData.function =
+                static_cast<RE::FUNCTION_DATA::FunctionID>(a_c.function);
+            *reinterpret_cast<std::uint8_t*>(&a_node->data.flags) = a_c.flags;
+            a_node->data.object = static_cast<RE::CONDITIONITEMOBJECT>(a_c.object);
+            a_node->data.dataID = a_c.dataID;
+
+            if (a_c.compareIsGlobal) {
+                auto* g = LookupColon(a_c.compareGlobal);
+                if (!g) {
+                    a_ok = false;
+                    return;
+                }
+                a_node->data.comparisonValue.g = reinterpret_cast<RE::TESGlobal*>(g);
+            } else {
+                a_node->data.comparisonValue.f = a_c.compareFloat;
+            }
+            for (int i = 0; i < 2; ++i) {
+                if (a_c.params[i].isForm) {
+                    auto* f = LookupColon(a_c.params[i].form);
+                    if (!f) {
+                        a_ok = false;
+                        return;
+                    }
+                    a_node->data.functionData.params[i] = f;
+                } else {
+                    a_node->data.functionData.params[i] =
+                        reinterpret_cast<void*>(a_c.params[i].raw);
+                }
+            }
+        }
+
+        // Fill one pool spell from its recipe. Called only from
+        // InitAtDataLoaded and from a fresh allocation, so nothing can be
+        // holding the spell yet - which is the rule that matters, because
+        // rewriting the effect list under a live ability is what strands a
+        // modifier in the first place.
+        bool Hydrate(int a_slot)
+        {
+            auto& s = g_slots[static_cast<std::size_t>(a_slot)];
+            if (!s) {
+                return true;
             }
             auto* spell = PoolSpell(a_slot);
             if (!spell) {
-                SKSE::log::error("pool: slot {} - {} does not resolve. Is {} enabled?", a_slot,
-                    std::format("{:06X}", kPoolBase + static_cast<std::uint32_t>(a_slot)),
-                    kPoolPlugin);
+                s->invalid = true;
+                SKSE::log::error("abilities: slot {} does not resolve in {}", a_slot, kPoolPlugin);
                 return false;
             }
-            if (!EnsureOff(spell, a_why)) {
-                return false;
+
+            std::vector<RE::Effect*> built;
+            bool ok = true;
+            for (const auto& re : s->effects) {
+                auto* mgef = LookupColon(re.mgef);
+                auto* base = mgef ? mgef->As<RE::EffectSetting>() : nullptr;
+                if (!base) {
+                    SKSE::log::warn("abilities: slot {} wants magic effect {}, which does not "
+                                    "resolve - is its plugin still enabled?",
+                        a_slot, re.mgef);
+                    ok = false;
+                    break;
+                }
+                auto* eff = new RE::Effect();
+                eff->baseEffect = base;
+                eff->effectItem.magnitude = re.magnitude;
+                eff->effectItem.area = re.area;
+                eff->effectItem.duration = re.duration;
+                eff->cost = re.cost;
+
+                RE::TESConditionItem** tail = &eff->conditions.head;
+                for (const auto& rc : re.conditions) {
+                    auto* node = new RE::TESConditionItem();
+                    node->next = nullptr;
+                    ApplyCondition(node, rc, ok);
+                    if (!ok) {
+                        break;
+                    }
+                    *tail = node;
+                    tail = &node->next;
+                }
+                built.push_back(eff);
+                if (!ok) {
+                    break;
+                }
             }
-            auto* src = LookupColon(rec->source);
-            auto* ench = src ? src->As<RE::EnchantmentItem>() : nullptr;
-            if (!ench) {
-                SKSE::log::error("pool: slot {} source '{}' is not a resolvable enchantment",
-                    a_slot, rec->source);
+
+            if (!ok) {
+                // Nothing partial reaches the spell. The Effects built so far
+                // are leaked rather than deleted: ~Effect runs ~TESCondition,
+                // and unpicking a chain that ApplyCondition abandoned halfway
+                // is more ways to be wrong than the handful of bytes is worth
+                // on a path that only runs when something is already broken.
+                s->invalid = true;
+                SKSE::log::error("abilities: slot {} ({}) could not be rebuilt - it will not be "
+                                 "granted to anyone",
+                    a_slot, s->content);
                 return false;
             }
 
             spell->effects.clear();
-            int conditioned = 0;
-            for (auto* e : ench->effects) {
-                if (!e || !e->baseEffect) {
-                    continue;
-                }
-                auto* eff = new RE::Effect();
-                eff->baseEffect = e->baseEffect;
-                eff->effectItem = e->effectItem;
-                eff->cost = e->cost;
-                CopyConditions(eff->conditions, e->conditions);
-                if (eff->conditions.head) {
-                    ++conditioned;
-                }
-                spell->effects.push_back(eff);
+            for (auto* e : built) {
+                spell->effects.push_back(e);
             }
-            SKSE::log::info("pool: slot {} ({:08X}) hydrated {} [{}] - {} effect(s), {} "
-                            "conditioned, from {}",
-                a_slot, spell->GetFormID(), a_why, rec->early ? "early" : "late",
-                spell->effects.size(), conditioned, rec->source);
+            s->invalid = false;
             return true;
         }
-
-        std::string Describe(int a_slot)
-        {
-            const auto& rec = g_slots[static_cast<std::size_t>(a_slot)];
-            auto* spell = PoolSpell(a_slot);
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            const bool on = spell && player && player->HasSpell(spell);
-            if (!spell) {
-                return std::format("  {} : SPELL DOES NOT RESOLVE (is {} enabled?)", a_slot,
-                    kPoolPlugin);
-            }
-            if (!rec) {
-                return std::format("  {} : {:08X}  empty", a_slot, spell->GetFormID());
-            }
-            int conditioned = 0;
-            for (auto* e : spell->effects) {
-                if (e && e->conditions.head) {
-                    ++conditioned;
-                }
-            }
-            return std::format("  {} : {:08X}  {}  {} effect(s), {} conditioned  {}  <- {}",
-                a_slot, spell->GetFormID(), rec->early ? "early" : "late ", spell->effects.size(),
-                conditioned, on ? "GRANTED" : "off    ", rec->source);
-        }
     }
 
-    void HydrateAtDataLoaded()
+    // -------------------------------------------------------------------
+    // Public
+    // -------------------------------------------------------------------
+
+    void InitAtDataLoaded()
     {
-        LoadRegistry();
-        int early = 0;
-        int late = 0;
-        int failed = 0;
-        for (int i = 0; i < kPoolSize; ++i) {
-            const auto& rec = g_slots[static_cast<std::size_t>(i)];
-            if (!rec) {
-                continue;
-            }
-            if (!rec->early) {
-                ++late;
-                continue;
-            }
-            if (Hydrate(i, "kDataLoaded")) {
-                ++early;
+        g_state = State::Uninitialized;
+        g_why.clear();
+
+        // 1. Is the pool there, and big enough?
+        auto* first = PoolSpell(0);
+        auto* last = PoolSpell(kPoolSize - 1);
+        const bool poolPresent = first && last;
+
+        // 2. Read the registry regardless, because whether a MISSING pool is a
+        //    broken install or simply an option the user did not tick is
+        //    decided by whether anything was ever allocated (design 5.9).
+        std::string why;
+        const bool registryOk = LoadRegistry(why);
+        const bool registryEmpty = g_byContent.empty() &&
+            std::none_of(g_slots.begin(), g_slots.end(),
+                [](const auto& s) { return s.has_value(); });
+
+        if (!registryOk) {
+            Disable(why + ". Enchantment passthrough is off until this is sorted out; nothing "
+                          "has been changed on your character.");
+            return;
+        }
+
+        if (!poolPresent) {
+            if (registryEmpty) {
+                g_state = State::DisabledSafe;
+                g_why = std::format(
+                    "{} is not installed, so enchantment passthrough is off. Costumes look "
+                    "exactly the same; they just do not carry stats. Re-run the installer and "
+                    "tick it if you want them back.",
+                    kPoolPlugin);
+                SKSE::log::info("abilities: {}", g_why);
             } else {
-                ++failed;
+                // The dangerous half of 5.9. Saves already point at abilities in
+                // a plugin that is no longer there, and pretending the feature
+                // is merely "off" would let those saves keep loading while the
+                // modifiers they applied can never be taken back off.
+                Disable(std::format(
+                    "{} is MISSING but {} has already handed out abilities. Your saves refer to "
+                    "forms in that plugin. Put it back - re-run the installer with enchantment "
+                    "passthrough ticked - before loading a save, or the bonuses it applied "
+                    "cannot be removed.",
+                    kPoolPlugin, kRegistryPath));
+            }
+            return;
+        }
+        // PoolValidated -> RecipesLoaded, both reached by getting here: the pool
+        // resolved at both ends and the registry parsed with a matching
+        // checksum. They are named in the enum because the design names them,
+        // not because anything can observe the gap.
+        g_state = State::RecipesLoaded;
+
+        // 3. Fill every allocated ability NOW, before any save can be read.
+        //    Measured: doing this after the save is up strands the modifier.
+        int ok = 0;
+        int bad = 0;
+        for (int i = 0; i < kPoolSize; ++i) {
+            if (!g_slots[static_cast<std::size_t>(i)]) {
+                continue;
+            }
+            if (Hydrate(i)) {
+                ++ok;
+            } else {
+                ++bad;
             }
         }
-        if (early || late || failed) {
-            // This line is the experiment's timestamp. It has to appear BEFORE
-            // the save-load lines in the log, or the early/late distinction the
-            // whole measurement rests on did not actually happen.
-            SKSE::log::info("pool: kDataLoaded - {} slot(s) hydrated early, {} left for the "
-                            "console (late), {} failed",
-                early, late, failed);
-        }
+        g_state = State::Ready;  // via AbilitiesHydrated - see above
+
+        const auto u = PoolUsage();
+        SKSE::log::info("abilities: ready - {} rebuilt, {} unavailable, {} live / {} tombstoned / "
+                        "{} free of {}",
+            ok, bad, u.used, u.tombstoned, u.free, u.total);
     }
 
-    void PoolCommand(RE::TESObjectREFR*, const std::string& a_args)
+    State CurrentState() { return g_state; }
+    bool Ready() { return g_state == State::Ready; }
+    std::string DisabledReason() { return g_state == State::Ready ? std::string{} : g_why; }
+
+    Usage PoolUsage()
+    {
+        Usage u;
+        u.total = kPoolSize;
+        for (const auto& s : g_slots) {
+            if (!s) {
+                continue;
+            }
+            if (s->tombstone) {
+                ++u.tombstoned;
+            } else {
+                ++u.used;
+            }
+        }
+        u.free = u.total - u.used - u.tombstoned;
+        return u;
+    }
+
+    RE::SpellItem* AbilityFor(const std::string& a_contentId)
+    {
+        if (!Ready()) {
+            return nullptr;
+        }
+        if (const auto it = g_byContent.find(a_contentId); it != g_byContent.end()) {
+            const auto& s = g_slots[static_cast<std::size_t>(it->second)];
+            return (s && !s->invalid) ? PoolSpell(it->second) : nullptr;
+        }
+
+        auto* form = LookupColon(a_contentId);
+        const RE::EnchantmentItem* ench = nullptr;
+        if (form) {
+            if (auto* asEnch = form->As<RE::EnchantmentItem>()) {
+                ench = asEnch;
+            } else if (auto* armo = form->As<RE::TESObjectARMO>()) {
+                ench = armo->formEnchanting;
+            }
+        }
+        std::vector<RecipeEffect> effects;
+        std::string why;
+        if (!BuildRecipe(ench, effects, why)) {
+            SKSE::log::info("abilities: no ability for {} - {}", a_contentId, why);
+            return nullptr;
+        }
+
+        // Monotonic: never reuse a slot, not even a tombstoned one. An old save
+        // can still name it, and handing that id to a different content would
+        // apply someone else's bonus rather than nothing at all - a wrong number
+        // is harder to notice than a missing one (design 5.2).
+        int slot = -1;
+        for (int i = 0; i < kPoolSize; ++i) {
+            if (!g_slots[static_cast<std::size_t>(i)]) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            SKSE::log::error("abilities: the pool is full ({} of {} used). New content keeps its "
+                             "looks and loses its stats; existing content is unaffected.",
+                kPoolSize, kPoolSize);
+            return nullptr;
+        }
+
+        Entry e;
+        e.content = a_contentId;
+        e.effects = std::move(effects);
+        g_slots[static_cast<std::size_t>(slot)] = std::move(e);
+
+        // Save BEFORE building the form (design 6): a slot that is in use but
+        // not on disk would be handed out again next launch, to different
+        // content, while a save still points at it.
+        if (!SaveRegistry()) {
+            g_slots[static_cast<std::size_t>(slot)].reset();
+            return nullptr;
+        }
+        if (!Hydrate(slot)) {
+            return nullptr;
+        }
+        g_byContent[a_contentId] = slot;
+        SKSE::log::info("abilities: {} -> slot {} ({} effect(s))", a_contentId, slot,
+            g_slots[static_cast<std::size_t>(slot)]->effects.size());
+        return PoolSpell(slot);
+    }
+
+    void AbilitiesCommand(const std::string& a_args)
     {
         std::istringstream iss(a_args);
         std::string sub;
         iss >> sub;
 
-        if (sub.empty() || sub == "list") {
-            LoadRegistry();
-            Print(std::format("[CEF pool] {} slots ({})", kPoolSize, kPoolPlugin));
-            for (int i = 0; i < kPoolSize; ++i) {
-                Print(Describe(i));
-                SKSE::log::info("pool:{}", Describe(i));
+        if (sub.empty() || sub == "state" || sub == "usage") {
+            const auto u = PoolUsage();
+            Print(std::format("[CEF abilities] {} - {} used, {} tombstoned, {} free of {}",
+                Ready() ? "ready" : "NOT READY", u.used, u.tombstoned, u.free, u.total));
+            if (!Ready()) {
+                Print(std::format("  {}", g_why));
             }
             return;
         }
 
-        if (sub == "clear") {
-            LoadRegistry();
+        if (sub == "list") {
+            int shown = 0;
             for (int i = 0; i < kPoolSize; ++i) {
-                if (auto* spell = PoolSpell(i)) {
-                    EnsureOff(spell, "clear");
+                const auto& s = g_slots[static_cast<std::size_t>(i)];
+                if (!s) {
+                    continue;
+                }
+                const auto line = std::format("  {:4} {}{}{}  {} effect(s)  <- {}", i,
+                    s->tombstone ? "tomb " : "live ", s->invalid ? "INVALID " : "",
+                    std::format("gen{}", s->generation), s->effects.size(), s->content);
+                Print(line);
+                SKSE::log::info("abilities:{}", line);
+                if (++shown >= 40) {
+                    Print("  ... (the rest is in the log)");
+                    break;
                 }
             }
-            g_slots = {};
-            SaveRegistry();
-            Print("[CEF pool] every slot released and the registry emptied");
-            return;
-        }
-
-        int slot = -1;
-        {
-            std::string slotArg;
-            iss >> slotArg;
-            try {
-                slot = std::stoi(slotArg);
-            } catch (...) {
-                slot = -1;
+            if (shown == 0) {
+                Print("[CEF abilities] nothing allocated yet");
             }
-        }
-        if (slot < 0 || slot >= kPoolSize) {
-            Print(std::format("[CEF pool] usage: cef pool [list | clear] | "
-                              "cef pool <set|on|off|hydrate> <0-{}> [args]",
-                kPoolSize - 1));
             return;
         }
 
-        LoadRegistry();
-
-        if (sub == "set") {
-            std::string source;
-            std::string when;
-            iss >> source >> when;
-            if (source.find(':') == std::string::npos) {
-                Print("[CEF pool] usage: cef pool set <slot> <FormID:Plugin.esp of an ENCH> [late]");
+        if (sub == "alloc") {
+            std::string id;
+            std::getline(iss, id);
+            while (!id.empty() && id.front() == ' ') {
+                id.erase(id.begin());
+            }
+            if (id.find(':') == std::string::npos) {
+                Print("[CEF abilities] usage: cef abilities alloc <FormID:Plugin.esp>");
                 return;
             }
-            Recipe r;
-            r.source = source;
-            r.early = (when != "late");
-            g_slots[static_cast<std::size_t>(slot)] = r;
-            SaveRegistry();
-            if (Hydrate(slot, "set")) {
-                Print(std::format("[CEF pool] slot {} = {} ({}) - hydrated now and saved to the "
-                                  "registry",
-                    slot, source, r.early ? "early" : "late"));
-                Print(Describe(slot));
-            } else {
-                Print(std::format("[CEF pool] slot {} recorded, but hydration FAILED - see the log",
-                    slot));
-            }
+            auto* spell = AbilityFor(id);
+            Print(spell ? std::format("[CEF abilities] {} -> {:08X}", id, spell->GetFormID())
+                        : std::format("[CEF abilities] no ability for {} - see the log", id));
             return;
         }
 
-        if (sub == "hydrate") {
-            Print(Hydrate(slot, "console")
-                      ? std::format("[CEF pool] slot {} refilled", slot)
-                      : std::format("[CEF pool] slot {} could not be refilled - see the log", slot));
-            return;
-        }
-
-        auto* spell = PoolSpell(slot);
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!spell || !player) {
-            Print(std::format("[CEF pool] slot {} does not resolve (is {} enabled?)", slot,
-                kPoolPlugin));
-            return;
-        }
-
-        if (sub == "on") {
-            if (spell->effects.empty()) {
-                Print(std::format("[CEF pool] slot {} is empty - `cef pool set` it first. An empty "
-                                  "ability grants nothing and measures nothing",
-                    slot));
-                return;
-            }
-            if (player->HasSpell(spell)) {
-                Print(std::format("[CEF pool] slot {} is already granted", slot));
-                return;
-            }
-            player->AddSpell(spell);
-            // Verify, the same way `off` does. Logging "granted" straight after
-            // AddSpell records that the call was MADE, not that it took - and a
-            // measurement built on that is worth nothing. The off path had this
-            // check from the start and the on path did not, which is the same
-            // asymmetry the design document has to avoid (§5.4).
-            if (!player->HasSpell(spell)) {
-                Print(std::format("[CEF pool] slot {} did NOT go on - AddSpell was refused", slot));
-                SKSE::log::error("pool: AddSpell did NOT take slot {} ({:08X})", slot,
-                    spell->GetFormID());
-                return;
-            }
-            SKSE::log::info("pool: granted slot {} ({:08X}), {} effect(s)", slot,
-                spell->GetFormID(), spell->effects.size());
-            // A constant-effect ability lands a few seconds AFTER AddSpell, so an
-            // immediate `cef av` reads a clean zero and looks like a failure. That
-            // cost a false read on 2026-09-13.
-            Print(std::format("[CEF pool] slot {} granted - wait ~10s before `cef av`, the "
-                              "effect does not land instantly",
-                slot));
-            Print(Describe(slot));
-            return;
-        }
-
-        if (sub == "off") {
-            if (!player->HasSpell(spell)) {
-                Print(std::format("[CEF pool] slot {} was not granted", slot));
-                return;
-            }
-            player->RemoveSpell(spell);
-            if (player->HasSpell(spell)) {
-                Print(std::format("[CEF pool] slot {} REFUSED to come off - that is a result, "
-                                  "write it down",
-                    slot));
-                SKSE::log::error("pool: RemoveSpell did NOT take slot {} ({:08X}) off", slot,
-                    spell->GetFormID());
-            } else {
-                Print(std::format("[CEF pool] slot {} removed - now run `cef av`", slot));
-                SKSE::log::info("pool: removed slot {} ({:08X})", slot, spell->GetFormID());
-            }
-            return;
-        }
-
-        Print("[CEF pool] list | set <slot> <ENCH id> [late] | on <slot> | off <slot> | "
-              "hydrate <slot> | clear");
+        Print("[CEF abilities] state | list | alloc <id> | usage");
     }
 }

@@ -1,44 +1,84 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace RE
 {
-    class TESObjectREFR;
+    class EnchantmentItem;
+    class SpellItem;
 }
 
-namespace CostumeFW::pool
+namespace CostumeFW::abilities
 {
-    // SPIKE - throwaway. Measures ONE question, and nothing else:
+    // The fixed ability pool - CostumeFW_Abilities.esp.
     //
-    //   Does an ability whose source SPEL is a STATIC plugin form, filled in at
-    //   runtime, still come off cleanly after a full process restart?
+    // WHY THIS EXISTS
+    //   Up to 1.6.2, a costume's enchantment effects were put on a SpellItem
+    //   created at runtime. A runtime form has a 0xFF form ID, which does not
+    //   exist on the next launch, so the saved ActiveEffect that referenced it
+    //   could not be rebuilt - it was dropped WITHOUT Finish(), and the actor
+    //   value modifier it had applied stayed on the character forever. Measured
+    //   2026-09-12 to hit both Perm and Temp modifiers.
     //
-    // That is the whole of ENCHANTMENT_ABILITY_POOL_DESIGN.md §7.1. Every other
-    // part of that design - the registry, the tombstones, the state machine, the
-    // dedicated plugin - is worthless if the answer is no, so it is measured
-    // FIRST, on a throwaway test plugin, before any of it is built.
+    //   Measured 2026-09-13: an ability whose source SPEL is a STATIC plugin
+    //   form, filled in at runtime, comes off cleanly after a full restart -
+    //   conditional effects included - PROVIDED the effect list is there before
+    //   the save is read. A control slot filled after the save was already up
+    //   stranded its modifier exactly as before. That is why InitAtDataLoaded()
+    //   is synchronous and runs at kDataLoaded: not as an optimisation, as the
+    //   condition of the whole thing working.
     //
-    // D2 restated: a dynamic (0xFF) SPEL does not resolve on the next launch, so
-    // the saved ActiveEffect that referenced it is dropped WITHOUT Finish(), and
-    // the actor-value modifier it applied is stranded. Measured 2026-09-12 to hit
-    // Perm AND Temp. A static form resolves - but resolving is only half of it.
-    // The engine also needs the spell's effect LIST to be there when it restores
-    // the ActiveEffect, and on a pool spell that list is ours to refill.
+    // WHY IT IS NOT ENOUGH TO RESOLVE THE FORM
+    //   In that same measurement the pool listing showed the control slots as
+    //   GRANTED with 0 effects: the spell was on the actor and its effect list
+    //   was empty. What drops the ActiveEffect is the missing effect LIST, not
+    //   a missing form. Anything that only reserves stable form IDs (DPF RE,
+    //   for instance) does not answer this by itself.
     //
-    // So the experiment has a CONTROL. Each slot is hydrated either:
-    //
-    //   early - at kDataLoaded, before any save can be loaded (what §5.3 asks for)
-    //   late  - only when the console says so, i.e. after the save is already up
-    //
-    // early green + late red  -> the ordering rule is real, and §5.3 is load-bearing
-    // both green              -> ordering does not matter; the design gets simpler
-    // both red                -> a static form is not sufficient; the design is void
-    //
-    // Test plugin: CEFTest_AbilityPool.esp, 8 empty constant-effect abilities at
-    // local 0x800-0x807. Nothing here touches CostumeFW.esp or the box path.
-    void HydrateAtDataLoaded();
+    // See cef_documents/active/ENCHANTMENT_ABILITY_POOL_DESIGN.md.
 
-    // `cef pool [list | set | on | off | hydrate | clear]`
-    void PoolCommand(RE::TESObjectREFR* a_target, const std::string& a_args);
+    enum class State
+    {
+        Uninitialized,
+        PoolValidated,      // the plugin is present and big enough
+        RecipesLoaded,      // the registry parsed and its checksum matched
+        AbilitiesHydrated,  // every allocated ability carries its effects
+        Ready,
+        DisabledSafe        // something failed; passthrough is OFF and stays off
+    };
+
+    // Call from kDataLoaded, SYNCHRONOUSLY, on the main thread. Not from
+    // AddTask: that would run after the save is loaded, which is the case the
+    // measurement showed strands modifiers.
+    void InitAtDataLoaded();
+
+    [[nodiscard]] State CurrentState();
+    [[nodiscard]] bool Ready();
+    // Empty when Ready. Otherwise one sentence a user can act on.
+    [[nodiscard]] std::string DisabledReason();
+
+    // Pool accounting, for the UI and the log (design 5.2).
+    struct Usage
+    {
+        int used{ 0 };        // allocated and live
+        int tombstoned{ 0 };  // content gone, recipe kept for old saves
+        int free{ 0 };
+        int total{ 0 };
+    };
+    [[nodiscard]] Usage PoolUsage();
+
+    // The ability that carries a_contentId's enchantment, allocating one and
+    // writing the registry if this content has never had one. Returns nullptr
+    // when not Ready, when the content contributes no effects, when the pool is
+    // full, or when the recipe cannot be serialized faithfully - never a
+    // half-filled spell. Main thread only.
+    //
+    // Phase 1 note: nothing calls this from the box path yet. It is reachable
+    // from `cef abilities alloc` so the registry can be exercised on its own.
+    [[nodiscard]] RE::SpellItem* AbilityFor(const std::string& a_contentId);
+
+    // `cef abilities [state | list | alloc <id> | usage | verify]`
+    void AbilitiesCommand(const std::string& a_args);
 }
