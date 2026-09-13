@@ -79,8 +79,12 @@ namespace CostumeFW::abilities
     // from `cef abilities alloc` so the registry can be exercised on its own.
     [[nodiscard]] RE::SpellItem* AbilityFor(const std::string& a_contentId);
 
-    // A save written before the pool existed has just been loaded, and these
-    // contents were active in it. Main thread.
+    // A save written before the pool existed has just been loaded. Call AFTER
+    // Reconcile, on the main thread: it reads the active set itself, because
+    // the co-save does not carry it. The co-save's ACTV record holds PERSIST
+    // items only - box definitions are global config, and which boxes are worn
+    // lives in the save's own equip state, which is why this is asked after the
+    // reconcile rather than handed a list by the loader.
     //
     // There is nothing to PREVENT here, which is worth being clear about. The
     // engine restores the actor's active effects before any CEF code runs, and
@@ -94,7 +98,7 @@ namespace CostumeFW::abilities
     // actor-value spellings the console wants, and leaves the fixing to the
     // player: CEF cannot tell its own leftovers from a bonus another mod
     // applied on purpose, so it does not subtract anything by itself.
-    void ReportLegacySave(const std::vector<std::string>& a_contents);
+    void ReportLegacySave(bool a_prePoolSave);
 
     // `cef abilities [state | list | alloc <id> | usage | legacy]`
     void AbilitiesCommand(const std::string& a_args);

@@ -2,6 +2,7 @@
 
 #include "AtomicWrite.h"
 #include "AvDiag.h"  // AvConsoleName - the legacy report must name actor values
+#include "SkinRebind.h"  // ActiveSnapshot - what is worn RIGHT NOW
 #include "ConsoleOut.h"
 #include "FormId.h"
 
@@ -849,10 +850,18 @@ namespace CostumeFW::abilities
         return PoolSpell(slot);
     }
 
-    void ReportLegacySave(const std::vector<std::string>& a_contents)
+    void ReportLegacySave(bool a_prePoolSave)
     {
-        if (a_contents.empty()) {
-            return;  // nothing was worn, so nothing was applied, so nothing stuck
+        if (!a_prePoolSave) {
+            return;
+        }
+        // The co-save cannot answer this: its ACTV record holds PERSIST items
+        // only, because box definitions are global config. Which boxes were
+        // worn is in the save's own equip state, so it is read here, after the
+        // reconcile has re-applied it.
+        std::vector<std::string> contents;
+        for (const auto& it : ActiveSnapshot()) {
+            contents.push_back(it.id);
         }
 
         // Sum what the old mechanism would have been applying. Unconditional
@@ -866,7 +875,7 @@ namespace CostumeFW::abilities
         int unreadable = 0;
         int noStats = 0;
 
-        for (const auto& id : a_contents) {
+        for (const auto& id : contents) {
             std::vector<RecipeEffect> effects;
             std::string why;
             if (!BuildRecipe(EnchantmentOf(id), effects, why)) {
@@ -918,7 +927,7 @@ namespace CostumeFW::abilities
 
         if (!certainRows.empty()) {
             out += std::format("\nMost likely stuck, from the {} item(s) that were active:\n",
-                a_contents.size());
+                contents.size());
             for (const auto& [name, total] : certainRows) {
                 out += std::format("  {:<22} {:+g}\n", name, total);
             }
@@ -930,11 +939,20 @@ namespace CostumeFW::abilities
                 out += std::format("  {:<22} {:+g}\n", name, total);
             }
         }
-        if (certainRows.empty() && possibleRows.empty()) {
+        if (contents.empty()) {
+            // Worth saying rather than staying quiet. Nothing is worn, so this
+            // load added nothing - but a character who wore boxes under 1.6.2
+            // and took them off later is still carrying whatever was live at
+            // every quit, and would otherwise never be told.
+            out +=
+                "\nNothing is being worn right now, so this load has not added anything.\n"
+                "If this character has worn CEF boxes under 1.6.2 or earlier, though, what\n"
+                "each of those sessions left behind is still there, and it adds up.\n";
+        } else if (certainRows.empty() && possibleRows.empty()) {
             out += std::format(
-                "\nNone of the {} active item(s) passed a plain numeric bonus through, so there\n"
-                "is probably nothing stuck. Check anyway.\n",
-                a_contents.size());
+                "\nNone of the {} item(s) being worn passes a plain numeric bonus through, so\n"
+                "there is probably nothing new stuck. Check anyway.\n",
+                contents.size());
         }
         if (unreadable) {
             out += std::format("\n{} effect(s) are not a simple number on an actor value and are\n"
