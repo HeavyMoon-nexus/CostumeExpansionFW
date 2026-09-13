@@ -3159,7 +3159,10 @@ namespace CostumeFW
         return idx >= 0 && g_boxes[idx].enabled;
     }
 
-    bool SetBoxEnabled(const std::string& a_token, bool a_enabled)
+    // The flag, the json and the token's stats - without converging the pool.
+    // Split out so the convergence pass itself can flip the flag (below) without
+    // calling back into the pass that is already running.
+    bool SetBoxEnabledNoSync(const std::string& a_token, bool a_enabled)
     {
         StoreLock lk;
         const int idx = FindBox(a_token);
@@ -3169,6 +3172,22 @@ namespace CostumeFW
         g_boxes[idx].enabled = a_enabled;
         WriteJson();
         SetTokenStats(g_boxes[idx]);  // disabled -> token stats cleared, enabled -> applied
+        return true;
+    }
+
+    bool SetBoxEnabled(const std::string& a_token, bool a_enabled)
+    {
+        if (!SetBoxEnabledNoSync(a_token, a_enabled)) {
+            return false;
+        }
+        // This switch decides whether a worn box pays its enchantments through,
+        // so flipping it CHANGES what should be granted right now. It used to
+        // write the flag and stop: with the token already on, nothing re-ran the
+        // convergence, and the box went on paying nothing until the next equip
+        // event happened to trigger one. Measured 2026-09-14: five minutes
+        // between ticking the box back on (01:28:46) and the ability actually
+        // landing, which took re-equipping the token (01:33:59).
+        ApplyBoxAbilities();
         return true;
     }
 
@@ -4057,10 +4076,30 @@ namespace CostumeFW
             wanted.insert(wanted.end(), admitted.begin(), admitted.end());
         };
 
-        // Said once per token for as long as the condition holds: ApplyBoxAbilities
-        // runs on every equip change, and a warning that repeats a hundred times
-        // is the same as no warning.
-        static std::unordered_set<std::string> s_saidTokenOff;
+        // A token that is WORN while its box's distribution is off is the state
+        // the two switches must never leave behind: "Distribute token" off takes
+        // the token away and zeroes its stats, yet here it is, on the player,
+        // showing its costume and paying nothing. Wearing a box is a request to
+        // use it, so the wearing wins and distribution goes back on.
+        //
+        // This sits here rather than in WearBoxToken because WearBoxToken is only
+        // CEF's own "Wear (show contents)" checkbox. A token equipped from the
+        // INVENTORY - which is how a box is normally worn - never goes through
+        // it, so hooking it covered the one path nobody uses (2026-09-14: the
+        // fix shipped, the test still measured nothing). This function sees the
+        // token worn no matter what put it on, so it is the only place the rule
+        // can be stated once.
+        if (cefOn) {
+            for (const auto& b : g_boxes) {
+                if (b.enabled || b.contents.empty() || !TokenWorn(b.token)) {
+                    continue;
+                }
+                SKSE::log::info("boxes: '{}'{} is WORN, so its token distribution is turned back "
+                                "ON - a box cannot be worn with its token withheld",
+                    b.token, b.label.empty() ? "" : " (" + b.label + ")");
+                SetBoxEnabledNoSync(b.token, true);  // no converge: we ARE the converge
+            }
+        }
 
         for (const auto& b : g_boxes) {
             // With CEF disabled nothing is injected, so a worn token must not still
@@ -4071,28 +4110,9 @@ namespace CostumeFW
             // ability only asked whether the token was worn - so a token put
             // on by any other means still granted the enchantments of a box
             // the user had turned off (review 2026-09-11 N2).
-            const bool tokenWorn = cefOn && TokenWorn(b.token);
-            const bool worn = tokenWorn && b.enabled;
+            const bool worn = cefOn && b.enabled && TokenWorn(b.token);
             if (worn) {
                 admit(b.contents, "a worn box");
-            }
-            // The display path is NOT gated by b.enabled, so an off box whose
-            // token is worn still SHOWS its costume while paying nothing. From
-            // the outside that is indistinguishable from an enchantment that
-            // broke, and until now it was the one drop the admit() gate above
-            // could not see - the silence it exists to prevent, on the branch
-            // that sat outside it. It cost a whole regression item before
-            // anyone thought to read the box definition (2026-09-14, 7.2 #3).
-            if (tokenWorn && !b.enabled && !b.contents.empty()) {
-                if (s_saidTokenOff.insert(b.token).second) {
-                    SKSE::log::warn(
-                        "boxes: '{}'{} is WORN but its token distribution is OFF - its {} "
-                        "content(s) are shown and pass NO stats through. Turn the box back on "
-                        "if its enchantments should apply.",
-                        b.token, b.label.empty() ? "" : " (" + b.label + ")", b.contents.size());
-                }
-            } else {
-                s_saidTokenOff.erase(b.token);
             }
             // Optional manual extra ability (dormant unless set in json). Still
             // an ESP-defined spell the user named, so it is not pool business.
@@ -4398,22 +4418,10 @@ namespace CostumeFW
             return false;
         }
         if (a_wear) {
-            // "Distribute token" off means the token is TAKEN OFF the player and
-            // its stats zeroed, and a box in that state pays no enchantments
-            // through (review 2026-09-11 N2). This function then added the token
-            // back and equipped it anyway - so CEF put a token on and refused to
-            // honour it, from two checkboxes in the same row of the same panel.
-            // Wearing is a request to use the box, and you cannot wear what you
-            // were not given: pressing Wear turns distribution on rather than
-            // resurrecting a parked token behind the switch's back. N2 still
-            // holds for the case it was written for - a token worn by some means
-            // that is not CEF, which ApplyBoxAbilities warns about and drops.
-            if (const int idx = FindBox(a_token); idx >= 0 && !g_boxes[idx].enabled) {
-                SKSE::log::info("boxes: '{}' is being worn, so its token distribution is turned "
-                                "back ON - a box cannot be worn with its token withheld",
-                    a_token);
-                SetBoxEnabled(a_token, true);  // json + token stats, before the equip
-            }
+            // A box whose distribution is off is put back on by the convergence
+            // in ApplyBoxAbilities, which the equip below triggers - one rule in
+            // one place, reached whether the token was put on from here or from
+            // the inventory.
             const auto counts = player->GetInventoryCounts();
             const auto it = counts.find(obj);
             if (it == counts.end() || it->second <= 0) {
