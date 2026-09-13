@@ -12,7 +12,9 @@
 #include "RE/E/EnchantmentItem.h"
 #include "RE/A/ActorValues.h"
 #include "RE/M/Misc.h"  // DebugNotification
+#include "RE/P/PlayerCharacter.h"
 #include "RE/S/SpellItem.h"
+#include "RE/T/TESObjectREFR.h"
 #include "RE/T/TESObjectARMO.h"
 #include "RE/T/TESCondition.h"
 #include "RE/T/TESDataHandler.h"
@@ -1102,8 +1104,10 @@ namespace CostumeFW::abilities
         RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
     }
 
-    void AbilitiesCommand(const std::string& a_args)
+    void AbilitiesCommand(RE::TESObjectREFR* a_target, const std::string& a_args)
     {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* target = a_target ? a_target->As<RE::Actor>() : nullptr;
         std::istringstream iss(a_args);
         std::string sub;
         iss >> sub;
@@ -1125,9 +1129,12 @@ namespace CostumeFW::abilities
                 if (!s) {
                     continue;
                 }
-                const auto line = std::format("  {:4} {}{}{}  {} effect(s)  <- {}", i,
+                auto* spell = PoolSpell(i);
+                const bool on = spell && player && player->HasSpell(spell);
+                const auto line = std::format("  {:4} {}{}{} {} {} effect(s)  <- {}", i,
                     s->tombstone ? "tomb " : "live ", s->invalid ? "INVALID " : "",
-                    std::format("gen{}", s->generation), s->effects.size(), s->content);
+                    std::format("gen{}", s->generation), on ? "GRANTED" : "off    ",
+                    s->effects.size(), s->content);
                 Print(line);
                 SKSE::log::info("abilities:{}", line);
                 if (++shown >= 40) {
@@ -1171,6 +1178,34 @@ namespace CostumeFW::abilities
             return;
         }
 
-        Print("[CEF abilities] state | list | alloc <id> | usage | legacy");
+        if (sub == "npc" || sub == "npcoff") {
+            // C7: the same proof on an actor that is not the player. Published
+            // costumes are still on the old spells, so there is no other way to
+            // put a pool ability on an NPC and watch it survive a restart.
+            if (!target) {
+                Print("[CEF abilities] click an actor in the console first");
+                return;
+            }
+            std::vector<std::string> wanted;
+            if (sub == "npc") {
+                std::string id;
+                std::getline(iss, id);
+                while (!id.empty() && id.front() == ' ') {
+                    id.erase(id.begin());
+                }
+                if (id.find(':') == std::string::npos) {
+                    Print("[CEF abilities] usage: cef abilities npc <FormID:Plugin.esp>");
+                    return;
+                }
+                wanted.push_back(id);
+            }
+            SyncToActor(target, wanted);
+            Print(std::format("[CEF abilities] converged {} to {} wanted content(s) - `cef av` on "
+                              "the same actor reads the result (wait ~10s)",
+                target->GetName(), wanted.size()));
+            return;
+        }
+
+        Print("[CEF abilities] state | list | alloc <id> | usage | legacy | npc <id> | npcoff");
     }
 }

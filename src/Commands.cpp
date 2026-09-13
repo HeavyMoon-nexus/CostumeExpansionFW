@@ -576,7 +576,7 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask(
                 [targetActor, rest] { AvReport(targetActor, rest); });
         } else if (sub == "abilities") {
-            SKSE::GetTaskInterface()->AddTask([rest] { abilities::AbilitiesCommand(rest); });
+            SKSE::GetTaskInterface()->AddTask([a_target, rest] { abilities::AbilitiesCommand(a_target, rest); });
         } else if (sub == "poolspike") {
             // SPIKE. Touches nothing but CEFTest_AbilityPool.esp.
             SKSE::GetTaskInterface()->AddTask(

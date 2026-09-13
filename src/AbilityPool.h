@@ -7,6 +7,7 @@
 namespace RE
 {
     class Actor;
+    class TESObjectREFR;
     struct Effect;
     class EffectSetting;
     class SpellItem;
@@ -143,6 +144,9 @@ namespace CostumeFW::abilities
     // applied on purpose, so it does not subtract anything by itself.
     void ReportLegacySave(bool a_prePoolSave);
 
-    // `cef abilities [state | list | alloc <id> | usage | legacy]`
-    void AbilitiesCommand(const std::string& a_args);
+    // `cef abilities [state | list | alloc <id> | usage | legacy | npc <id> | npcoff]`
+    // Takes the console's selected reference, so the npc subcommands can act on
+    // whoever is clicked - the only way to measure the pool on an actor that is
+    // not the player until published costumes move onto it.
+    void AbilitiesCommand(RE::TESObjectREFR* a_target, const std::string& a_args);
 }
