@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SkinRebind.h"
+#include "BoxStore.h"  // EnchantEffectInfo (the frozen fallback's type)
 
 #include <cstdint>
 #include <memory>
@@ -148,6 +149,20 @@ namespace CostumeFW
     std::vector<PubBindingInfo> PubBindingsSnapshot();
     void OnPublishTokenMoved(RE::FormID a_base, RE::FormID a_from, RE::FormID a_to);
     void ReapplyNpcBindings();
+    // What a published costume froze this content as worth at publish time, or
+    // empty when no published costume holds it.
+    //
+    // Keyed by CONTENT rather than handed down from a holder, because the
+    // fallback is a property of the content's owner and a content has exactly
+    // one owner. That lets ContentEffectsFor answer for any id without the
+    // caller knowing whether it came from a box or a costume - which is what
+    // stops the pool needing a different entry point per holder.
+    std::vector<EnchantEffectInfo> FrozenEffectsForContent(const std::string& a_contentId);
+
+    // The contents an actor should be paid stats for through the publish
+    // system: empty unless it is a wearer and publishing is grantable right now.
+    std::vector<std::string> PublishStatsFor(RE::Actor* a_actor);
+
     void SyncNpcAbilities();
     bool HasNprWork();
     bool AssignNpcPersist(RE::Actor* a_actor, const std::vector<std::string>& a_contents);

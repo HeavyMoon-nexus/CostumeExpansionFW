@@ -1,4 +1,5 @@
 #include "PublishStore.h"
+#include "AbilityPool.h"
 
 #include "BoxStore.h"
 #include "Config.h"
@@ -262,13 +263,19 @@ namespace CostumeFW
                     else RevokeAbility(a_actor, spell, manualKey);
                 }
             }
-            // Always run the removal branch (as BoxStore's SyncAbility does), so a
-            // wearer can never be left holding an ability CEF has stopped granting.
-            auto& ability = EnsurePubAbility(a_snap);
-            if (!ability.spell) return;
-            const std::string key = "pub:" + std::to_string(a_snap.pubSlot);
-            if (a_equip && ability.hasEffects) GrantAbility(a_actor, ability.spell, key);
-            else RevokeAbility(a_actor, ability.spell, key);
+            // The PLAYER is converged by ApplyBoxAbilities, which folds a worn
+            // costume in with their boxes and persist set. Doing it again here
+            // would revoke everything that is not this costume - SyncToActor
+            // converges the whole pool for an actor, so an actor must be
+            // converged exactly once per pass.
+            if (a_actor == RE::PlayerCharacter::GetSingleton()) return;
+
+            // An NPC draws from nothing else, so its whole set is this costume.
+            // Always run the empty case too, so a wearer can never be left
+            // holding an ability CEF has stopped granting.
+            std::vector<std::string> wanted;
+            if (a_equip) wanted = StatAdmittedContents(a_snap.contents);
+            abilities::SyncToActor(a_actor, wanted);
         }
 
         std::shared_ptr<PubSnapshot> SharedBySlot(int a_slot)
@@ -1391,6 +1398,46 @@ namespace CostumeFW
             }
         }
         RestoreNpcPersistWear();
+    }
+
+    std::vector<EnchantEffectInfo> FrozenEffectsForContent(const std::string& a_contentId)
+    {
+        std::vector<EnchantEffectInfo> out;
+        for (const auto& snap : g_published) {
+            if (!snap) {
+                continue;
+            }
+            const auto it = snap->enchants.find(a_contentId);
+            if (it == snap->enchants.end()) {
+                continue;
+            }
+            for (const auto& frozen : it->second) {
+                out.push_back({ frozen.mgef, frozen.magnitude });
+            }
+            break;  // one holder per content
+        }
+        return out;
+    }
+
+    std::vector<std::string> PublishStatsFor(RE::Actor* a_actor)
+    {
+        // NpcEspLoaded as well as the master switch: without the add-on the
+        // publish system is dormant, but a co-save restores its bindings
+        // anyway, and this would pay out from them (F13).
+        if (!a_actor || !CefEnabled() || !NpcEspLoaded()) {
+            return {};
+        }
+        for (auto& binding : g_bindings) {
+            if (!binding.wearer) {
+                continue;
+            }
+            const auto* snap = PubBySlot(binding.pubSlot);
+            if (!snap || ResolveActor(binding) != a_actor) {
+                continue;
+            }
+            return snap->contents;
+        }
+        return {};
     }
 
     void SyncNpcAbilities()

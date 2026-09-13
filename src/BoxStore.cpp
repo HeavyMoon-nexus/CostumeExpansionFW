@@ -4443,26 +4443,32 @@ namespace CostumeFW
             admit(ActivePersistIds(), "persist");
         }
 
+        // The player can be wearing a published costume as well as boxes, and
+        // SyncToActor converges the WHOLE pool for an actor - so calling it once
+        // per source would have the second call revoke what the first granted.
+        // Every source an actor draws from has to be in ONE list.
+        admit(PublishStatsFor(player), "a worn published costume");
+
         // One convergence over the whole pool. A content dropped from a box, a
-        // deleted box, a box whose token was handed to a publish slot, the
-        // master switch, a load: all of them are "not in wanted", and none of
-        // them needs a path of its own to avoid stranding an ability.
+        // deleted box, a box whose token was handed to a publish slot, a
+        // costume recalled, the master switch, a load: all of them are "not in
+        // wanted", and none needs a path of its own to avoid stranding.
         abilities::SyncToActor(player, wanted);
 
-        // Publish bindings (NPC wearers + the player wearing a publish token)
-        // follow the same master-switch contract - converge them in the same
-        // pass so a master toggle can never strand spells on an NPC (7.6).
-        // Still on the old synthesized spells until phase 4.
+        // NPC wearers converge one actor at a time, for the same reason and by
+        // the same rule (7.6): a master toggle can never strand spells on them.
         SyncNpcAbilities();
     }
 
     std::vector<abilities::SourceEffect> ContentEffectsFor(const std::string& a_contentId)
     {
         StoreLock lk;
-        // No frozen lookup: that fallback belongs to a holder (a published
-        // costume carrying what each piece was worth at publish time), and a
-        // caller asking about one content by id has no holder in hand.
-        return ContentEffects(a_contentId, {}, "pool");
+        // The frozen fallback is looked up BY CONTENT rather than passed in. It
+        // belongs to whichever published costume holds the piece, a piece has
+        // exactly one holder, and asking that way means one entry point answers
+        // for a box content and a published one alike.
+        return ContentEffects(a_contentId,
+            [](const std::string& a_id) { return FrozenEffectsForContent(a_id); }, "pool");
     }
 
     void RebuildBoxAbility(const std::string& a_token)
@@ -4506,20 +4512,35 @@ namespace CostumeFW
         // KEEP the forms. Forgetting them here is what stacked a "Costume Stats"
         // per in-process reload: the save restores the ability by form id, and a
         // forgotten form is one nobody can ever remove again (v1.6.1.1).
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        int dropped = 0;
-        for (auto& [token, ability] : g_boxSpells) {
-            ability.dirty = true;
-            dropped += DropAbilityFrom(player, ability, "box:" + token) ? 1 : 0;
+        // Nothing to take off any more: the pool's abilities are static forms,
+        // and the save being loaded brings its OWN spell list, so a previous
+        // save's grants are not carried into this one.
+        //
+        // What does need re-deriving is the VALUE. A content's effects are read
+        // from this save's hidden store, so the same piece can be worth
+        // something different here than it was in the save before - a captured,
+        // tempered original in one character's store and a bare base form in
+        // another's. RefreshContent re-points the content at a slot holding the
+        // right value, reusing one it has already had rather than taking a new
+        // one each time a character is switched.
+        int refreshed = 0;
+        for (const auto& b : g_boxes) {
+            for (const auto& c : b.contents) {
+                abilities::RefreshContent(c);
+                ++refreshed;
+            }
         }
-        g_persistAbility.dirty = true;
-        dropped += DropAbilityFrom(player, g_persistAbility, "persist") ? 1 : 0;
+        for (const auto& c : ActivePersistIds()) {
+            abilities::RefreshContent(c);
+            ++refreshed;
+        }
+        const int dropped = refreshed;
         // Published costumes too. Their contents are global, but the effects
         // built from them read THIS save's hidden store, so another save's build
         // must not be carried over - and until now nothing took them back
         // (review 2026-09-11 F08).
         InvalidatePublishAbilities();
-        SKSE::log::info("boxes: stat abilities invalidated for load ({} taken back)", dropped);
+        SKSE::log::info("boxes: stat abilities re-derived for this save ({} content(s))", dropped);
     }
 
     std::string BoxStatsSummary(int a_index)

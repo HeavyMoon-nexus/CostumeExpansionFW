@@ -887,17 +887,47 @@ namespace CostumeFW::abilities
             return;  // unchanged, which is the usual answer
         }
 
-        // Changed - a re-enchant, a temper, a different captured original. The
-        // old recipe is NOT edited in place for the same reason: a save may
-        // hold an effect built from it, and rewriting it there would change
-        // what an existing bonus is worth with nothing ever told about it. Take
-        // the next generation in a new slot instead (design 5.2).
-        const auto generation = cur->generation + 1;
+        // Changed - a re-enchant, a temper, or simply a different save. The old
+        // recipe is NOT edited in place: a save may hold an effect built from
+        // it, and rewriting it there would change what an existing bonus is
+        // worth with nothing ever told about it (design 5.2).
+        //
+        // But before taking a new slot, look for one this content has ALREADY
+        // had with exactly these effects. A content's value is per-save - it
+        // reads the captured original out of THIS save's hidden store - so a
+        // player alternating two characters flips between two values, and
+        // allocating on every flip would burn the pool on nothing. Matching
+        // first bounds the cost at one slot per distinct value the content has
+        // ever been worth, which is what the generations were for.
+        const auto rebuiltJson = EffectsJson(rebuilt);
+        std::uint32_t highest = cur->generation;
+        int reuse = -1;
+        for (int i = 0; i < kPoolSize; ++i) {
+            const auto& e = g_slots[static_cast<std::size_t>(i)];
+            if (!e || e->content != a_contentId) {
+                continue;
+            }
+            highest = std::max(highest, e->generation);
+            if (reuse < 0 && !e->invalid && EffectsJson(e->effects) == rebuiltJson) {
+                reuse = i;
+            }
+        }
+
         cur->tombstone = true;
         g_byContent.erase(a_contentId);
+        if (reuse >= 0) {
+            auto& back = g_slots[static_cast<std::size_t>(reuse)];
+            back->tombstone = false;
+            g_byContent[a_contentId] = reuse;
+            SaveRegistry();
+            SKSE::log::info("abilities: {} is back to the value it had in slot {} (gen{}) - "
+                            "slot {} tombstoned, no new slot taken",
+                a_contentId, reuse, back->generation, slot);
+            return;
+        }
         SKSE::log::info("abilities: {} changed - slot {} tombstoned, taking generation {}",
-            a_contentId, slot, generation);
-        Allocate(a_contentId, source, generation);
+            a_contentId, slot, highest + 1);
+        Allocate(a_contentId, source, highest + 1);
     }
 
     void SyncToActor(RE::Actor* a_actor, const std::vector<std::string>& a_wanted)
