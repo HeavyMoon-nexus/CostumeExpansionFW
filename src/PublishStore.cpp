@@ -183,19 +183,12 @@ namespace CostumeFW
                     else RevokeAbility(a_actor, spell, manualKey);
                 }
             }
-            // The PLAYER is converged by ApplyBoxAbilities, which folds a worn
-            // costume in with their boxes and persist set. Doing it again here
-            // would revoke everything that is not this costume - SyncToActor
-            // converges the whole pool for an actor, so an actor must be
-            // converged exactly once per pass.
-            if (a_actor == RE::PlayerCharacter::GetSingleton()) return;
-
-            // An NPC draws from nothing else, so its whole set is this costume.
-            // Always run the empty case too, so a wearer can never be left
-            // holding an ability CEF has stopped granting.
-            std::vector<std::string> wanted;
-            if (a_equip) wanted = StatAdmittedContents(a_snap.contents);
-            abilities::SyncToActor(a_actor, wanted);
+            // Pool abilities are NOT converged here. SyncToActor converges the
+            // whole pool for an actor, so an actor must be converged exactly
+            // once per pass with everything it draws from - and an actor can
+            // wear more than one published costume. The caller groups by actor
+            // and does it; this only handles the manual ESP spell, which is
+            // per-costume and stacks on its own.
         }
 
         std::shared_ptr<PubSnapshot> SharedBySlot(int a_slot)
@@ -1359,6 +1352,12 @@ namespace CostumeFW
         if (!a_actor || !CefEnabled() || !NpcEspLoaded()) {
             return {};
         }
+        // EVERY costume this actor wears. Returning the first match meant a
+        // player in two published costumes had the second one's contents left
+        // out of the wanted list - so the convergence took its abilities off
+        // again, and only one costume ever paid out. Two publish tokens can be
+        // worn at once; measured 2026-09-13, both equipped, only one applying.
+        std::vector<std::string> out;
         for (auto& binding : g_bindings) {
             if (!binding.wearer) {
                 continue;
@@ -1367,9 +1366,9 @@ namespace CostumeFW
             if (!snap || ResolveActor(binding) != a_actor) {
                 continue;
             }
-            return snap->contents;
+            out.insert(out.end(), snap->contents.begin(), snap->contents.end());
         }
-        return {};
+        return out;
     }
 
     void SyncNpcAbilities()
@@ -1386,11 +1385,37 @@ namespace CostumeFW
         // still runs the removal branch, which is what a wearer left over
         // from a session that HAD the add-on needs.
         const bool grantable = CefEnabled() && NpcEspLoaded();
+        auto* player = RE::PlayerCharacter::GetSingleton();
+
+        // Group by ACTOR before converging. One NPC can wear two published
+        // costumes, and converging per BINDING would have the second call
+        // revoke what the first granted - the same mistake that left a player
+        // in two costumes getting the benefit of one.
+        std::vector<std::pair<RE::Actor*, std::vector<std::string>>> perActor;
         for (auto& binding : g_bindings) {
             const auto* snap = PubBySlot(binding.pubSlot);
             if (!snap) continue;
-            if (auto* actor = ResolveActor(binding))
-                ApplyManualAbility(actor, *snap, grantable && binding.wearer);
+            auto* actor = ResolveActor(binding);
+            if (!actor) continue;
+            ApplyManualAbility(actor, *snap, grantable && binding.wearer);
+            // The player is converged by ApplyBoxAbilities, which folds worn
+            // costumes in with their boxes and persist set.
+            if (actor == player) continue;
+            auto it = std::find_if(perActor.begin(), perActor.end(),
+                [actor](const auto& e) { return e.first == actor; });
+            if (it == perActor.end()) {
+                perActor.push_back({ actor, {} });
+                it = std::prev(perActor.end());
+            }
+            if (grantable && binding.wearer) {
+                const auto admitted = StatAdmittedContents(snap->contents);
+                it->second.insert(it->second.end(), admitted.begin(), admitted.end());
+            }
+        }
+        // Empty sets included, so a wearer can never be left holding an ability
+        // CEF has stopped granting.
+        for (auto& [actor, wanted] : perActor) {
+            abilities::SyncToActor(actor, wanted);
         }
     }
 
