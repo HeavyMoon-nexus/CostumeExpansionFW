@@ -1,5 +1,6 @@
 #include "SmfUI.h"
 
+#include "AbilityPool.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Diag.h"
@@ -447,6 +448,35 @@ namespace CostumeFW::SmfUI
             ImGui::Text("RaceMenu / skee (body morph): %s",
                 BodyMorph::Available() ? "OK" : "MISSING");
             ImGui::Text("CostumeFW.esp: %s", espOk ? "OK" : "MISSING");
+
+            // Enchantment passthrough (design 5.2). The pool is finite and its
+            // slots are never handed to other content, so "how many are left"
+            // is a number the user has to be able to see BEFORE it runs out -
+            // at the wall the only thing left to say is that the next costume
+            // keeps its looks and loses its stats.
+            //
+            // Not in the MCM: that is frozen for the 1.6.4 removal, and this is
+            // new surface (decided 2026-09-14).
+            ImGui::SeparatorText("Enchantment passthrough");
+            const auto pool = abilities::PoolUsage();
+            if (abilities::Ready()) {
+                ImGui::Text("Working.");
+            } else {
+                ImGui::TextWrapped("OFF - %s", abilities::DisabledReason().c_str());
+            }
+            // "kept for old saves" rather than "tombstoned": what the number
+            // means to someone reading it is that the slot is not free and is
+            // not doing anything either, because a save may still name it.
+            ImGui::Text("Slots: %d in use, %d kept for old saves, %d free of %d", pool.used,
+                pool.tombstoned, pool.free, pool.total);
+            if (pool.free == 0) {
+                ImGui::TextWrapped("The pool is full. Costumes already registered are unaffected; "
+                                   "a NEW one will look right and pass no stats through.");
+            } else if (pool.free <= 64) {
+                ImGui::TextWrapped("Running low. Each costume whose enchantment CHANGES takes a "
+                                   "new slot and keeps the old one, so a piece that is re-enchanted "
+                                   "or tempered often costs more than one.");
+            }
 
             ImGui::SeparatorText("Maintenance");
             if (ImGui::Button("Prepare for uninstall##cfwun")) {

@@ -791,6 +791,22 @@ namespace CostumeFW::abilities
             g_byContent[a_contentId] = slot;
             SKSE::log::info("abilities: {} -> slot {} gen{} ({} effect(s))", a_contentId, slot,
                 a_generation, g_slots[static_cast<std::size_t>(slot)]->effects.size());
+
+            // Say something while there is still room to act. "The pool is full"
+            // arrives when the only remaining advice is that the next costume
+            // loses its stats; slots are never handed to other content, so
+            // nothing frees itself and the wall does not move back. Once per
+            // run - the count only ever goes down within a session.
+            static bool s_saidLow = false;
+            if (!s_saidLow) {
+                if (const auto u = PoolUsage(); u.free <= 64) {
+                    s_saidLow = true;
+                    SKSE::log::warn("abilities: {} slots left of {} ({} in use, {} kept for old "
+                                    "saves). A costume whose enchantment changes takes a new slot "
+                                    "and keeps the old one, so this is worth watching.",
+                        u.free, u.total, u.used, u.tombstoned);
+                }
+            }
             return PoolSpell(slot);
         }
     }
