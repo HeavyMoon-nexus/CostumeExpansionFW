@@ -3399,6 +3399,13 @@ namespace CostumeFW
     // token": a publish token in CostumeFW_NPC.esp resolves to an ARMO perfectly
     // well, and letting it through is the whole defect this release exists to
     // close.
+    std::uint32_t TokenSlotMask(const std::string& a_token)
+    {
+        StoreLock lk;
+        auto* armo = ResolveArmo(a_token);
+        return armo ? static_cast<std::uint32_t>(armo->GetSlotMask()) : 0u;
+    }
+
     TokenState ClassifyBoxToken(const std::string& a_colonId)
     {
         StoreLock lk;

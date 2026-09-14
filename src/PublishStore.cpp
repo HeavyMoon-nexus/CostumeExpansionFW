@@ -1195,12 +1195,25 @@ namespace CostumeFW
             StampSnapshotStats(*snap);
             if (!token) continue;
             token->fullName = ("Costume: " + snap->label).c_str();
-            if (snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
-                const auto mask = static_cast<RE::BGSBipedObjectForm::BipedObjectSlot>(
-                    1u << (snap->sourceSlot - 30));
-                token->bipedModelData.bipedObjectSlots = mask;
+            // The publish token has to occupy what the BOX occupied, and a box
+            // token is not always one bit: the shipped slot-31 token is 31|41
+            // (Hair + LongHair), which is the whole reason a wig box hides the
+            // real hair. Rebuilding the mask from sourceSlot dropped bit 41, so
+            // a published wig left the NPC's own hair showing through it.
+            //
+            // sourceSlot is still the fallback, because it is all a snapshot
+            // written before 1.6.4 has until the load migrates it, and because
+            // a token whose plugin is missing resolves to no mask at all - in
+            // which case the single bit is a better answer than none.
+            std::uint32_t mask = TokenSlotMask(snap->sourceToken);
+            if (mask == 0 && snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
+                mask = 1u << (snap->sourceSlot - 30);
+            }
+            if (mask != 0) {
+                const auto slots = static_cast<RE::BGSBipedObjectForm::BipedObjectSlot>(mask);
+                token->bipedModelData.bipedObjectSlots = slots;
                 for (auto* addon : token->armorAddons)
-                    if (addon) addon->bipedModelData.bipedObjectSlots = mask;
+                    if (addon) addon->bipedModelData.bipedObjectSlots = slots;
             }
         }
     }

@@ -443,6 +443,12 @@ namespace CostumeFW
     // The biped slot number (30-61) a token ARMO occupies, 0 if none/unresolved.
     int TokenSlot(const std::string& a_token);
 
+    // The token ARMO's WHOLE BOD2 mask, 0 when it does not resolve. A token is
+    // not always one bit: the shipped slot-31 token is 31|41 (Hair + LongHair),
+    // which is what makes a wig hide the real hair. Anything that copies a
+    // token's occupancy has to copy the mask, not rebuild it from TokenSlot.
+    std::uint32_t TokenSlotMask(const std::string& a_token);
+
     // The GENERATION 0 box token on a biped slot, or "" when there is none.
     //
     // 1.6.3 had exactly one token per slot and every one of them came from
