@@ -1,4 +1,5 @@
 #include "PublishStore.h"
+#include "AbilityPool.h"
 
 #include "BoxStore.h"
 #include "Config.h"
@@ -53,20 +54,6 @@ namespace CostumeFW
         std::unordered_set<RE::FormID> g_nprForms;
         int g_maxNpcInjected = 8;
         std::unordered_map<int, std::vector<RE::BGSKeyword*>> g_pubKeywords;
-        // One ability FORM per publish slot, created once and refilled in place -
-        // same contract as BoxStore's StatAbility, and for the same reason: the
-        // form id is written into the save (the wearer's added-spell list), an
-        // in-process load restores the ability from it, and a pointer we drop is
-        // an ability nobody can ever remove again. Here the wearer is usually an
-        // NPC, so it would stack on THEM (v1.6.1.1).
-        struct PubAbility
-        {
-            RE::SpellItem* spell{ nullptr };
-            bool hasEffects{ false };
-            bool dirty{ true };
-        };
-        std::unordered_map<int, PubAbility> g_pubEnchantSpells;
-        void DropPubAbility(int a_slot, PubAbility& a_ability);  // fwd (defined below)
 
         RE::Actor* ResolveActor(PubBinding& a_binding)
         {
@@ -175,82 +162,16 @@ namespace CostumeFW
                 for (auto* addon : token->armorAddons)
                     if (addon) addon->bipedModelData.bipedObjectSlots = mask;
             }
-            // Unpublished: take the ability off its wearers and mark it stale.
-            // The FORM is kept - erasing the entry would strand the ability on
-            // anyone still holding it (v1.6.1.1).
-            if (auto it = g_pubEnchantSpells.find(a_slot); it != g_pubEnchantSpells.end()) {
-                DropPubAbility(a_slot, it->second);
-                it->second.hasEffects = false;
-                it->second.dirty = true;
-            }
+            // Unpublished. Nothing to take off by hand: the slot's contents
+            // stop being wanted, and the convergence that follows a recall
+            // removes their abilities from whoever held them. The old code had
+            // to do it here because each slot owned a spell that would
+            // otherwise have been forgotten while still applied (v1.6.1.1) -
+            // a pool ability is never forgotten, so there is nothing to lose
+            // track of.
             g_hidden.erase(a_slot);
         }
 
-        // Take a slot's ability off everyone who could hold it. The effect list
-        // may not be rewritten under a live ability, and a slot that goes empty
-        // must not leave its old effects applied.
-        void DropPubAbility(int a_slot, PubAbility& a_ability)
-        {
-            if (!a_ability.spell) return;
-            const std::string key = "pub:" + std::to_string(a_slot);
-            for (auto& binding : g_bindings) {
-                if (binding.pubSlot != a_slot) continue;
-                if (auto* actor = ResolveActor(binding))
-                    RevokeAbility(actor, a_ability.spell, key);
-            }
-            RevokeAbility(RE::PlayerCharacter::GetSingleton(), a_ability.spell, key);
-        }
-
-        // The slot's ability form, refilled from the frozen snapshot when stale.
-        // Never freed and never replaced: a factory form is registered in the
-        // form table, so deleting it would leave a dangling id.
-        PubAbility& EnsurePubAbility(const PubSnapshot& a_snap)
-        {
-            auto& ability = g_pubEnchantSpells[a_snap.pubSlot];
-            if (!ability.spell) {
-                auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
-                ability.spell = factory ? factory->Create() : nullptr;
-                if (!ability.spell) return ability;
-                ability.spell->data.spellType = RE::MagicSystem::SpellType::kAbility;
-                ability.spell->data.castingType = RE::MagicSystem::CastingType::kConstantEffect;
-                ability.spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
-                ability.spell->data.costOverride = 0;
-                ability.dirty = true;
-            }
-            if (!ability.dirty) return ability;
-            const std::string label = "Costume Stats: " + a_snap.label;
-            ability.spell->fullName = label.c_str();
-            DropPubAbility(a_snap.pubSlot, ability);
-            // The SAME filler a normal box uses (review 2026-09-09 F14). The
-            // rebuild that used to live here kept only {mgef, magnitude} and
-            // zeroed area/duration with no conditions, so publishing an outfit
-            // quietly undid the v1.6.1 conditional-enchant fix - a "while
-            // sneaking" effect became always-on. It clears the old effect list
-            // itself, honors the per-content enchant toggle, and skips
-            // quarantined contents.
-            // The costume's own frozen copy of what each piece was worth at
-            // publish time, handed to the filler as a per-CONTENT last resort.
-            // It used to be a separate rebuild of the whole spell, run whenever
-            // the filler returned nothing at all, and that height was the bug
-            // (review 2026-09-11 F01/F02): it skipped the admission gate and
-            // the per-content toggle the filler applies, it re-created every
-            // effect flat - so a blacklisted or "while sneaking" piece came
-            // back unconditional, the third time that defect has been fixed -
-            // and its trigger was the WHOLE spell being empty, so one working
-            // piece suppressed every other piece's recovery while that piece
-            // going quiet resurrected them all.
-            ability.hasEffects = FillContentEnchantSpell(ability.spell, a_snap.contents,
-                label.c_str(), [&a_snap](const std::string& a_id) {
-                    std::vector<EnchantEffectInfo> out;
-                    const auto it = a_snap.enchants.find(a_id);
-                    if (it == a_snap.enchants.end()) return out;
-                    for (const auto& frozen : it->second)
-                        out.push_back({ frozen.mgef, frozen.magnitude });
-                    return out;
-                });
-            ability.dirty = false;
-            return ability;
-        }
 
         void ApplyManualAbility(RE::Actor* a_actor, const PubSnapshot& a_snap, bool a_equip)
         {
@@ -262,13 +183,32 @@ namespace CostumeFW
                     else RevokeAbility(a_actor, spell, manualKey);
                 }
             }
-            // Always run the removal branch (as BoxStore's SyncAbility does), so a
-            // wearer can never be left holding an ability CEF has stopped granting.
-            auto& ability = EnsurePubAbility(a_snap);
-            if (!ability.spell) return;
-            const std::string key = "pub:" + std::to_string(a_snap.pubSlot);
-            if (a_equip && ability.hasEffects) GrantAbility(a_actor, ability.spell, key);
-            else RevokeAbility(a_actor, ability.spell, key);
+            // The PLAYER is converged by ApplyBoxAbilities, which folds worn
+            // costumes in with their boxes and persist set.
+            if (a_actor == RE::PlayerCharacter::GetSingleton()) return;
+
+            // Converge from EVERY costume this actor wears, not just this one.
+            // SyncToActor converges the whole pool for an actor, so a set built
+            // from one binding would revoke the others - which is what made
+            // two published costumes on one wearer worth one. Built this way
+            // the answer does not depend on which binding asked, so the seven
+            // call sites can each call this without knowing about each other.
+            //
+            // a_equip is the caller's intent for THIS costume and overrides the
+            // binding flag in both directions, because some callers flip the
+            // flag before calling and some after.
+            std::vector<std::string> wanted = PublishStatsFor(a_actor);
+            if (a_equip) {
+                wanted.insert(wanted.end(), a_snap.contents.begin(), a_snap.contents.end());
+            } else {
+                std::erase_if(wanted, [&a_snap](const std::string& a_id) {
+                    return std::find(a_snap.contents.begin(), a_snap.contents.end(), a_id) !=
+                        a_snap.contents.end();
+                });
+            }
+            std::sort(wanted.begin(), wanted.end());
+            wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+            abilities::SyncToActor(a_actor, StatAdmittedContents(wanted));
         }
 
         std::shared_ptr<PubSnapshot> SharedBySlot(int a_slot)
@@ -472,18 +412,32 @@ namespace CostumeFW
         // publish ones were left holding the previous save's build (review
         // 2026-09-11 F08). It is the same defect f35418d fixed for boxes,
         // reached from the load path instead of from a plugin going missing.
-        for (auto& [slot, ability] : g_pubEnchantSpells) {
-            DropPubAbility(slot, ability);
-            ability.dirty = true;
+        // Nothing to take off: a pool ability is a static form and the save
+        // being loaded brings its own spell list. What needs re-deriving is the
+        // VALUE, against the store that just came in - the same thing
+        // InvalidateStatAbilities does for boxes and persist. Leaving published
+        // contents out of that pass was a gap phase 4 opened.
+        for (const auto& snap : g_published) {
+            if (!snap) {
+                continue;
+            }
+            for (const auto& c : snap->contents) {
+                abilities::RefreshContent(c);
+            }
         }
     }
 
     void RefreshPublishedStats(int a_pubSlot)
     {
-        if (const auto it = g_pubEnchantSpells.find(a_pubSlot); it != g_pubEnchantSpells.end()) {
-            DropPubAbility(a_pubSlot, it->second);
-            it->second.dirty = true;
-        }  // else: not built yet; EnsurePubAbility will build it fresh
+        // The costume's pieces may be worth something different now. A content
+        // whose value really changed is re-pointed at a slot holding the new
+        // one; nothing is granted or removed here, because the next
+        // ApplyBoxAbilities converges every actor anyway.
+        if (const auto* changed = PubBySlot(a_pubSlot)) {
+            for (const auto& c : changed->contents) {
+                abilities::RefreshContent(c);
+            }
+        }
         // Armor and weight do not live in the ability - they are written onto
         // the token ARMO's own fields, so the stale flag above does nothing for
         // them (F03).
@@ -553,14 +507,12 @@ namespace CostumeFW
     void ParsePublishJson(const nlohmann::json& a_doc)
     {
         g_published.clear();
-        // Snapshots are being replaced, so every slot ability is stale - but the
-        // FORMS stay, and each comes off its wearers here rather than being
-        // forgotten while still applied (v1.6.1.1).
-        for (auto& [slot, ability] : g_pubEnchantSpells) {
-            DropPubAbility(slot, ability);
-            ability.hasEffects = false;
-            ability.dirty = true;
-        }
+        // Snapshots are being replaced. Their contents may now be worth
+        // something different, or belong to nobody - both are settled by the
+        // convergence and by InvalidatePublishAbilities, which re-derives every
+        // published content's value. Nothing needs taking off here: a pool
+        // ability belongs to a content, not to a slot, so replacing the slots
+        // cannot orphan one.
         g_maxNpcInjected = std::clamp(a_doc.value("npcConfig", nlohmann::json::object())
             .value("maxNpcInjected", 8), 1, 64);
         std::unordered_set<int> slots;
@@ -1391,6 +1343,52 @@ namespace CostumeFW
             }
         }
         RestoreNpcPersistWear();
+    }
+
+    std::vector<EnchantEffectInfo> FrozenEffectsForContent(const std::string& a_contentId)
+    {
+        std::vector<EnchantEffectInfo> out;
+        for (const auto& snap : g_published) {
+            if (!snap) {
+                continue;
+            }
+            const auto it = snap->enchants.find(a_contentId);
+            if (it == snap->enchants.end()) {
+                continue;
+            }
+            for (const auto& frozen : it->second) {
+                out.push_back({ frozen.mgef, frozen.magnitude });
+            }
+            break;  // one holder per content
+        }
+        return out;
+    }
+
+    std::vector<std::string> PublishStatsFor(RE::Actor* a_actor)
+    {
+        // NpcEspLoaded as well as the master switch: without the add-on the
+        // publish system is dormant, but a co-save restores its bindings
+        // anyway, and this would pay out from them (F13).
+        if (!a_actor || !CefEnabled() || !NpcEspLoaded()) {
+            return {};
+        }
+        // EVERY costume this actor wears. Returning the first match meant a
+        // player in two published costumes had the second one's contents left
+        // out of the wanted list - so the convergence took its abilities off
+        // again, and only one costume ever paid out. Two publish tokens can be
+        // worn at once; measured 2026-09-13, both equipped, only one applying.
+        std::vector<std::string> out;
+        for (auto& binding : g_bindings) {
+            if (!binding.wearer) {
+                continue;
+            }
+            const auto* snap = PubBySlot(binding.pubSlot);
+            if (!snap || ResolveActor(binding) != a_actor) {
+                continue;
+            }
+            out.insert(out.end(), snap->contents.begin(), snap->contents.end());
+        }
+        return out;
     }
 
     void SyncNpcAbilities()

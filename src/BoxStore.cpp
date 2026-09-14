@@ -4,6 +4,8 @@
 #include "PublishStore.h"
 #include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
 #include "StoreLock.h"
+#include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
+#include "FormId.h"       // MakeColonId (shared with the ability pool)
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "nifcarrier/NifCarrierCore.h"
 
@@ -274,33 +276,9 @@ namespace CostumeFW
             return out;
         }
 
-        // Write a_data to a_path via a sibling ".tmp" + atomic rename, so a CTD /
-        // process kill mid-write can never leave a truncated file at a_path (the
-        // old trunc-overwrite could destroy CEF_settings.json - Codex review
-        // 2026-07-05 A-1). MoveFileEx(REPLACE_EXISTING) is atomic on NTFS and is
-        // hooked by MO2's usvfs like the rest of the Win32 file API.
-        bool WriteFileAtomic(const char* a_path, const std::string& a_data)
-        {
-            const std::string tmp = std::string(a_path) + ".tmp";
-            {
-                std::ofstream f(tmp, std::ios::trunc | std::ios::binary);
-                if (!f) {
-                    return false;
-                }
-                f << a_data;
-                f.flush();
-                if (!f.good()) {
-                    return false;
-                }
-            }
-            if (!MoveFileExA(tmp.c_str(), a_path, MOVEFILE_REPLACE_EXISTING)) {
-                SKSE::log::error("atomic write: MoveFileEx failed ({}) for {}",
-                    GetLastError(), a_path);
-                DeleteFileA(tmp.c_str());
-                return false;
-            }
-            return true;
-        }
+        // WriteFileAtomic moved to src/AtomicWrite.h - the ability registry needs
+        // the same guarantee, and a second copy of it would be a second place to
+        // fix.
 
         void WriteJson(bool a_writeManifest = true)
         {
@@ -453,26 +431,9 @@ namespace CostumeFW
             return name.size() >= 9 && ::_strnicmp(name.data(), "CostumeFW", 9) == 0;
         }
 
-        // Build the project's colon-form id "XXXXXX:Plugin.esp" from a form: its
-        // plugin-local FormID (ESL-masked) + defining plugin filename.
-        std::string MakeColonId(RE::TESForm* a_form)
-        {
-            // No-file safety (review P1-4): TESForm::GetLocalFormID()
-            // dereferences GetFile(0) UNCHECKED (TESForm.h:292-300) - calling
-            // it on a runtime/no-file form is the null-deref behind the
-            // original "+ Add worn item" CTD. Such forms get their raw
-            // 8-digit FormID and an empty plugin: same textual shape as
-            // before, produced without touching the missing file, and
-            // unresolvable by design (formatter never truncates - the old
-            // char[8] bug).
-            if (!a_form) {
-                return policy::FormatColonId(0, {});
-            }
-            const auto* file = a_form->GetFile(0);
-            const std::uint32_t local = file ? a_form->GetLocalFormID() : a_form->GetFormID();
-            return policy::FormatColonId(local,
-                file ? std::string_view(file->GetFilename()) : std::string_view{});
-        }
+        // MakeColonId moved to src/FormId.h (the ability pool needs it too). Call
+        // sites are unchanged: it is still CostumeFW::MakeColonId, just one
+        // namespace further out.
 
         // v1.2.1 plugin consolidation: CostumeFW_Boxes.esp and
         // CostumeFW_Boxes_FSMPCarrier_001.esp were merged into CostumeFW.esp
@@ -3198,7 +3159,10 @@ namespace CostumeFW
         return idx >= 0 && g_boxes[idx].enabled;
     }
 
-    bool SetBoxEnabled(const std::string& a_token, bool a_enabled)
+    // The flag, the json and the token's stats - without converging the pool.
+    // Split out so the convergence pass itself can flip the flag (below) without
+    // calling back into the pass that is already running.
+    bool SetBoxEnabledNoSync(const std::string& a_token, bool a_enabled)
     {
         StoreLock lk;
         const int idx = FindBox(a_token);
@@ -3208,6 +3172,22 @@ namespace CostumeFW
         g_boxes[idx].enabled = a_enabled;
         WriteJson();
         SetTokenStats(g_boxes[idx]);  // disabled -> token stats cleared, enabled -> applied
+        return true;
+    }
+
+    bool SetBoxEnabled(const std::string& a_token, bool a_enabled)
+    {
+        if (!SetBoxEnabledNoSync(a_token, a_enabled)) {
+            return false;
+        }
+        // This switch decides whether a worn box pays its enchantments through,
+        // so flipping it CHANGES what should be granted right now. It used to
+        // write the flag and stop: with the token already on, nothing re-ran the
+        // convergence, and the box went on paying nothing until the next equip
+        // event happened to trigger one. Measured 2026-09-14: five minutes
+        // between ticking the box back on (01:28:46) and the ability actually
+        // landing, which took re-equipping the token (01:33:59).
+        ApplyBoxAbilities();
         return true;
     }
 
@@ -3403,154 +3383,10 @@ namespace CostumeFW
             return player && player->GetWornArmor(form) != nullptr;
         }
 
-        // --- Stat passthrough ---
-        // Armor + weight are written DIRECTLY onto the token ARMO's own fields
-        // (armorRating / weight) - the token IS worn equipment, so the engine
-        // applies them naturally (real armor scaling, real carried weight). This
-        // is correct where a CarryWeight magic effect was NOT (the AV is max
-        // capacity, not the item's own weight). See SetTokenStats below.
-        // Enchantment effects are still aggregated into a runtime ability spell.
-        //
-        // ONE ability form per holder, created once and MUTATED IN PLACE. It must
-        // never be re-created per rebuild: AddSpell writes the form's id into the
-        // SAVE (the player's added-spell list), and a load that does NOT restart
-        // the process - dying and reloading, a quickload - resolves that id back
-        // to the still-live form. The old code dropped its pointer at load
-        // (ClearBoxSpellCache) on the assumption that the save drops the ability
-        // too; it does not, so the restored ability stayed on the player with
-        // nobody tracking it and the rebuilt one was granted ON TOP: one more
-        // "Costume Stats" per reload, unremovable even with CEF off, its fortify
-        // baked into the actor value (v1.6.1.1, Nexus report 2026-09-07).
-        // A stable form makes the restored ability the one we already own, so
-        // HasSpell / RemoveSpell keep working across in-process loads. Forms are
-        // process-lived; a fresh process leaves the save's dangling 0xFF id
-        // unresolved, which is the only case the old clear was written for - and
-        // that case needs no clearing at all, since the map starts empty.
-        struct StatAbility
-        {
-            RE::SpellItem* spell{ nullptr };  // created once; id stable for the process
-            bool hasEffects{ false };         // false = built, but nothing to grant
-            bool dirty{ true };               // effects need a refill before granting
-        };
-        // token -> synthesized enchant ability. Process-global; entries are kept
-        // (not erased) so a token always maps to the same form.
-        std::unordered_map<std::string, StatAbility> g_boxSpells;
-        // The persist class's aggregate enchant ability (persist has no token, so
-        // it's kept separately and granted while CEF is enabled).
-        StatAbility g_persistAbility;
 
-        void AddEffect(RE::SpellItem* a_spell, RE::EffectSetting* a_mgef, float a_magnitude)
-        {
-            if (!a_mgef) {
-                return;
-            }
-            auto* eff = new RE::Effect();
-            eff->baseEffect = a_mgef;
-            eff->effectItem.magnitude = a_magnitude;
-            eff->effectItem.area = 0;
-            eff->effectItem.duration = 0;
-            a_spell->effects.push_back(eff);
-        }
 
-        // Deep-copy a condition chain so the synthesized spell OWNS its list.
-        // ~TESCondition deletes the whole chain, so SHARING nodes with the
-        // source form would hand the engine a double-free if it ever tears a
-        // dynamic spell down. Node data is plain (function index, params,
-        // flags); the param FORM pointers stay shared - forms outlive spells.
-        void CopyConditions(RE::TESCondition& a_dst, const RE::TESCondition& a_src)
-        {
-            RE::TESConditionItem** tail = &a_dst.head;
-            for (auto* cur = a_src.head; cur; cur = cur->next) {
-                auto* node = new RE::TESConditionItem();
-                node->data = cur->data;
-                node->next = nullptr;
-                *tail = node;
-                tail = &node->next;
-            }
-        }
 
-        // Full-fidelity copy of a live enchantment effect: magnitude AND the
-        // conditions/duration that gate it, so a conditional enchant ("while
-        // sneaking ...") does not become always-on on the token (2game.info
-        // follow-up 2026-08-20). The engine re-evaluates conditions on constant
-        // ability effects the same way it does on worn-enchant effects (the
-        // vanilla conditional-ability pattern), with the same subject. Flat
-        // AddEffect remains for snapshot-only contents.
-        void AddEffectFull(RE::SpellItem* a_spell, const RE::Effect* a_src)
-        {
-            if (!a_src || !a_src->baseEffect) {
-                return;
-            }
-            auto* eff = new RE::Effect();
-            eff->baseEffect = a_src->baseEffect;
-            eff->effectItem = a_src->effectItem;  // magnitude / area / duration
-            eff->cost = a_src->cost;
-            CopyConditions(eff->conditions, a_src->conditions);
-            a_spell->effects.push_back(eff);
-        }
 
-        // --- Identical-effect collapse (2026-09-11) -----------------------------
-        // The engine creates ONE active effect for two effects that are entirely
-        // identical inside the same spell. Measured: a box holding two Imperial
-        // cuirasses - different items sharing one enchantment form, +40 Fortify
-        // Health each - was worth +40, not +80, and CEF had built both. Two
-        // pieces with Resist Fire 40 behave the same way, so it is not specific
-        // to one effect. Two effects of the same MGEF with DIFFERENT magnitudes
-        // (Fortify Alteration 22 and 20) both apply, and so do two identical
-        // ones in DIFFERENT spells - so the collapse is keyed on the effect's
-        // whole content, within one spell.
-        //
-        // The answer is to never hand the engine two identical effects: fold
-        // each group into ONE, carrying what N pieces are worth together. That
-        // is also what wearing those N pieces for real would give you.
-        bool SameConditionData(const RE::CONDITION_ITEM_DATA& a_lhs,
-            const RE::CONDITION_ITEM_DATA& a_rhs)
-        {
-            // NOT a memcmp: comparisonValue is a union and the struct carries
-            // two padding words, so identical conditions differ byte-wise.
-            if (a_lhs.flags.isOR != a_rhs.flags.isOR ||
-                a_lhs.flags.usesAliases != a_rhs.flags.usesAliases ||
-                a_lhs.flags.global != a_rhs.flags.global ||
-                a_lhs.flags.usePackData != a_rhs.flags.usePackData ||
-                a_lhs.flags.swapTarget != a_rhs.flags.swapTarget ||
-                a_lhs.flags.opCode != a_rhs.flags.opCode) {
-                return false;
-            }
-            if (a_lhs.object.get() != a_rhs.object.get() || a_lhs.dataID != a_rhs.dataID ||
-                a_lhs.runOnRef != a_rhs.runOnRef) {
-                return false;
-            }
-            // params are function-dependent and may not be pointers at all, so
-            // they are compared as raw bits and never dereferenced. Same bits
-            // means same parameter; different bits that happen to mean the same
-            // thing simply do not merge, which is the safe direction.
-            if (a_lhs.functionData.function.get() != a_rhs.functionData.function.get() ||
-                a_lhs.functionData.params[0] != a_rhs.functionData.params[0] ||
-                a_lhs.functionData.params[1] != a_rhs.functionData.params[1]) {
-                return false;
-            }
-            // The union follows the global flag, equal on both sides by now.
-            return a_lhs.flags.global ? a_lhs.comparisonValue.g == a_rhs.comparisonValue.g
-                                      : a_lhs.comparisonValue.f == a_rhs.comparisonValue.f;
-        }
-
-        bool SameConditionChain(const RE::TESCondition* a_lhs, const RE::TESCondition* a_rhs)
-        {
-            if (!a_lhs && !a_rhs) {
-                return true;
-            }
-            if (!a_lhs || !a_rhs) {
-                return false;
-            }
-            const RE::TESConditionItem* l = a_lhs->head;
-            const RE::TESConditionItem* r = a_rhs->head;
-            for (; l && r; l = l->next, r = r->next) {
-                if (!SameConditionData(l->data, r->data)) {
-                    return false;
-                }
-            }
-            return l == nullptr && r == nullptr;  // same length as well as content
-        }
 
         // Whether N copies of this effect add up, the way N real pieces carrying
         // it would. Value-modifier archetypes do. For anything else - waterbreathing,
@@ -3571,21 +3407,6 @@ namespace CostumeFW
             return (nm && *nm) ? EnsureUtf8(std::string(nm)) + " [" + id + "]" : id;
         }
 
-        bool MagnitudeIsAdditive(const RE::EffectSetting* a_mgef)
-        {
-            if (!a_mgef) {
-                return false;
-            }
-            using A = RE::EffectSetting::Archetype;
-            switch (a_mgef->data.archetype) {
-            case A::kValueModifier:
-            case A::kPeakValueModifier:
-            case A::kDualValueModifier:
-                return true;
-            default:
-                return false;
-            }
-        }
 
         // True when a flat capture snapshot is just a copy of the base
         // enchantment - same MGEFs, same magnitudes - rather than a player
@@ -3693,258 +3514,126 @@ namespace CostumeFW
             return form ? form->As<RE::EffectSetting>() : nullptr;
         }
 
-        // Retire the current effect list. The Effect objects are deliberately NOT
-        // freed: RemoveSpell only FLAGS an active effect, whose teardown runs on a
-        // later magic-target update and still reads its Effect*. Freeing here would
-        // hand that pass dangling memory. They leak - a few dozen bytes per rebuild,
-        // strictly less than the pre-1.6.1.1 code, which leaked the whole spell.
-        void RetireSynthEffects(RE::SpellItem* a_spell)
-        {
-            a_spell->effects.clear();
-        }
 
-        // (Re)fill a synthesized ability with a content list's enchantment effects.
-        // Per content, uses the CAPTURED snapshot (covers player/instance
-        // enchantments) if present, else the base ARMO's own enchantment. Returns
-        // false if none of the contents contributes an effect (the form stays, with
-        // an empty list, and simply is not granted).
+        // Per effect: either a LIVE source Effect (full fidelity: magnitude
+        // + duration + conditions) or a flat {mgef, magnitude} snapshot.
+        // The pool's type, so a content's effects go straight there with no
+        // conversion step to get wrong.
+        using PendingEffect = abilities::SourceEffect;
+
+        // What ONE content's enchantment is worth right now.
         //
-        // The caller MUST have removed the ability from every actor first: the
-        // engine holds the Effect pointers of a live ability, so rewriting the list
-        // under it would leave dangling active effects.
-        bool FillEnchantSpell(RE::SpellItem* a_spell, const std::vector<std::string>& a_contents,
-            const char* a_name, const FrozenEnchantLookup& a_frozen = {})
+        // Lifted out of FillEnchantSpell unchanged. The fixed ability pool
+        // allocates per CONTENT and needs exactly this answer, and this priority
+        // is not something to re-derive: it is the 2game.info fix (2026-08-20)
+        // plus the 2026-09-10 field report. Reading the base form alone would
+        // quietly drop player enchantments, tempering, and the conditions that
+        // gate an effect - which is the bug that fix was for.
+        std::vector<PendingEffect> ContentEffects(const std::string& c,
+            const FrozenEnchantLookup& a_frozen, const char* a_name)
         {
-            // Per effect: either a LIVE source Effect (full fidelity: magnitude
-            // + duration + conditions) or a flat {mgef, magnitude} snapshot.
-            struct PendingEffect
-            {
-                RE::EffectSetting* mgef{ nullptr };
-                float magnitude{ 0.0f };
-                const RE::Effect* live{ nullptr };
-            };
             std::vector<PendingEffect> effs;
-            const auto pushLive = [&effs](const RE::EnchantmentItem* a_ench) {
-                for (auto* e : a_ench->effects) {
-                    if (e && e->baseEffect) {
-                        effs.push_back({ nullptr, 0.0f, e });
-                    }
-                }
-            };
-            // r3 (re-review P1-2): single ability choke - box AND persist
-            // ability synthesis skip quarantined contents here.
-            const auto admitted = StatAdmittedContents(a_contents);
-            // Name what got dropped. This gate is the one place a content can
-            // stop contributing stats with nothing said anywhere - the reason
-            // "my enchantment stopped applying" had no log line to look at
-            // (test run 2026-09-10). A drop here is normal after a plugin is
-            // disabled or blacklisted; it is the SILENCE that is the problem.
-            if (admitted.size() != a_contents.size()) {
-                for (const auto& c : a_contents) {
-                    if (std::find(admitted.begin(), admitted.end(), c) == admitted.end()) {
-                        SKSE::log::warn(
-                            "boxes: '{}' contributes no stats to '{}' - not admitted right now "
-                            "(unresolved plugin, or blocked by the capture blacklist)",
-                            c, a_name);
-                    }
+        const auto pushLive = [&effs](const RE::EnchantmentItem* a_ench) {
+            for (auto* e : a_ench->effects) {
+                if (e && e->baseEffect) {
+                    effs.push_back({ nullptr, 0.0f, e });
                 }
             }
-            for (const auto& c : admitted) {
-                if (g_statEnchantOff.contains(c)) {
-                    continue;  // item-data toggle: enchant passthrough OFF
+        };
+            if (g_statEnchantOff.contains(c)) {
+                return effs;  // item-data toggle: enchant passthrough OFF
+            }
+            // Source priority (2026-08-20 conditions fix): the stored
+            // original's instance enchantment, else - when the store
+            // verifiably holds the original, so no re-enchant replaced the
+            // base - the base form's enchantment, both at full fidelity.
+            // Then the flat snapshot (original unreachable: other-character
+            // persist, cross-save copy), and last the bare base form.
+            auto* armo = ResolveArmo(c);
+            const auto stored = FindStoredEnchant(c);
+            if (stored.instance) {
+                pushLive(stored.instance);
+                return effs;  // this content is done
+            }
+            if (stored.inStore && armo && armo->formEnchanting) {
+                pushLive(armo->formEnchanting);
+                return effs;  // this content is done
+            }
+            const auto snap = g_contentEnchants.find(c);
+            if (snap != g_contentEnchants.end()) {
+                if (!armo) {
+                    // The form does not resolve at all, so the plugin that
+                    // defines this piece is not loaded and the piece is not in
+                    // the game. The flat snapshot is for an original that is
+                    // UNREACHABLE - another character's store, a copy carried
+                    // in from another save - while the form itself is still
+                    // there. It is not for a piece that has gone.
+                    //
+                    // Paying from it here hands out a FLATTENED enchantment,
+                    // because a snapshot cannot carry conditions. Measured
+                    // 2026-09-14 (7.2 #23a): disabling the source plugin turned
+                    // "+250 while sneaking" into "+250, always" and "+200 while
+                    // sneaking AND in combat" into "+200, always", and those
+                    // became the live generations - a costume that no longer
+                    // exists paying MORE than it ever did.
+                    //
+                    // SnapshotMatchesEnchant cannot catch this one: it decides
+                    // by comparing against the base enchantment, and with the
+                    // plugin gone there is no base enchantment to compare to.
+                    return effs;
                 }
-                // Source priority (2026-08-20 conditions fix): the stored
-                // original's instance enchantment, else - when the store
-                // verifiably holds the original, so no re-enchant replaced the
-                // base - the base form's enchantment, both at full fidelity.
-                // Then the flat snapshot (original unreachable: other-character
-                // persist, cross-save copy), and last the bare base form.
-                const std::size_t before = effs.size();
-                auto* armo = ResolveArmo(c);
-                const auto stored = FindStoredEnchant(c);
-                if (stored.instance) {
-                    pushLive(stored.instance);
-                    continue;
-                }
-                if (stored.inStore && armo && armo->formEnchanting) {
+                // The snapshot is FLAT: it cannot carry the conditions or
+                // duration that gate an effect. When it is merely a copy of
+                // the base enchantment, the live form is the SAME effects at
+                // full fidelity - take that instead, or a conditional
+                // enchant silently becomes always-on the moment the stored
+                // original goes missing. Field-reported 2026-09-10:
+                // disabling a costume's plugin for one session makes the
+                // engine strip the captured item out of the hidden store,
+                // which drops this content from source 2 to here, and a
+                // "while sneaking" bonus started applying while standing.
+                if (armo && armo->formEnchanting &&
+                    SnapshotMatchesEnchant(snap->second, armo->formEnchanting)) {
                     pushLive(armo->formEnchanting);
-                    continue;
+                    return effs;  // this content is done
                 }
-                const auto snap = g_contentEnchants.find(c);
-                if (snap != g_contentEnchants.end()) {
-                    // The snapshot is FLAT: it cannot carry the conditions or
-                    // duration that gate an effect. When it is merely a copy of
-                    // the base enchantment, the live form is the SAME effects at
-                    // full fidelity - take that instead, or a conditional
-                    // enchant silently becomes always-on the moment the stored
-                    // original goes missing. Field-reported 2026-09-10:
-                    // disabling a costume's plugin for one session makes the
-                    // engine strip the captured item out of the hidden store,
-                    // which drops this content from source 2 to here, and a
-                    // "while sneaking" bonus started applying while standing.
-                    if (armo && armo->formEnchanting &&
-                        SnapshotMatchesEnchant(snap->second, armo->formEnchanting)) {
-                        pushLive(armo->formEnchanting);
-                        continue;
+                for (const auto& e : snap->second) {
+                    if (auto* mgef = ResolveMgef(e.mgef)) {
+                        effs.push_back({ mgef, e.magnitude, nullptr });
                     }
-                    for (const auto& e : snap->second) {
-                        if (auto* mgef = ResolveMgef(e.mgef)) {
-                            effs.push_back({ mgef, e.magnitude, nullptr });
-                        }
-                    }
-                } else if (armo && armo->formEnchanting) {
-                    pushLive(armo->formEnchanting);
-                    continue;
                 }
-                // 5th and last, per content: a frozen copy the HOLDER carries -
-                // today only a published costume, which froze what each piece
-                // was worth at publish time. Flat by construction, so it is
-                // reached only when all four live sources came up empty for
-                // THIS content, and never in place of one of them (2026-09-11
-                // F01/F02). A published piece whose live sources are gone is
-                // worth its frozen value; a piece whose sources are fine is
-                // unaffected by any other piece's state.
-                if (a_frozen && effs.size() == before) {
-                    int recovered = 0;
-                    for (const auto& e : a_frozen(c)) {
-                        if (auto* mgef = ResolveMgef(e.mgef)) {
-                            effs.push_back({ mgef, e.magnitude, nullptr });
-                            ++recovered;
-                        }
+            } else if (armo && armo->formEnchanting) {
+                pushLive(armo->formEnchanting);
+                return effs;  // this content is done
+            }
+            // 5th and last, per content: a frozen copy the HOLDER carries -
+            // today only a published costume, which froze what each piece
+            // was worth at publish time. Flat by construction, so it is
+            // reached only when all four live sources came up empty for
+            // THIS content, and never in place of one of them (2026-09-11
+            // F01/F02). A published piece whose live sources are gone is
+            // worth its frozen value; a piece whose sources are fine is
+            // unaffected by any other piece's state.
+            if (a_frozen && effs.empty()) {
+                int recovered = 0;
+                for (const auto& e : a_frozen(c)) {
+                    if (auto* mgef = ResolveMgef(e.mgef)) {
+                        effs.push_back({ mgef, e.magnitude, nullptr });
+                        ++recovered;
                     }
-                    if (recovered > 0) {
-                        SKSE::log::info(
-                            "boxes: '{}' fell back to its frozen snapshot for '{}' ({} effect(s), "
-                            "flat - any conditions it had are not in that copy)",
-                            c, a_name, recovered);
-                    }
+                }
+                if (recovered > 0) {
+                    SKSE::log::info(
+                        "boxes: '{}' fell back to its frozen snapshot for '{}' ({} effect(s), "
+                        "flat - any conditions it had are not in that copy)",
+                        c, a_name, recovered);
                 }
             }
-            RetireSynthEffects(a_spell);
-            if (effs.empty()) {
-                SKSE::log::debug("boxes: synth enchant ability '{}' - no effects", a_name);
-                return false;
-            }
-            // Fold effects the engine would collapse into one. The group key is
-            // everything the collapse looks at: the MGEF, the area, the duration
-            // and the condition chain. One output per group, so the list handed
-            // to the engine cannot contain a duplicate pair by construction -
-            // which is why this needs no second pass to check for collisions.
-            struct EffectGroup
-            {
-                RE::EffectSetting* mgef{ nullptr };
-                float magnitude{ 0.0f };
-                std::uint32_t area{ 0 };
-                std::uint32_t duration{ 0 };
-                const RE::TESCondition* conditions{ nullptr };
-                const RE::Effect* rep{ nullptr };  // full-fidelity source, if any
-                int count{ 0 };
-                bool additive{ false };
-            };
-            const auto conditionsOf = [](const RE::Effect* a_live) -> const RE::TESCondition* {
-                return (a_live && a_live->conditions.head) ? &a_live->conditions : nullptr;
-            };
-            std::vector<EffectGroup> groups;
-            for (const auto& pe : effs) {
-                RE::EffectSetting* mgef = pe.live ? pe.live->baseEffect : pe.mgef;
-                if (!mgef) {
-                    continue;
-                }
-                const float mag = pe.live ? pe.live->effectItem.magnitude : pe.magnitude;
-                const std::uint32_t area = pe.live ? pe.live->effectItem.area : 0u;
-                const std::uint32_t duration = pe.live ? pe.live->effectItem.duration : 0u;
-                const RE::TESCondition* cond = conditionsOf(pe.live);
-                EffectGroup* hit = nullptr;
-                for (auto& g : groups) {
-                    if (g.mgef == mgef && g.area == area && g.duration == duration &&
-                        SameConditionChain(g.conditions, cond)) {
-                        hit = &g;
-                        break;
-                    }
-                }
-                if (!hit) {
-                    groups.push_back({ mgef, mag, area, duration, cond, pe.live, 1,
-                        MagnitudeIsAdditive(mgef) });
-                    continue;
-                }
-                ++hit->count;
-                hit->magnitude = hit->additive ? hit->magnitude + mag
-                                               : std::max(hit->magnitude, mag);
-                if (!hit->rep && pe.live) {
-                    hit->rep = pe.live;  // prefer a full-fidelity representative
-                }
-            }
-            int conditioned = 0;
-            int merged = 0;
-            int unsupported = 0;
-            for (const auto& g : groups) {
-                if (g.rep) {
-                    auto* eff = new RE::Effect();
-                    eff->baseEffect = g.rep->baseEffect;
-                    eff->effectItem = g.rep->effectItem;  // area / duration
-                    eff->effectItem.magnitude = g.magnitude;
-                    eff->cost = g.rep->cost;
-                    CopyConditions(eff->conditions, g.rep->conditions);
-                    a_spell->effects.push_back(eff);
-                    if (g.rep->conditions.head) {
-                        ++conditioned;
-                    }
-                } else {
-                    AddEffect(a_spell, g.mgef, g.magnitude);
-                }
-                if (g.count > 1) {
-                    ++merged;
-                    unsupported += g.additive ? 0 : 1;
-                    SKSE::log::info("boxes: '{}' folded {} identical '{}' into one -> {:.1f} ({})",
-                        a_name, g.count, MgefLabel(g.mgef), g.magnitude,
-                        g.additive ? "summed" : "largest kept - magnitude does not add for this "
-                                                "archetype");
-                }
-            }
-            SKSE::log::debug(
-                "boxes: synth enchant ability '{}' (src {} -> out {} effect(s), {} conditioned, "
-                "{} group(s) folded, {} unsupported)",
-                a_name, effs.size(), a_spell->effects.size(), conditioned, merged, unsupported);
-            return true;
+            return effs;
         }
 
-        // The one ability form for a holder, created on first use. Never freed and
-        // never replaced: a factory form is registered in the form table, so
-        // deleting it would leave a dangling id a save could still resolve.
-        RE::SpellItem* EnsureSynthSpell(StatAbility& a_ability, const char* a_name)
-        {
-            if (a_ability.spell) {
-                return a_ability.spell;
-            }
-            auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::SpellItem>();
-            auto* spell = factory ? factory->Create() : nullptr;
-            if (!spell) {
-                SKSE::log::error("boxes: SpellItem factory create failed");
-                return nullptr;
-            }
-            spell->data.spellType = RE::MagicSystem::SpellType::kAbility;
-            spell->data.castingType = RE::MagicSystem::CastingType::kConstantEffect;
-            spell->data.delivery = RE::MagicSystem::Delivery::kSelf;
-            spell->data.costOverride = 0;
-            spell->fullName = a_name;
-            a_ability.spell = spell;
-            a_ability.dirty = true;
-            SKSE::log::info("boxes: synth ability form '{}' = {:08X}", a_name, spell->GetFormID());
-            return spell;
-        }
 
-        // Take the ability off an actor if it holds it. Refilling effects under a
-        // live ability is what leaves orphaned actor-value modifiers behind, so
-        // every mutation path goes through here first.
-        bool DropAbilityFrom(RE::Actor* a_actor, const StatAbility& a_ability,
-            std::string_view a_key = "box")
-        {
-            if (!a_actor || !a_ability.spell || !a_actor->HasSpell(a_ability.spell)) {
-                return false;
-            }
-            RevokeAbility(a_actor, a_ability.spell, a_key);
-            return true;
-        }
+
 
         // --- Keyword passthrough -------------------------------------------------
         // Aggregate the contents' keywords onto the worn token so consumer mods
@@ -4115,19 +3804,6 @@ namespace CostumeFW
             }
         }
 
-        // Bring a holder's ability up to date with its contents: create the form
-        // once, and refill its effects only while it is on nobody.
-        void EnsureAbilityBuilt(RE::Actor* a_player, StatAbility& a_ability,
-            const std::vector<std::string>& a_contents, const char* a_name,
-            std::string_view a_key)
-        {
-            if (!EnsureSynthSpell(a_ability, a_name) || !a_ability.dirty) {
-                return;
-            }
-            DropAbilityFrom(a_player, a_ability, a_key);
-            a_ability.hasEffects = FillEnchantSpell(a_ability.spell, a_contents, a_name);
-            a_ability.dirty = false;
-        }
     }
 
     std::vector<WornItem> AbilityCatalog()
@@ -4384,24 +4060,6 @@ namespace CostumeFW
             }
         }
 
-        // Converge one synthesized ability: refill it if its contents changed,
-        // then grant or take it back. Unlike SyncSpell this ALWAYS runs the
-        // removal branch, so an ability can never be stranded on the player -
-        // not by a load, not by the master switch, not by an emptied box.
-        void SyncAbility(RE::Actor* a_player, StatAbility& a_ability,
-            const std::vector<std::string>& a_contents, const char* a_name, bool a_want,
-            std::string_view a_key)
-        {
-            EnsureAbilityBuilt(a_player, a_ability, a_contents, a_name, a_key);
-            if (!a_ability.spell) {
-                return;
-            }
-            if (a_want && a_ability.hasEffects) {
-                GrantAbility(a_player, a_ability.spell, a_key);
-            } else {
-                RevokeAbility(a_player, a_ability.spell, a_key);
-            }
-        }
     }
 
     void ApplyBoxAbilities()
@@ -4412,6 +4070,58 @@ namespace CostumeFW
             return;
         }
         const bool cefOn = CefEnabled();  // ROOT G: master switch gates box abilities too
+
+        // Which CONTENTS should be paying out right now. One ability per
+        // content, not one per box: two pieces carrying the same enchantment
+        // are two abilities and are worth two, where a single spell holding
+        // both had them collapsed into one by the engine (eb6feb3). The folding
+        // that worked around that is not needed on this path and is not done.
+        std::vector<std::string> wanted;
+        const auto admit = [&wanted](const std::vector<std::string>& a_ids, const char* a_what) {
+            const auto admitted = StatAdmittedContents(a_ids);
+            // Name what got dropped. This gate is the one place a content can
+            // stop contributing stats with nothing said anywhere - the reason
+            // "my enchantment stopped applying" had no log line to look at
+            // (test run 2026-09-10). A drop here is normal after a plugin is
+            // disabled or blacklisted; it is the SILENCE that is the problem.
+            if (admitted.size() != a_ids.size()) {
+                for (const auto& c : a_ids) {
+                    if (std::find(admitted.begin(), admitted.end(), c) == admitted.end()) {
+                        SKSE::log::warn(
+                            "boxes: '{}' contributes no stats to {} - not admitted right now "
+                            "(unresolved plugin, or blocked by the capture blacklist)",
+                            c, a_what);
+                    }
+                }
+            }
+            wanted.insert(wanted.end(), admitted.begin(), admitted.end());
+        };
+
+        // A token that is WORN while its box's distribution is off is the state
+        // the two switches must never leave behind: "Distribute token" off takes
+        // the token away and zeroes its stats, yet here it is, on the player,
+        // showing its costume and paying nothing. Wearing a box is a request to
+        // use it, so the wearing wins and distribution goes back on.
+        //
+        // This sits here rather than in WearBoxToken because WearBoxToken is only
+        // CEF's own "Wear (show contents)" checkbox. A token equipped from the
+        // INVENTORY - which is how a box is normally worn - never goes through
+        // it, so hooking it covered the one path nobody uses (2026-09-14: the
+        // fix shipped, the test still measured nothing). This function sees the
+        // token worn no matter what put it on, so it is the only place the rule
+        // can be stated once.
+        if (cefOn) {
+            for (const auto& b : g_boxes) {
+                if (b.enabled || b.contents.empty() || !TokenWorn(b.token)) {
+                    continue;
+                }
+                SKSE::log::info("boxes: '{}'{} is WORN, so its token distribution is turned back "
+                                "ON - a box cannot be worn with its token withheld",
+                    b.token, b.label.empty() ? "" : " (" + b.label + ")");
+                SetBoxEnabledNoSync(b.token, true);  // no converge: we ARE the converge
+            }
+        }
+
         for (const auto& b : g_boxes) {
             // With CEF disabled nothing is injected, so a worn token must not still
             // grant its contents' enchant/armor effects (only the persist spell was
@@ -4422,66 +4132,74 @@ namespace CostumeFW
             // on by any other means still granted the enchantments of a box
             // the user had turned off (review 2026-09-11 N2).
             const bool worn = cefOn && b.enabled && TokenWorn(b.token);
-            const std::string key = "box:" + b.token;
-            // Synthesized ENCHANT ability (armor/weight are on the token's fields).
-            SyncAbility(player, g_boxSpells[b.token], b.contents, "Costume Stats", worn, key);
-            // Optional manual extra ability (dormant unless set in json).
+            if (worn) {
+                admit(b.contents, "a worn box");
+            }
+            // Optional manual extra ability (dormant unless set in json). Still
+            // an ESP-defined spell the user named, so it is not pool business.
             if (!b.ability.empty()) {
                 SyncSpell(player, ResolveSpell(b.ability), worn, "manual:" + b.ability);
             }
         }
-        // Abilities whose box is gone (deleted, or its token handed to a publish
-        // slot): the form is kept for reuse, but it must not stay on the player.
-        for (auto& [token, ability] : g_boxSpells) {
-            if (FindBox(token) >= 0) {
-                continue;
-            }
-            if (DropAbilityFrom(player, ability, "box:" + token)) {
-                SKSE::log::info("boxes: dropped the stat ability of freed box '{}'", token);
-            }
-            // Its contents no longer exist. Marking it stale here is what stops
-            // the OLD effect list being granted if this token is later handed to
-            // a new box that never went through RebuildBoxAbility itself.
-            ability.dirty = true;
+        // Persist class: no token, always shown while CEF is enabled. Built from
+        // THIS SAVE'S ACTIVE set, not the shared catalog (M2) - a non-active
+        // entry another character cataloged must not grant effects here.
+        if (cefOn) {
+            admit(ActivePersistIds(), "persist");
         }
-        // Persist class: no token, always shown while CEF is enabled -> grant its
-        // aggregate enchant ability whenever CEF is on. Built from THIS SAVE'S
-        // ACTIVE set, not the shared catalog (M2) - a non-active entry another
-        // character cataloged must not grant effects here.
-        SyncAbility(player, g_persistAbility, ActivePersistIds(),
-            "Costume Stats (Persist)", cefOn, "persist");
-        // Publish bindings (NPC wearers + the player wearing a publish token)
-        // follow the same master-switch contract - converge them in the same
-        // pass so a master toggle can never strand spells on an NPC (§7.6).
+
+        // The player can be wearing a published costume as well as boxes, and
+        // SyncToActor converges the WHOLE pool for an actor - so calling it once
+        // per source would have the second call revoke what the first granted.
+        // Every source an actor draws from has to be in ONE list.
+        admit(PublishStatsFor(player), "a worn published costume");
+
+        // One convergence over the whole pool. A content dropped from a box, a
+        // deleted box, a box whose token was handed to a publish slot, a
+        // costume recalled, the master switch, a load: all of them are "not in
+        // wanted", and none needs a path of its own to avoid stranding.
+        abilities::SyncToActor(player, wanted);
+
+        // NPC wearers converge one actor at a time, for the same reason and by
+        // the same rule (7.6): a master toggle can never strand spells on them.
         SyncNpcAbilities();
+    }
+
+    std::vector<abilities::SourceEffect> ContentEffectsFor(const std::string& a_contentId)
+    {
+        StoreLock lk;
+        // The frozen fallback is looked up BY CONTENT rather than passed in. It
+        // belongs to whichever published costume holds the piece, a piece has
+        // exactly one holder, and asking that way means one entry point answers
+        // for a box content and a published one alike.
+        return ContentEffects(a_contentId,
+            [](const std::string& a_id) { return FrozenEffectsForContent(a_id); }, "pool");
     }
 
     void RebuildBoxAbility(const std::string& a_token)
     {
         StoreLock lk;
-        auto it = g_boxSpells.find(a_token);
-        if (it == g_boxSpells.end()) {
-            return;  // not built yet; ApplyBoxAbilities builds it fresh
+        const int idx = FindBox(a_token);
+        if (idx < 0) {
+            return;
         }
-        // Take it off NOW - the refill must not run under a live ability - and
-        // mark it stale. The FORM stays: it is the same one the save may hold.
-        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), it->second, "box:" + a_token);
-        it->second.dirty = true;  // next ApplyBoxAbilities refills + reapplies
+        // Re-derive each content's recipe. A content whose enchantment actually
+        // changed gets a NEW slot at the next generation rather than having its
+        // recipe rewritten, because a save may hold an active effect built from
+        // the old one. Nothing is granted or removed here: the next
+        // ApplyBoxAbilities converges the whole pool anyway.
+        for (const auto& c : g_boxes[static_cast<std::size_t>(idx)].contents) {
+            abilities::RefreshContent(c);
+        }
     }
 
-    bool FillContentEnchantSpell(RE::SpellItem* a_spell,
-        const std::vector<std::string>& a_contents, const char* a_name,
-        const FrozenEnchantLookup& a_frozen)
-    {
-        StoreLock lk;  // reads g_contentEnchants / g_statEnchantOff
-        return a_spell ? FillEnchantSpell(a_spell, a_contents, a_name, a_frozen) : false;
-    }
 
     void RebuildPersistAbility()
     {
         StoreLock lk;
-        DropAbilityFrom(RE::PlayerCharacter::GetSingleton(), g_persistAbility, "persist");
-        g_persistAbility.dirty = true;  // next ApplyBoxAbilities refills + reapplies
+        for (const auto& c : ActivePersistIds()) {
+            abilities::RefreshContent(c);
+        }
     }
 
     void InvalidateStatAbilities()
@@ -4492,20 +4210,35 @@ namespace CostumeFW
         // KEEP the forms. Forgetting them here is what stacked a "Costume Stats"
         // per in-process reload: the save restores the ability by form id, and a
         // forgotten form is one nobody can ever remove again (v1.6.1.1).
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        int dropped = 0;
-        for (auto& [token, ability] : g_boxSpells) {
-            ability.dirty = true;
-            dropped += DropAbilityFrom(player, ability, "box:" + token) ? 1 : 0;
+        // Nothing to take off any more: the pool's abilities are static forms,
+        // and the save being loaded brings its OWN spell list, so a previous
+        // save's grants are not carried into this one.
+        //
+        // What does need re-deriving is the VALUE. A content's effects are read
+        // from this save's hidden store, so the same piece can be worth
+        // something different here than it was in the save before - a captured,
+        // tempered original in one character's store and a bare base form in
+        // another's. RefreshContent re-points the content at a slot holding the
+        // right value, reusing one it has already had rather than taking a new
+        // one each time a character is switched.
+        int refreshed = 0;
+        for (const auto& b : g_boxes) {
+            for (const auto& c : b.contents) {
+                abilities::RefreshContent(c);
+                ++refreshed;
+            }
         }
-        g_persistAbility.dirty = true;
-        dropped += DropAbilityFrom(player, g_persistAbility, "persist") ? 1 : 0;
+        for (const auto& c : ActivePersistIds()) {
+            abilities::RefreshContent(c);
+            ++refreshed;
+        }
+        const int dropped = refreshed;
         // Published costumes too. Their contents are global, but the effects
         // built from them read THIS save's hidden store, so another save's build
         // must not be carried over - and until now nothing took them back
         // (review 2026-09-11 F08).
         InvalidatePublishAbilities();
-        SKSE::log::info("boxes: stat abilities invalidated for load ({} taken back)", dropped);
+        SKSE::log::info("boxes: stat abilities re-derived for this save ({} content(s))", dropped);
     }
 
     std::string BoxStatsSummary(int a_index)
@@ -4706,6 +4439,10 @@ namespace CostumeFW
             return false;
         }
         if (a_wear) {
+            // A box whose distribution is off is put back on by the convergence
+            // in ApplyBoxAbilities, which the equip below triggers - one rule in
+            // one place, reached whether the token was put on from here or from
+            // the inventory.
             const auto counts = player->GetInventoryCounts();
             const auto it = counts.find(obj);
             if (it == counts.end() || it->second <= 0) {
