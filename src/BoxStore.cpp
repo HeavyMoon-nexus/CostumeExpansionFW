@@ -3344,15 +3344,47 @@ namespace CostumeFW
         return SlotNumberOf(ResolveArmo(a_token));
     }
 
+    int BoxesOnSlot(int a_slot)
+    {
+        StoreLock lk;
+        int n = 0;
+        for (const auto& b : g_boxes) {
+            if (SlotNumberOf(ResolveArmo(b.token)) == a_slot) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    // I1 (v1.6.4 MCM interlock). A biped slot stopped naming one box the moment
+    // BoxPool1 existed, so "the box on slot 55" is a question with no answer when
+    // that slot holds two. This used to return the FIRST match, which is how the
+    // MCM - whose pages are keyed by slot - would have deleted, renamed or
+    // re-packed the wrong box without a word.
+    //
+    // -1 for an ambiguous slot rather than a guess. The MCM already handles a
+    // negative index gracefully (OnPageReset falls through to ResetDeletedBoxPage,
+    // a page with no controls on it), so refusing to answer is enough to make the
+    // damage impossible. Callers that want every box on a slot ask BoxesOnSlot /
+    // BoxesForSlot instead.
+    //
+    // This is the interlock, NOT support: operating a shared slot from the MCM is
+    // 1.6.4.1, which keys its pages by boxId. The guard goes when the MCM does
+    // (1.6.5), together with this function.
     int BoxIndexForSlot(int a_slot)
     {
         StoreLock lk;
+        int found = -1;
         for (std::size_t i = 0; i < g_boxes.size(); ++i) {
-            if (SlotNumberOf(ResolveArmo(g_boxes[i].token)) == a_slot) {
-                return static_cast<int>(i);
+            if (SlotNumberOf(ResolveArmo(g_boxes[i].token)) != a_slot) {
+                continue;
             }
+            if (found >= 0) {
+                return -1;  // ambiguous: two or more boxes share this slot
+            }
+            found = static_cast<int>(i);
         }
-        return -1;
+        return found;
     }
 
     std::string LoreBoxContentsForSlot(int a_slot)

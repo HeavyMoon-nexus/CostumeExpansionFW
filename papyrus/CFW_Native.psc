@@ -120,6 +120,17 @@ Int Function GetTokenSlot(String token) Global Native
 ; (named by slot) resolve to their box even after a deletion shifts box indices.
 Int Function GetBoxBySlot(Int slot) Global Native
 
+; How many boxes sit on this biped slot. From v1.6.4 a slot can hold several
+; (CostumeFW_BoxPool1.esp adds more physical tokens per slot), and this MCM
+; keys its pages by slot - so the pages skip any slot with more than one and
+; GetBoxBySlot returns -1 for it. Operating a shared slot is SMF's job until
+; the MCM's pages move to boxId in 1.6.4.1.
+Int Function GetBoxesOnSlot(Int slot) Global Native
+
+; The NPC arm of 'prepare for uninstall': recall every published costume and
+; strip NPC persist. Queued to the main thread; returns immediately.
+Function UninstallNpcCleanup() Global Native
+
 ; Box "distribute" flag: whether the token is given to / kept on the player.
 Bool Function GetBoxEnabled(Int index) Global Native
 

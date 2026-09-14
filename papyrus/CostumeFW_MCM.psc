@@ -38,6 +38,8 @@ string[] _persistUncatIds
 int      _curBoxIndex       ; the box rendered on the current single-box page
 string[] _boxPageNames      ; page name per box page, for OnPageReset lookup
 int[]    _boxPageSlots      ; the biped slot each box page maps to (parallel)
+int      _sharedSlotBoxes   ; boxes left out of the page list because their
+                            ; biped slot holds more than one (v1.6.4 I2)
 int _optNewBox
 int[]    _equipOpts
 int[]    _equipBoxIdx
@@ -167,24 +169,45 @@ endFunction
 ; after closing + reopening the MCM).
 function BuildPages()
     int n = CFW_Native.GetBoxCount()
-    string[] p = Utility.CreateStringArray(n + 6, "")
-    p[0] = "Main"
-    p[1] = "Persist"
-    p[2] = "Boxes"
     _boxPageNames = Utility.CreateStringArray(n + 1, "")  ; +1 so size is never 0
     _boxPageSlots = Utility.CreateIntArray(n + 1, 0)
+    _sharedSlotBoxes = 0
+
+    ; I2 (v1.6.4): a biped slot can hold several boxes now, and this menu keys
+    ; its pages by slot - two boxes on slot 55 would produce two pages with the
+    ; SAME name, Find() would return the first for both, and every action on
+    ; either page would land on one box. So a page is built only for a slot that
+    ; holds exactly ONE box; the rest are counted and named on the Boxes page,
+    ; which points at SMF. Operating them from here arrives in 1.6.4.1, when the
+    ; pages move to boxId.
+    int pageCount = 0
     int i = 0
     while i < n
         int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
-        string pname = "Box " + slot + ": " + SlotName(slot)
-        p[3 + i] = pname
-        _boxPageNames[i] = pname
-        _boxPageSlots[i] = slot
+        if CFW_Native.GetBoxesOnSlot(slot) == 1
+            _boxPageNames[pageCount] = "Box " + slot + ": " + SlotName(slot)
+            _boxPageSlots[pageCount] = slot
+            pageCount += 1
+        else
+            _sharedSlotBoxes += 1
+        endIf
         i += 1
     endWhile
-    p[3 + n] = "NPC"
-    p[4 + n] = "Presets"
-    p[5 + n] = "Diagnostics"
+
+    ; Sized to the pages actually built, so the trailing fixed pages are never
+    ; pushed past a run of empty entries.
+    string[] p = Utility.CreateStringArray(pageCount + 6, "")
+    p[0] = "Main"
+    p[1] = "Persist"
+    p[2] = "Boxes"
+    int k = 0
+    while k < pageCount
+        p[3 + k] = _boxPageNames[k]
+        k += 1
+    endWhile
+    p[3 + pageCount] = "NPC"
+    p[4 + pageCount] = "Presets"
+    p[5 + pageCount] = "Diagnostics"
     Pages = p
 endFunction
 
@@ -464,6 +487,12 @@ function ResetBoxesOverviewPage()
     int n = CFW_Native.GetBoxCount()
     _optNewBox = AddMenuOption("+ New box (pick slot)", "")
     AddHeaderOption("Boxes (" + n + ")")
+    ; I3 (v1.6.4): say where the missing boxes went. Without this the list simply
+    ; has fewer rows than the count above it, which reads as data loss.
+    if _sharedSlotBoxes > 0
+        AddTextOption("(" + _sharedSlotBoxes + " box(es) share a slot with another - use the", "", OPTION_FLAG_DISABLED)
+        AddTextOption("  SKSE Menu Framework to work with those)", "", OPTION_FLAG_DISABLED)
+    endIf
 
     if n == 0
         AddTextOption("(none yet - use + New box)", "", OPTION_FLAG_DISABLED)
@@ -485,10 +514,16 @@ endFunction
 
 ; Shown when a box page's box was deleted this session (the page list only
 ; refreshes on reopen). Avoids rendering a shifted, wrong box on that page.
+; Reached when a page's slot names no single box: either the box was deleted
+; this session, or (v1.6.4) another box has since been created on the same slot
+; and the slot no longer identifies one. Deliberately carries NO controls - it is
+; what makes a stale page harmless.
 function ResetDeletedBoxPage()
     SetCursorFillMode(TOP_TO_BOTTOM)
-    AddHeaderOption("(box deleted)")
-    AddTextOption("This box was deleted. Reopen the MCM to refresh the page list.", "", OPTION_FLAG_DISABLED)
+    AddHeaderOption("(not available here)")
+    AddTextOption("This box was deleted, or its slot now holds more than one box.", "", OPTION_FLAG_DISABLED)
+    AddTextOption("Reopen the MCM to refresh the list; shared slots are handled in", "", OPTION_FLAG_DISABLED)
+    AddTextOption("the SKSE Menu Framework.", "", OPTION_FLAG_DISABLED)
 endFunction
 
 ; Full controls for ONE box (its own page). The box index is tracked in
@@ -839,6 +874,15 @@ event OnOptionSelect(int a_option)
 
     ; --- Boxes (single-box page: box index is _curBoxIndex) ---
     RefreshCurBoxIndex()   ; ROOT I: re-resolve from the stable slot before acting
+    ; I6 (v1.6.4): the re-resolve can now come back empty - the box was deleted,
+    ; or another box was created on the same slot while this page was open and
+    ; the slot no longer names one. Either way there is nothing safe to act on,
+    ; so every per-box handler below is skipped rather than run against a stale
+    ; index. This is the one place a shared slot could still reach a mutator.
+    if _curBoxIndex < 0
+        Debug.Notification("CostumeFW: this page no longer refers to one box - reopen the MCM")
+        return
+    endIf
 
     ; content selection (left list) -> load its detail into the right column
     p = _contentSelectOpts.Find(a_option)
@@ -1015,9 +1059,11 @@ endFunction
 function RefreshCurBoxIndex()
     if _curBoxSlot > 0
         int idx = CFW_Native.GetBoxBySlot(_curBoxSlot)
-        if idx >= 0
-            _curBoxIndex = idx
-        endIf
+        ; I6 (v1.6.4): CLEAR on a miss rather than keeping the old value. -1 now
+        ; also means "this slot holds more than one box", and carrying a stale
+        ; index forward is exactly how a handler would act on the wrong one. Every
+        ; handler below bails on a negative index.
+        _curBoxIndex = idx
     endIf
 endFunction
 
@@ -1069,6 +1115,10 @@ function UninstallCleanup()
         pi += 1
     endWhile
 
+    ; X7 (v1.6.4): the NPC arm. SMF has always called this; this cleanup did not,
+    ; so it returned box contents and active persist, said "safe to uninstall",
+    ; and left published costumes on NPCs and NPC persist attached.
+    CFW_Native.UninstallNpcCleanup()
     CFW_Native.Clear()  ; detach + unregister all injected meshes
     CFW_Native.SetEnabled(false)  ; persist the OFF state (no re-apply on reload)
     Debug.Notification("CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall.")
@@ -1117,12 +1167,47 @@ endFunction
 
 event OnOptionMenuOpen(int a_option)
     if a_option == _optNewBox
-        _freeTokenIds = CFW_Native.GetFreeTokenIds()
-        string[] slotOpts = Utility.CreateStringArray(_freeTokenIds.Length, "")
+        ; I5 (v1.6.4): offer only slots that hold NO box yet, and only ONE token
+        ; per such slot.
+        ;
+        ; Two reasons. Creating a second box on an occupied slot is legitimate
+        ; from 1.6.4 on, but this menu cannot then operate EITHER of them (its
+        ; pages are keyed by slot), so it must not be the thing that creates that
+        ; state - SMF's picker still shows every free token, which is where
+        ; sharing a slot on purpose belongs. And a Papyrus array tops out at 128:
+        ; an empty slot can have four free tokens once BoxPool1 is installed, so
+        ; listing them all would grow with every pool generation. One per slot
+        ; caps this at the slot count and matches how this menu thinks anyway.
+        string[] allFree = CFW_Native.GetFreeTokenIds()
+        string[] keep = Utility.CreateStringArray(128, "")
+        int[] keepSlots = Utility.CreateIntArray(128, 0)
+        int kept = 0
         int si = 0
-        while si < _freeTokenIds.Length
-            slotOpts[si] = CFW_Native.GetItemName(_freeTokenIds[si]) + ": " + SlotName(CFW_Native.GetTokenSlot(_freeTokenIds[si]))
+        while si < allFree.Length && kept < 128
+            int slot = CFW_Native.GetTokenSlot(allFree[si])
+            if CFW_Native.GetBoxesOnSlot(slot) == 0 && keepSlots.Find(slot) < 0
+                keep[kept] = allFree[si]
+                keepSlots[kept] = slot
+                kept += 1
+            endIf
             si += 1
+        endWhile
+
+        _freeTokenIds = Utility.CreateStringArray(kept + 1, "")
+        if kept == 0
+            ; CreateStringArray(0) is not valid, and an empty dialog would look
+            ; like a bug rather than a full pool. Say which it is.
+            string[] emptyOpts = Utility.CreateStringArray(1, "")
+            emptyOpts[0] = "(no empty slot - use SKSE Menu Framework to share one)"
+            SetMenuDialogOptions(emptyOpts)
+            return
+        endIf
+        string[] slotOpts = Utility.CreateStringArray(kept, "")
+        int ki = 0
+        while ki < kept
+            _freeTokenIds[ki] = keep[ki]
+            slotOpts[ki] = CFW_Native.GetItemName(keep[ki]) + ": " + SlotName(keepSlots[ki])
+            ki += 1
         endWhile
         SetMenuDialogOptions(slotOpts)
         return
@@ -1219,6 +1304,11 @@ event OnOptionMenuAccept(int a_option, int a_index)
     if a_option == _optNewBox
         if a_index >= 0 && a_index < _freeTokenIds.Length
             string newToken = _freeTokenIds[a_index]
+            ; I5: the "no empty slot" dialog carries one informational row with no
+            ; token behind it. Picking it must do nothing, not announce a box.
+            if newToken == ""
+                return
+            endIf
             CFW_Native.AddBox(CFW_Native.GetItemName(newToken), newToken, "")
             BuildPages()  ; include the new box's page (visible after reopening the MCM)
             Debug.Notification("CostumeFW: box created for " + SlotName(CFW_Native.GetTokenSlot(newToken)) + " - reopen MCM to open its page")
@@ -1275,6 +1365,10 @@ event OnOptionMenuAccept(int a_option, int a_index)
 
     ; --- Box "+ Add worn item" / "+ Add from inventory" capture ---
     RefreshCurBoxIndex()   ; ROOT I: re-resolve the box index from its stable slot
+    if _curBoxIndex < 0    ; I6: same guard as the toggle handlers above
+        Debug.Notification("CostumeFW: this page no longer refers to one box - reopen the MCM")
+        return
+    endIf
     int k = _addWornOpts.Find(a_option)
     int capBoxIdx = -1
     if k >= 0

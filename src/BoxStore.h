@@ -432,6 +432,11 @@ namespace CostumeFW
     // The box index whose token occupies biped slot a_slot, or -1 if none. Lets
     // the MCM's per-box pages (named by slot) resolve to their box even after a
     // deletion shifts box indices.
+    // How many boxes currently sit on a biped slot. From 1.6.4 this can be
+    // more than one; the MCM uses it to leave those slots alone (I1/I5).
+    int BoxesOnSlot(int a_slot);
+    // The box on a slot, or -1 when there is none OR when the slot holds more
+    // than one (it then names no single box - see the note on the definition).
     int BoxIndexForSlot(int a_slot);
 
     // Per-box "distribute" flag: whether the token is given to / kept on the

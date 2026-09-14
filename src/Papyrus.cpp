@@ -322,9 +322,28 @@ namespace CostumeFW
         }
 
         // The box index on biped slot a_slot, or -1 (slot-keyed page resolution).
+        // -1 ALSO means "this slot holds more than one box" from v1.6.4 on: the
+        // MCM keys its pages by slot, so a slot that names no single box must
+        // resolve to nothing rather than to whichever box came first (I1).
         std::int32_t GetBoxBySlot(RE::StaticFunctionTag*, std::int32_t a_slot)
         {
             return BoxIndexForSlot(a_slot);
+        }
+
+        // How many boxes sit on a biped slot. The MCM uses it to leave shared
+        // slots out of its page list and its new-box picker (I2 / I5).
+        std::int32_t GetBoxesOnSlot(RE::StaticFunctionTag*, std::int32_t a_slot)
+        {
+            return BoxesOnSlot(a_slot);
+        }
+
+        // X7: the NPC arm of "prepare for uninstall" - recall every published
+        // costume and strip NPC persist. SMF has always called this; the MCM's
+        // own cleanup did not, so it returned box contents and active persist,
+        // said "safe to uninstall", and left published costumes on NPCs.
+        void UninstallNpcCleanupNative(RE::StaticFunctionTag*)
+        {
+            SKSE::GetTaskInterface()->AddTask([] { UninstallNpcCleanup(); });
         }
 
         // Box "distribute" flag (whether the token is given to the player).
@@ -1002,6 +1021,8 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetFreeTokenIds", kClass, GetFreeTokenIds);
         a_vm->RegisterFunction("GetTokenSlot", kClass, GetTokenSlot);
         a_vm->RegisterFunction("GetBoxBySlot", kClass, GetBoxBySlot);
+        a_vm->RegisterFunction("GetBoxesOnSlot", kClass, GetBoxesOnSlot);
+        a_vm->RegisterFunction("UninstallNpcCleanup", kClass, UninstallNpcCleanupNative);
         a_vm->RegisterFunction("GetBoxEnabled", kClass, GetBoxEnabled);
         a_vm->RegisterFunction("SetBoxEnabled", kClass, SetBoxEnabledNative);
         a_vm->RegisterFunction("GetBoxArmorType", kClass, GetBoxArmorType);
