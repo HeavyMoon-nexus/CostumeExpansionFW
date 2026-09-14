@@ -3561,6 +3561,27 @@ namespace CostumeFW
             }
             const auto snap = g_contentEnchants.find(c);
             if (snap != g_contentEnchants.end()) {
+                if (!armo) {
+                    // The form does not resolve at all, so the plugin that
+                    // defines this piece is not loaded and the piece is not in
+                    // the game. The flat snapshot is for an original that is
+                    // UNREACHABLE - another character's store, a copy carried
+                    // in from another save - while the form itself is still
+                    // there. It is not for a piece that has gone.
+                    //
+                    // Paying from it here hands out a FLATTENED enchantment,
+                    // because a snapshot cannot carry conditions. Measured
+                    // 2026-09-14 (7.2 #23a): disabling the source plugin turned
+                    // "+250 while sneaking" into "+250, always" and "+200 while
+                    // sneaking AND in combat" into "+200, always", and those
+                    // became the live generations - a costume that no longer
+                    // exists paying MORE than it ever did.
+                    //
+                    // SnapshotMatchesEnchant cannot catch this one: it decides
+                    // by comparing against the base enchantment, and with the
+                    // plugin gone there is no base enchantment to compare to.
+                    return effs;
+                }
                 // The snapshot is FLAT: it cannot carry the conditions or
                 // duration that gate an effect. When it is merely a copy of
                 // the base enchantment, the live form is the SAME effects at
