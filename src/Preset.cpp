@@ -87,6 +87,13 @@ namespace CostumeFW::Preset
                     p.contents.push_back(c.get<std::string>());
                 }
             }
+            // --- per-content prefs -------------------------------------------
+            // Two shapes are read, oldest first. "hideRules"/"genderModes" are the
+            // pre-1.6.4 top-level maps and every preset in circulation has them;
+            // "contentSettings" is the 1.6.4 form that also carries the three
+            // settings the old shape silently dropped (F15). Reading the legacy
+            // pair first means a preset written by any version applies the same
+            // way here, and a 1.6.4 file overlays the rest on top.
             const auto& rules = Object(a_doc, "hideRules");
             for (auto it = rules.begin(); it != rules.end(); ++it) {
                 std::vector<int> slots;
@@ -99,7 +106,7 @@ namespace CostumeFW::Preset
                     }
                 }
                 if (!slots.empty()) {
-                    p.hideRules[it.key()] = std::move(slots);
+                    p.contentPrefs[it.key()].hideSlots = std::move(slots);
                 }
             }
             const auto& genders = Object(a_doc, "genderModes");
@@ -107,8 +114,47 @@ namespace CostumeFW::Preset
                 if (it.value().is_number_integer()) {
                     const int m = it.value().get<int>();
                     if (m >= 1 && m <= 2) {
-                        p.genderModes[it.key()] = m;
+                        p.contentPrefs[it.key()].genderMode = m;
                     }
+                }
+            }
+            const auto& settings = Object(a_doc, "contentSettings");
+            for (auto it = settings.begin(); it != settings.end(); ++it) {
+                if (!it.value().is_object()) {
+                    continue;
+                }
+                const auto& node = it.value();
+                auto& prefs = p.contentPrefs[it.key()];
+                // Each field is optional and only overwrites when present, so a
+                // hand-edited file that carries one key keeps the legacy values
+                // for the rest.
+                if (const auto f = node.find("hideSlots"); f != node.end() && f->is_array()) {
+                    std::vector<int> slots;
+                    for (const auto& s : *f) {
+                        if (s.is_number_integer()) {
+                            slots.push_back(s.get<int>());
+                        }
+                    }
+                    prefs.hideSlots = std::move(slots);
+                }
+                if (const auto f = node.find("genderMode");
+                    f != node.end() && f->is_number_integer()) {
+                    if (const int m = f->get<int>(); m >= 0 && m <= 2) {
+                        prefs.genderMode = m;
+                    }
+                }
+                if (const auto f = node.find("bodyMorph"); f != node.end() && f->is_boolean()) {
+                    prefs.bodyMorph = f->get<bool>();
+                }
+                if (const auto f = node.find("hideShapes"); f != node.end() && f->is_array()) {
+                    for (const auto& s : *f) {
+                        if (s.is_string()) {
+                            prefs.hideShapes.push_back(s.get<std::string>());
+                        }
+                    }
+                }
+                if (const auto f = node.find("showRealBody"); f != node.end() && f->is_boolean()) {
+                    prefs.showRealBody = f->get<bool>();
                 }
             }
             p.valid = true;
@@ -209,8 +255,7 @@ namespace CostumeFW::Preset
     }
 
     std::string Export(const std::string& a_name, const std::vector<std::string>& a_contents,
-        const std::unordered_map<std::string, std::vector<int>>& a_hideRules,
-        const std::unordered_map<std::string, int>& a_genderModes,
+        const std::unordered_map<std::string, ContentPrefs>& a_prefs,
         const std::string& a_author, const std::string& a_description)
     {
         std::string base = Sanitize(a_name);
@@ -252,21 +297,48 @@ namespace CostumeFW::Preset
         }
         doc["requiredPlugins"] = plugins;
         doc["contents"] = a_contents;
-        // Carry the per-content hide-when-worn rules (§8.10) so the hide behavior
-        // travels with the distributed preset. Only contents that have a rule.
+        // Carry the per-content settings so the appearance travels with the
+        // distributed preset. Written in BOTH shapes on purpose:
+        //
+        //   "contentSettings" - the 1.6.4 form, all five settings.
+        //   "hideRules" / "genderModes" - the pre-1.6.4 top-level maps.
+        //
+        // A preset is a file people hand to each other, and the recipient is not
+        // necessarily on the same CEF version. Emitting the legacy pair as well
+        // costs a few lines and keeps a 1.6.4-exported preset applying its hide
+        // rules and gender on 1.6.3, instead of arriving as contents only.
+        auto settings = nlohmann::json::object();
         auto rules = nlohmann::json::object();
-        for (const auto& [id, slots] : a_hideRules) {
-            if (!slots.empty()) {
-                rules[id] = slots;
-            }
-        }
-        doc["hideRules"] = std::move(rules);
         auto genders = nlohmann::json::object();
-        for (const auto& [id, mode] : a_genderModes) {
-            if (mode != 0) {
-                genders[id] = mode;
+        for (const auto& [id, prefs] : a_prefs) {
+            const bool worthCarrying = !prefs.hideSlots.empty() || prefs.genderMode != 0 ||
+                                       prefs.bodyMorph || !prefs.hideShapes.empty() ||
+                                       prefs.showRealBody;
+            if (!worthCarrying) {
+                continue;
             }
+            auto node = nlohmann::json::object();
+            if (!prefs.hideSlots.empty()) {
+                node["hideSlots"] = prefs.hideSlots;
+                rules[id] = prefs.hideSlots;  // legacy shape
+            }
+            if (prefs.genderMode != 0) {
+                node["genderMode"] = prefs.genderMode;
+                genders[id] = prefs.genderMode;  // legacy shape
+            }
+            if (prefs.bodyMorph) {
+                node["bodyMorph"] = true;
+            }
+            if (!prefs.hideShapes.empty()) {
+                node["hideShapes"] = prefs.hideShapes;
+            }
+            if (prefs.showRealBody) {
+                node["showRealBody"] = true;
+            }
+            settings[id] = std::move(node);
         }
+        doc["contentSettings"] = std::move(settings);
+        doc["hideRules"] = std::move(rules);
         doc["genderModes"] = std::move(genders);
 
         std::ofstream out(dir / file, std::ios::trunc);

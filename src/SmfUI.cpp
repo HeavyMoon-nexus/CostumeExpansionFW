@@ -18,9 +18,11 @@
 #include <chrono>
 #include <cstdio>
 #include <format>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // SKSE Menu Framework v3 consumer header (vendored; pinned commit recorded in
@@ -1877,14 +1879,24 @@ namespace CostumeFW::SmfUI
             return;
         }
         SKSEMenuFramework::SetSection("Costume Expansion FW");
-        SKSEMenuFramework::AddSectionItem("Main", RenderMain);
-        SKSEMenuFramework::AddSectionItem("Boxes", RenderBoxes);
-        SKSEMenuFramework::AddSectionItem("Persist", RenderPersist);
-        SKSEMenuFramework::AddSectionItem("NPC", RenderNpc);
-        SKSEMenuFramework::AddSectionItem("Presets", RenderPresets);
-        SKSEMenuFramework::AddSectionItem("Blocked", RenderBlocked);  // v1.3.2 capture blacklist
-        SKSEMenuFramework::AddSectionItem("Recovery", RenderRecovery);
-        SKSEMenuFramework::AddSectionItem("Diagnostics", RenderDiagnostics);
-        SKSE::log::info("SMF: registered section 'Costume Expansion FW' (6 pages)");
+        // Registered here rather than as eight loose calls so the log line below
+        // cannot drift from the truth: it said "(6 pages)" while eight were being
+        // registered, because the count was a literal somebody had to remember to
+        // bump (X6). Adding a page here updates the log by construction.
+        const std::pair<const char*, void(__stdcall*)()> kPages[]{
+            { "Main", RenderMain },
+            { "Boxes", RenderBoxes },
+            { "Persist", RenderPersist },
+            { "NPC", RenderNpc },
+            { "Presets", RenderPresets },
+            { "Blocked", RenderBlocked },  // v1.3.2 capture blacklist
+            { "Recovery", RenderRecovery },
+            { "Diagnostics", RenderDiagnostics },
+        };
+        for (const auto& [name, render] : kPages) {
+            SKSEMenuFramework::AddSectionItem(name, render);
+        }
+        SKSE::log::info("SMF: registered section 'Costume Expansion FW' ({} pages)",
+            std::size(kPages));
     }
 }

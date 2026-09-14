@@ -543,7 +543,8 @@ namespace CostumeFW
         void RecordCustody(const std::string& a_id, const char* a_event);  // fwd (below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
-        // Inputs for tools/nifcarrier `sync`: per box, the resolved worn-NIF path
+        // Inputs for the carrier `sync` (src/nifcarrier): per box, the resolved
+        // worn-NIF path
         // of every content. sync rebuilds Box<slot>_carrier.nif (+ merged physics
         // XML when 2+ contents carry SMP) from this; the per-token ARMA points at
         // that carrier, so equipping the token makes FSMP grow the physics bones
@@ -693,7 +694,7 @@ namespace CostumeFW
         }
 
         // --- carrier revision overrides (restart-free swaps) --------------------
-        // tools/nifcarrier `sync` rewrites a PRE-CREATED revision slot file and
+        // The carrier `sync` rewrites a PRE-CREATED revision slot file and
         // records it in carriers.json. usvfs shows external REWRITES of existing
         // files but never externally-created NEW files (verified in-game
         // 2026-07-03), which is exactly why the slots are pre-created. Repointing

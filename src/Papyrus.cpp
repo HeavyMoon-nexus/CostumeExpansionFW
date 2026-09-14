@@ -448,37 +448,50 @@ namespace CostumeFW
 
         // Export a box's current contents as a new preset file (file I/O only,
         // no scene). Returns the written file name ("" on failure).
-        // Gather the per-content hide rules + gender modes for a content list, to
-        // carry into an exported preset (§8.10/8.11 + gender).
-        void CollectPresetMaps(const std::vector<std::string>& a_contents,
-            std::unordered_map<std::string, std::vector<int>>& a_hide,
-            std::unordered_map<std::string, int>& a_gender)
+        // Gather the per-content settings for a content list, to carry into an
+        // exported preset. All five travel (F15): before 1.6.4 only the hide
+        // slots and gender mode did, so a shared costume arrived without its
+        // shape hides, body-morph opt-in or show-real-body - the settings that
+        // decide whether it sits on the body correctly.
+        std::unordered_map<std::string, Preset::ContentPrefs> CollectPresetPrefs(
+            const std::vector<std::string>& a_contents)
         {
+            std::unordered_map<std::string, Preset::ContentPrefs> out;
             for (const auto& c : a_contents) {
-                auto slots = HideSlotsFor(c);
-                if (!slots.empty()) {
-                    a_hide[c] = std::move(slots);
-                }
-                if (const int g = GenderModeFor(c); g != 0) {
-                    a_gender[c] = g;
-                }
+                Preset::ContentPrefs prefs;
+                prefs.hideSlots = HideSlotsFor(c);
+                prefs.genderMode = GenderModeFor(c);
+                prefs.bodyMorph = BodyMorphOn(c);
+                prefs.hideShapes = HideShapesFor(c);
+                prefs.showRealBody = ShowRealBodyOn(c);
+                // Export decides what is worth writing; keep the entry either way
+                // so a caller can tell "asked about" from "had nothing".
+                out.emplace(c, std::move(prefs));
             }
+            return out;
         }
 
-        // Restore a preset's hide rules + gender modes for its resolvable contents
+        // Restore a preset's per-content settings for its resolvable contents
         // (after assigning it to a box or persist).
-        void RestorePresetMaps(const Preset::PresetInfo& a_preset,
+        void RestorePresetPrefs(const Preset::PresetInfo& a_preset,
             const std::vector<std::string>& a_ok)
         {
-            for (const auto& [cid, slots] : a_preset.hideRules) {
-                if (std::find(a_ok.begin(), a_ok.end(), cid) != a_ok.end()) {
-                    SetHideSlots(cid, slots);
+            for (const auto& [cid, prefs] : a_preset.contentPrefs) {
+                if (std::find(a_ok.begin(), a_ok.end(), cid) == a_ok.end()) {
+                    continue;
                 }
-            }
-            for (const auto& [cid, mode] : a_preset.genderModes) {
-                if (std::find(a_ok.begin(), a_ok.end(), cid) != a_ok.end()) {
-                    SetGenderMode(cid, mode);
+                SetHideSlots(cid, prefs.hideSlots);
+                SetGenderMode(cid, prefs.genderMode);
+                SetBodyMorphOn(cid, prefs.bodyMorph);
+                // SetHideShape is per shape; the preset carries the whole set, so
+                // clear what is there first or an assignment would only ever add.
+                for (const auto& shape : HideShapesFor(cid)) {
+                    SetHideShape(cid, shape, false);
                 }
+                for (const auto& shape : prefs.hideShapes) {
+                    SetHideShape(cid, shape, true);
+                }
+                SetShowRealBodyOn(cid, prefs.showRealBody);
             }
         }
 
@@ -486,10 +499,7 @@ namespace CostumeFW
             RE::BSFixedString a_name)
         {
             const auto contents = BoxContents(a_token.c_str());
-            std::unordered_map<std::string, std::vector<int>> hideRules;
-            std::unordered_map<std::string, int> genderModes;
-            CollectPresetMaps(contents, hideRules, genderModes);
-            return Preset::Export(a_name.c_str(), contents, hideRules, genderModes);
+            return Preset::Export(a_name.c_str(), contents, CollectPresetPrefs(contents));
         }
 
         // Assign a preset (by file) to a box: read + validate (skip missing), set the
@@ -515,7 +525,7 @@ namespace CostumeFW
             }
             // Restore the preset's hide rules + gender modes for its resolvable
             // contents so a distributed costume keeps its hide/gender behavior.
-            RestorePresetMaps(preset, ok);
+            RestorePresetPrefs(preset, ok);
             SKSE::GetTaskInterface()->AddTask([token, oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);
@@ -859,10 +869,7 @@ namespace CostumeFW
         RE::BSFixedString ExportPersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_name)
         {
             const auto contents = PersistContents();
-            std::unordered_map<std::string, std::vector<int>> hideRules;
-            std::unordered_map<std::string, int> genderModes;
-            CollectPresetMaps(contents, hideRules, genderModes);
-            return Preset::Export(a_name.c_str(), contents, hideRules, genderModes);
+            return Preset::Export(a_name.c_str(), contents, CollectPresetPrefs(contents));
         }
 
         bool AssignPersistPresetNative(RE::StaticFunctionTag*, RE::BSFixedString a_file)
@@ -881,7 +888,7 @@ namespace CostumeFW
             if (!AssignPresetToPersist(preset.file, preset.name, ok)) {  // sync def + json
                 return false;
             }
-            RestorePresetMaps(preset, ok);
+            RestorePresetPrefs(preset, ok);
             SKSE::GetTaskInterface()->AddTask([oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);  // unregister old persist contents

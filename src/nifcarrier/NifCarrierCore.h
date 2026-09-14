@@ -1,6 +1,8 @@
 #pragma once
 
-// nifcarrier_core - in-proc port of tools/nifcarrier (NIFCARRIER_INPROC.md).
+// nifcarrier_core - the carrier builder (NIFCARRIER_INPROC.md). Began as an
+// in-proc port of a C# tool that was deleted in v1.6.4; this is the only
+// implementation now.
 // Engine-free by design: std + nifly only, no CommonLibSSE/RE types. The same
 // static library links into the CEF DLL and into nifcarrier_cli.exe so the
 // T0-T3 offline checks keep running outside the game (I-7).

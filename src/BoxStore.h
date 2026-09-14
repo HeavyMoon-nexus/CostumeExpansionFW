@@ -199,7 +199,7 @@ namespace CostumeFW
 
     // Repoint each box token's ARMA at its current carrier revision from
     // carriers.json (restart-free FSMP carrier swaps; the revision slots are
-    // pre-created files that tools/nifcarrier `sync` rewrites in place).
+    // pre-created files that the carrier `sync` rewrites in place).
     // Volatile in-memory form edit, reapplied on every settings load. With
     // a_refreshChanged, re-equips worn tokens whose revision changed so the
     // engine loads the new (uncached) path and FSMP rebuilds. Main thread.

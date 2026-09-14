@@ -5,9 +5,22 @@ $assetRoot = Join-Path $repo 'package_assets'
 $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
 $stage = Join-Path $env:TEMP "cef_npc_stage_$Version"
 $out = Join-Path $repo "dist\CostumeExpansionFW-NPC-Addon-$Version.7z"
+
+# Verify the ESP BEFORE staging anything (G1). build_npc_addon.ps1 runs the same
+# verifier right after it generates the file, but this script stages whatever is
+# sitting in package_assets - so "generated once, edited afterwards" and "ran the
+# packager without the builder" both used to ship unchecked. The verifier is the
+# Mutagen one in tools/espmerge; it takes an explicit path and reads only.
+$espPath = Join-Path $assetRoot 'CostumeFW_NPC.esp'
+& dotnet run --project (Join-Path $PSScriptRoot 'espmerge\espmerge.csproj') --no-restore -- `
+    --verify-npc $espPath
+if ($LASTEXITCODE -ne 0) {
+    throw "espmerge --verify-npc FAILED (exit $LASTEXITCODE) on $espPath - nothing staged, nothing packaged."
+}
+
 if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force "$stage\meshes\CostumeFW\XML" | Out-Null
-$esp = Get-Item (Join-Path $assetRoot 'CostumeFW_NPC.esp')
+$esp = Get-Item $espPath
 Copy-Item -LiteralPath $esp.FullName -Destination $stage
 Copy-Item -LiteralPath "$repo\README_NPC.txt" -Destination $stage
 $asset = "$assetRoot\meshes\CostumeFW"

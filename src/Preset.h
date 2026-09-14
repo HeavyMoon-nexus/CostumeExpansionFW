@@ -11,6 +11,24 @@
 // preset's contents. Assignment is exclusive (one preset <-> one box).
 namespace CostumeFW::Preset
 {
+    // Everything a preset carries about ONE content, so a distributed costume
+    // looks the same for the person who receives it. Deliberately a mirror of
+    // CostumeFW::ContentSettings (SkinRebind.h) rather than a reuse of it: that
+    // header drags in RE, and this layer is pure data + file I/O (it is the one
+    // part of CEF a user opens in a text editor).
+    //
+    // Before v1.6.4 only the first two travelled, so a preset silently dropped
+    // the shape hides, the body-morph opt-in and show-real-body - exactly the
+    // settings that decide whether a costume sits on the body correctly (F15).
+    struct ContentPrefs
+    {
+        std::vector<int> hideSlots;           // hide-when-worn biped slots (§8.10)
+        int genderMode{ 0 };                  // 0 = follow sex, 1 = male, 2 = female
+        bool bodyMorph{ false };              // skee body-morph opt-in
+        std::vector<std::string> hideShapes;  // per-content shape hide
+        bool showRealBody{ false };           // inject the player's own body under it
+    };
+
     struct PresetInfo
     {
         std::string name;          // display name (from json "name", else filename stem)
@@ -19,12 +37,10 @@ namespace CostumeFW::Preset
         std::string description;
         std::vector<std::string> requiredPlugins;
         std::vector<std::string> contents;  // colon-form ids
-        // Per-content hide-when-worn slots (§8.10), carried with the preset so the
-        // hide behavior travels with a distributed costume. content id -> slots.
-        std::unordered_map<std::string, std::vector<int>> hideRules;
-        // Per-content forced-gender NIF mode (0/1/2), likewise carried. content id
-        // -> mode (only non-zero entries stored).
-        std::unordered_map<std::string, int> genderModes;
+        // Per-content settings, carried with the preset so the appearance travels
+        // with a distributed costume. content id -> prefs; only contents that have
+        // something worth carrying appear.
+        std::unordered_map<std::string, ContentPrefs> contentPrefs;
         bool valid{ false };       // parsed ok
     };
 
@@ -35,14 +51,13 @@ namespace CostumeFW::Preset
     // Read one preset by file name (e.g. "CEFP_X.json"). valid=false on failure.
     PresetInfo Read(const std::string& a_file);
 
-    // Write a preset built from a_contents (+ optional per-content hide rules). The
+    // Write a preset built from a_contents (+ optional per-content prefs). The
     // file is CEFP_<a_name>.json (a_name is sanitized; a "CEFP_" prefix in a_name is
     // not duplicated). If that file already exists, a _1/_2/... suffix is appended
     // (higher = later). Returns the file name written ("" on failure). Creates the
     // folder if missing.
     std::string Export(const std::string& a_name, const std::vector<std::string>& a_contents,
-        const std::unordered_map<std::string, std::vector<int>>& a_hideRules = {},
-        const std::unordered_map<std::string, int>& a_genderModes = {},
+        const std::unordered_map<std::string, ContentPrefs>& a_prefs = {},
         const std::string& a_author = {}, const std::string& a_description = {});
 
     // Resolve preset assignments that settings written before v1.6.2.1 stored as
