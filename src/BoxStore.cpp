@@ -3461,6 +3461,37 @@ namespace CostumeFW
         return {};
     }
 
+    std::string FreeTokenOnSlot(int a_slot)
+    {
+        StoreLock lk;
+        if (a_slot < 30 || a_slot > 61) {
+            return {};
+        }
+        // (generation, local id) rather than the pool's own (slot, colon-id)
+        // order: the colon-id sorts on the local id FIRST, so with two pool
+        // generations installed it would offer BoxPool2's 0x800 ahead of
+        // BoxPool1's 0x801 and the generations would interleave.
+        std::vector<std::pair<std::pair<int, std::uint32_t>, std::string>> ranked;
+        for (const auto& token : FreeTokens()) {
+            if (TokenSlot(token) != a_slot) {
+                continue;
+            }
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                continue;
+            }
+            // Generation 0 is the core plugin, whose generation number is 0 -
+            // so it sorts first without a special case.
+            ranked.push_back({ { tokenid::BoxPoolGeneration(plugin), local }, token });
+        }
+        if (ranked.empty()) {
+            return {};
+        }
+        std::sort(ranked.begin(), ranked.end());
+        return ranked.front().second;
+    }
+
     int BoxesOnSlot(int a_slot)
     {
         StoreLock lk;

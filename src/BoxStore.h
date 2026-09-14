@@ -459,6 +459,13 @@ namespace CostumeFW
     // them would always look like a candidate.
     std::string Gen0TokenForSlot(int a_slot);
 
+    // The free box token a biped slot would lend out next, in the order PLAN
+    // §5.2 lends them: generation ascending (the shipped core token, then
+    // BoxPool1, then BoxPool2...), then local FormID. "" when the slot has
+    // none free. "Free" is FreeTokens()' answer, so a token a published
+    // costume reserves is not one.
+    std::string FreeTokenOnSlot(int a_slot);
+
     // The box index whose token occupies biped slot a_slot, or -1 if none. Lets
     // the MCM's per-box pages (named by slot) resolve to their box even after a
     // deletion shifts box indices.

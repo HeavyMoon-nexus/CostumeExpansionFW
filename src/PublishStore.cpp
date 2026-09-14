@@ -633,70 +633,130 @@ namespace CostumeFW
     }
 
     // PLAN §5.5. A snapshot written before 1.6.4 records only the biped slot it
-    // came from - but 1.6.3 had exactly one token per slot, generation 0's, so
-    // the token it was published from is not a guess, it is arithmetic. Deriving
-    // it from "a free token on that slot" instead would never fire once BoxPool1
-    // is installed: three pool tokens share the slot and one of them would
-    // always look like a candidate, and the costume would come back on a token
-    // it was never published from.
+    // came from - but every release up to 1.6.3 had exactly one token per slot,
+    // generation 0's, so the token it was published from is not a guess, it is
+    // arithmetic. Deriving it from "a free token on that slot" instead would
+    // never fire once BoxPool1 is installed: three pool tokens share the slot
+    // and one of them would always look like a candidate, and the costume would
+    // come back on a token it was never published from.
     //
     // Runs at the end of the settings load, which is before anything can call
     // the allocator - §5.2 hands out generation 0 first, so a new box created
     // ahead of this would take the very token being reserved here.
     void MigrateLegacyPublishIdentity()
     {
-        std::vector<std::string> reservedBy;  // PLAN §5.1 rule 4: first snapshot owns it
+        // Is this token anybody's? A box holding it wins outright (§5.1 rule 3),
+        // and a published costume that already names it owns it (rule 4) - the
+        // latter includes snapshots this pass placed a moment ago AND snapshots
+        // later in the list that arrived holding a token, because the
+        // reservation is read off the whole published set rather than tracked
+        // as we go.
+        const auto spokenFor = [](const std::string& a_token) {
+            return FindBoxByToken(a_token) >= 0 || TokenReservedByPublish(a_token);
+        };
+        const auto boxOn = [](const std::string& a_token) -> std::string {
+            const int idx = FindBoxByToken(a_token);
+            return idx >= 0 ? BoxAt(idx).label : std::string{};
+        };
+
         for (const auto& snap : g_published) {
-            if (snap->sourceToken.empty() && snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
-                snap->sourceToken = Gen0TokenForSlot(snap->sourceSlot);
-                if (snap->sourceToken.empty()) {
+            // Only a snapshot that has never been migrated is placed here. One
+            // written by 1.6.4 already names its token and is never moved off
+            // it - that is the whole of §5.4.
+            const bool migrating = snap->sourceToken.empty();
+            if (migrating && snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
+                const std::string gen0 = Gen0TokenForSlot(snap->sourceSlot);
+                if (gen0.empty()) {
                     SKSE::log::warn(
                         "publish: slot {} '{}' came from biped slot {}, which no generation-0 "
                         "token occupies - it has no token to go back to and unpublish will say so",
                         snap->pubSlot, snap->label, snap->sourceSlot);
-                } else {
+                } else if (!spokenFor(gen0)) {
+                    snap->sourceToken = gen0;
                     SKSE::log::info("publish: slot {} '{}' reserves '{}' (from biped slot {})",
-                        snap->pubSlot, snap->label, snap->sourceToken, snap->sourceSlot);
+                        snap->pubSlot, snap->label, gen0, snap->sourceSlot);
+                } else {
+                    // Every release up to 1.6.2.2 RELEASED the source token on
+                    // publish and then offered it in the new-box picker again, so
+                    // "publish the outfit, then make another one on the slot that
+                    // just came free" was the normal thing to do - and it leaves
+                    // the costume with nowhere to go back to. Publishing a second
+                    // costume off the same slot lands in the same place.
+                    //
+                    // Putting it on another token of the SAME biped slot keeps
+                    // the one property that decides what a costume hides, and
+                    // BoxPool1 exists precisely so there is somewhere to put it.
+                    //
+                    // Owner decision 2026-09-15, and deliberately confined to
+                    // this one-time migration: §5.5 forbids SUBSTITUTING a token,
+                    // which is about unpublish going looking for one. A snapshot
+                    // from before reservations existed has to be finished
+                    // somehow, and every snapshot written from 1.6.4 on holds its
+                    // token from the moment it is published, so none of them can
+                    // ever reach this branch.
+                    const std::string held = boxOn(gen0);
+                    const std::string who = held.empty() ?
+                        "another published costume" : "box '" + held + "'";
+                    if (const std::string spare = FreeTokenOnSlot(snap->sourceSlot);
+                        spare.empty()) {
+                        snap->sourceToken = gen0;  // recorded honestly; unpublish refuses
+                        SKSE::log::warn(
+                            "publish: slot {} '{}' came from '{}', which {} now holds, and biped "
+                            "slot {} has no free token left - unpublish will refuse until one is "
+                            "freed",
+                            snap->pubSlot, snap->label, gen0, who, snap->sourceSlot);
+                    } else {
+                        snap->sourceToken = spare;
+                        SKSE::log::warn(
+                            "publish: slot {} '{}' came from '{}', which {} now holds - it reserves "
+                            "'{}' instead. Same biped slot ({}), so the costume hides what it "
+                            "always did and unpublish will put it there.",
+                            snap->pubSlot, snap->label, gen0, who, spare, snap->sourceSlot);
+                    }
                 }
             }
             if (snap->boxId.empty()) {
                 // A snapshot written before 1.6.4 has no id to preserve, so this
                 // only has to be stable and unique. The pool slot is in the seed
-                // for the uniqueness: 1.6.3 released the token on publish, so a
-                // box created afterwards legitimately holds it AND two costumes
-                // can legitimately name the same source slot (publish a box on
-                // slot 55, make another there, publish that too) - seeding on the
-                // token alone would hand them one id between them.
+                // for the uniqueness: two costumes can legitimately name the same
+                // source slot, and seeding on the token alone would hand them one
+                // id between them.
                 snap->boxId = DeriveBoxId("pub" + std::to_string(snap->pubSlot) + ":" +
                     (snap->sourceToken.empty() ? "slot" + std::to_string(snap->sourceSlot) :
                                                  snap->sourceToken));
             }
+            // A token held by a box, said once at load rather than only when the
+            // user tries to unpublish. A snapshot migrated a moment ago has
+            // already reported its own version of this, so the ones that reach
+            // here arrived holding a token: a hand-edited settings file, or a
+            // 1.6.4 snapshot whose token was taken from under it the same way.
+            if (!migrating && !snap->sourceToken.empty()) {
+                if (const std::string held = boxOn(snap->sourceToken); !held.empty()) {
+                    SKSE::log::warn(
+                        "publish: slot {} '{}' cannot be unpublished as it stands - box '{}' now "
+                        "holds its token '{}'. Free that box's token to get the costume back on "
+                        "its own slot.",
+                        snap->pubSlot, snap->label, held, snap->sourceToken);
+                }
+            }
+        }
+        // One token, one owner (PLAN §5.1 rule 4). The migration above avoids
+        // creating this, and a reservation stops 1.6.4 from creating it, so what
+        // is left is a hand-edited settings file and the case where a whole
+        // biped slot ran out of free tokens. First snapshot in the file owns it;
+        // the others get their token back only once that one has taken it.
+        std::vector<std::string> owned;
+        for (const auto& snap : g_published) {
             if (snap->sourceToken.empty()) {
                 continue;
             }
-            // Say both of these once, at load, rather than only when the user
-            // tries to unpublish.
-            //
-            // A box holding the token (rule 3): 1.6.3 released the source token
-            // on publish, so a box made afterwards legitimately owns it and the
-            // BOX wins. The snapshot keeps its sourceToken and holds no
-            // reservation.
-            if (const int idx = FindBoxByToken(snap->sourceToken); idx >= 0) {
-                SKSE::log::warn(
-                    "publish: slot {} '{}' cannot be unpublished as it stands - box '{}' now holds "
-                    "its token '{}'. Free that box's token to get the costume back on its own slot.",
-                    snap->pubSlot, snap->label, BoxAt(idx).label, snap->sourceToken);
-            }
-            // Two costumes naming one token (rule 4): the first owns it, and the
-            // second gets the token back only once the first has taken it.
-            if (std::find(reservedBy.begin(), reservedBy.end(), snap->sourceToken) !=
-                reservedBy.end()) {
+            if (std::find(owned.begin(), owned.end(), snap->sourceToken) != owned.end()) {
                 SKSE::log::warn(
                     "publish: slot {} '{}' names token '{}', which an earlier published costume "
                     "already reserves - only one of them can have it back",
                     snap->pubSlot, snap->label, snap->sourceToken);
             } else {
-                reservedBy.push_back(snap->sourceToken);
+                owned.push_back(snap->sourceToken);
             }
         }
     }
