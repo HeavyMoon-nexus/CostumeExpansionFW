@@ -46,14 +46,17 @@ If you are on a fresh install, or you have taken your box tokens off and saved, 
             </plugin>
 
             <plugin name="Stop - I still have box tokens equipped">
-              <description>Nothing will be installed.
+              <description>This installs one text file and nothing else. No esp, no DLL, nothing that runs.
+
+IMPORTANT: a FOMOD cannot refuse to install. The most it can do is install nothing useful. So if your mod manager asked whether to REPLACE your existing Costume Expansion FW, do not let it - install this as a new, separate mod, or the thing it replaces is the working install you are about to go back to.
 
 Do this first, in the version you have now:
 
-1. Take off every box token.
-2. Check your health, magicka, stamina and resistances are back where they should be. The console command "cef av" lists anything CEF is still adding.
-3. Save.
-4. Run this installer again.
+1. Run "cef av base".
+2. Take off every box token.
+3. Run "cef av diff". That lists what changed when the tokens came off, which is the part you want. ("cef av" on its own lists every actor value that anything is modifying, CEF's or not, so it cannot tell you which is which.)
+4. Save.
+5. Run this installer again.
 
 If a bonus is still there after the tokens are off, it is already stuck and 1.6.3 will not remove it. "player.getavinfo health" tells you the number, and "player.modav health -N" takes it back off by hand. Do that before you update, so you are not guessing later which mod put it there.</description>
               <conditionFlags>

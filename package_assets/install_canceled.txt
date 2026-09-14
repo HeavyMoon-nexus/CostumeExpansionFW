@@ -2,8 +2,18 @@ Costume Expansion FW - nothing was installed
 ============================================
 
 You told the installer you still have box tokens equipped, so it stopped. This
-folder is empty apart from this file. Your existing install, if you have one,
-was not touched.
+folder holds this file and nothing else: no esp, no DLL, nothing that runs.
+
+One thing to check first
+------------------------
+
+A FOMOD installer cannot refuse to install. The most it can do is install
+nothing useful, which is what this is. So if your mod manager asked whether to
+REPLACE an existing Costume Expansion FW and you said yes, it replaced your
+working install with this folder, and you need to reinstall the version you
+were on before going back in game. If you installed this as a new, separate
+mod - which is what you want here - your existing install is untouched and you
+can just disable or delete this one.
 
 Why it asks
 -----------
@@ -24,12 +34,18 @@ What to do
 Go back to the version you have now and:
 
 1. Take off every box token.
-2. Check your stats are back where they belong. The console command
+2. Check your stats came back. Before you take the tokens off, run
 
-       cef av
+       cef av base
 
-   lists every actor value something is currently modifying. Anything CEF is
-   still adding will be in that list.
+   and after, run
+
+       cef av diff
+
+   That lists what CHANGED when the tokens came off, which is the part you
+   care about. "cef av" on its own lists every actor value that anything is
+   modifying - other mods, perks, diseases, blessings - and cannot tell you
+   which of them is CEF's.
 3. Save.
 4. Run this installer again and pick the first option.
 

@@ -1953,21 +1953,17 @@ namespace CostumeFW
         // Snapshot this save's persist actives BEFORE the registry is wiped -
         // they are co-save state, invisible to the settings JSON.
         const auto actives = ActivePersistIds();
-        // Take every live box ability back off the player before the contents
-        // behind it change - an ability may not be refilled while it is applied
-        // - and mark it stale so ApplyBoxAbilities below refills it from the
-        // RELOADED definitions.
-        //
-        // This used to live in ReevaluateContentAdmissions, the blacklist
-        // caller, so only that one route got it. The SMF / MCM "reload settings
-        // from disk" lever reached here directly, and its boxes kept the effects
-        // they had before the file was re-read: an enchantment removed from the
-        // json went on applying until something unrelated rebuilt the ability
-        // (review 2026-09-11 F05). Same position in the sequence as the
-        // manifest emit, and for the same reason - every reload path gets it.
-        for (const auto& box : g_boxes) {
-            RebuildBoxAbility(box.token);
-        }
+        // The re-derive used to be HERE, before LoadBoxes, and that was right
+        // while RebuildBoxAbility meant "drop the synthesized spell and mark it
+        // stale" - dropping it early, refilling it from the reloaded file
+        // afterwards (review 2026-09-11 F05). The pool changed what the call
+        // means: it is RefreshContent now, which re-derives on the spot. Run
+        // before the file is re-read it re-derives from the settings being
+        // replaced, and nothing looks again afterwards, because SyncToActor
+        // hands out the slot a content already has without asking what it is
+        // worth. An item-data toggle flipped in the json went on being ignored
+        // - F05 back again, put there by repointing the function and not
+        // re-reading its callers. It is below, after LoadBoxes, now.
         for (const auto& it : ActiveSnapshot()) {
             DetachSkinned(it.id);
         }
@@ -2000,7 +1996,13 @@ namespace CostumeFW
         // AND NPC persist wear, and reconciles the actors it touches.
         ReapplyNpcBindings();
         Reconcile();
-        RebuildPersistAbility();
+        // Re-derive from the RELOADED definitions, which is the whole point of
+        // a reload: the per-content enchant, weight and armor toggles live in
+        // that file. InvalidateStatAbilities covers boxes, persist AND
+        // published costumes in one pass, so it replaces the separate
+        // RebuildPersistAbility that used to sit here and never covered the
+        // other two.
+        InvalidateStatAbilities();
         ApplyBoxAbilities();
         ApplyCarrierOverrides(false);  // persist pool reconcile with actives back
         // X-MAN (test run 2026-07-26): the manifest MUST be re-emitted here, not
