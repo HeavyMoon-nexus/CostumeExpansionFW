@@ -13,6 +13,7 @@
 #include "RE/C/CrosshairPickData.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -49,14 +50,23 @@ namespace CostumeFW::SmfUI
     namespace
     {
         // --- render-thread-only UI state (tasks never touch these) -----------
-        std::string s_selContent;         // content id shown in the detail block
+        // The content shown in a box row's detail block, per box row: two rows
+        // can be open at once from v1.6.4, and a selection in one is not a
+        // selection in the other (PLAN §6.2).
+        std::unordered_map<std::string, std::string> s_selContent;  // boxId -> content id
         std::string s_selPubContent;      // same, for a PUBLISHED costume's contents
         char s_invFilter[64] = "";        // "+ Add from inventory" name filter
         char s_catFilter[64] = "";        // Persist page: catalog row filter (X-SCROLL)
         char s_recFilter[64] = "";        // Recovery page: row filter (X-SCROLL)
-        char s_hideSlots[64] = "";        // hide-when-worn slot list edit buffer
-        std::string s_hideSlotsFor;       // which content the buffer was loaded for
-        char s_exportName[64] = "";       // "Export as preset" name buffer
+        // A 64-byte text-edit buffer per (field, scope). Each of these fields used
+        // to have ONE static buffer, reseeded whenever the row being drawn
+        // changed, which held up while only one row of a kind could be on screen.
+        // A biped slot can carry several boxes from v1.6.4, so two rows of the
+        // same kind are drawn in one frame and they were taking turns rewriting
+        // each other's buffer (F16 / X4). Keyed by boxId for a box row and by the
+        // content id where the thing being edited belongs to a content, so a
+        // buffer lives exactly as long as what it edits.
+        std::unordered_map<std::string, std::array<char, 64>> s_editBuf;
         char s_blkValue[128] = "";        // "Blocked" page: add-entry value buffer
         int s_blkKind = 0;                // "Blocked" page: 0=name, 1=plugin, 2=id
         std::string s_status;             // last guard/op feedback line
@@ -66,6 +76,18 @@ namespace CostumeFW::SmfUI
         // user's intent until the live state catches up (menu close), then drop
         // the override. The MCM did the same via SetToggleOptionValue.
         std::unordered_map<std::string, bool> s_pendingWear;  // token -> desired
+
+        // Seeded from a_seed the first time it is asked for and left alone after
+        // that - a half-typed name is the thing worth keeping.
+        char* EditBuffer(const std::string& a_key, const std::string& a_seed)
+        {
+            auto it = s_editBuf.find(a_key);
+            if (it == s_editBuf.end()) {
+                it = s_editBuf.emplace(a_key, std::array<char, 64>{}).first;
+                std::snprintf(it->second.data(), it->second.size(), "%s", a_seed.c_str());
+            }
+            return it->second.data();
+        }
 
         // --- scrollable list regions (X-SCROLL) ------------------------------
         // Nexus report 2026-07-27 (recorded against v1.3.0): a persist catalog
@@ -348,12 +370,13 @@ namespace CostumeFW::SmfUI
             }
         }
 
-        void RenderContentDetail(const std::string& a_token, int a_slot, const std::string& a_id)
+        void RenderContentDetail(const std::string& a_token, const std::string& a_scope,
+            const std::string& a_id, std::string& a_selection)
         {
             ImGui::SeparatorText(ItemDisplayName(a_id).c_str());
 
             bool morph = BodyMorphOn(a_id);
-            if (ImGui::Checkbox(std::format("Body morph (BodySlide mesh)##m{}", a_slot).c_str(), &morph)) {
+            if (ImGui::Checkbox(std::format("Body morph (BodySlide mesh)##m{}", a_scope).c_str(), &morph)) {
                 UiOps::SetBodyMorph(a_id, morph);
                 if (morph) {
                     s_status = "Body morph ON - only for body-conforming meshes; keep OFF for hair/jewelry (memory cost)";
@@ -365,7 +388,7 @@ namespace CostumeFW::SmfUI
             if (gm < 0 || gm > 2) {
                 gm = 0;
             }
-            if (ImGui::BeginCombo(std::format("Body (forced NIF)##g{}", a_slot).c_str(), kGender[gm])) {
+            if (ImGui::BeginCombo(std::format("Body (forced NIF)##g{}", a_scope).c_str(), kGender[gm])) {
                 for (int t = 0; t < 3; ++t) {
                     if (ImGui::Selectable(kGender[t], t == gm) && t != gm) {
                         UiOps::SetContentGender(a_id, t);  // re-resolves + re-injects
@@ -374,41 +397,38 @@ namespace CostumeFW::SmfUI
                 ImGui::EndCombo();
             }
 
-            if (s_hideSlotsFor != a_id) {  // (re)load the edit buffer on selection change
-                std::snprintf(s_hideSlots, sizeof(s_hideSlots), "%s", UiOps::GetHideSlotsStr(a_id).c_str());
-                s_hideSlotsFor = a_id;
-            }
-            ImGui::InputText(std::format("Hide when worn (slots)##hs{}", a_slot).c_str(),
-                s_hideSlots, sizeof(s_hideSlots));
+            char* hideBuf = EditBuffer("hs:" + a_id, UiOps::GetHideSlotsStr(a_id));
+            ImGui::InputText(std::format("Hide when worn (slots)##hs{}", a_scope).c_str(),
+                hideBuf, 64);
             ImGui::SameLine();
-            if (ImGui::Button(std::format("Apply##hsb{}", a_slot).c_str())) {
-                UiOps::SetHideSlotsStr(a_id, s_hideSlots);
+            if (ImGui::Button(std::format("Apply##hsb{}", a_scope).c_str())) {
+                UiOps::SetHideSlotsStr(a_id, hideBuf);
                 s_status = "hide-when-worn rule updated";
             }
 
             bool rb = ShowRealBodyOn(a_id);
-            if (ImGui::Checkbox(std::format("Show real body under##rb{}", a_slot).c_str(), &rb)) {
+            if (ImGui::Checkbox(std::format("Show real body under##rb{}", a_scope).c_str(), &rb)) {
                 UiOps::SetShowRealBody(a_id, rb);
                 if (rb) {
                     s_status = "Show real body ON - pair with Hide shapes on the costume's body (doubles if your body already shows)";
                 }
             }
 
-            RenderItemDataFold(a_id, std::format("b{}", a_slot), true);
+            RenderItemDataFold(a_id, std::format("b{}", a_scope), true);
 
-            if (ImGui::Button(std::format("Remove from box##rm{}", a_slot).c_str())) {
+            if (ImGui::Button(std::format("Remove from box##rm{}", a_scope).c_str())) {
                 const std::string token = a_token;
                 const std::string id = a_id;
                 SKSE::GetTaskInterface()->AddTask([token, id] {
                     UiOps::RemoveBoxContent(token, id, true);  // returns the captured item (store-first)
                 });
-                s_selContent.clear();
+                a_selection.clear();
             }
 
             const auto shapes = ContentShapesFor(a_id);
             ImGui::SeparatorText(std::format("Hide shapes ({})", shapes.size()).c_str());
             if (shapes.empty()) {
-                if (ImGui::Button(std::format("Scan shapes##sc{}", a_slot).c_str())) {
+                if (ImGui::Button(std::format("Scan shapes##sc{}", a_scope).c_str())) {
                     UiOps::ScanContentShapes(a_id);
                 }
                 ImGui::SameLine();
@@ -417,8 +437,8 @@ namespace CostumeFW::SmfUI
                 for (const auto& [sname, sslot] : shapes) {
                     bool hidden = IsHideShape(a_id, sname);
                     const std::string lbl = (sslot >= 0)
-                        ? std::format("{} [slot {}]##sh{}{}", sname, sslot, a_slot, sname)
-                        : std::format("{}##sh{}{}", sname, a_slot, sname);
+                        ? std::format("{} [slot {}]##sh{}{}", sname, sslot, a_scope, sname)
+                        : std::format("{}##sh{}{}", sname, a_scope, sname);
                     if (ImGui::Checkbox(lbl.c_str(), &hidden)) {
                         UiOps::SetHideShape(a_id, sname, hidden);  // queues a re-inject
                     }
@@ -537,6 +557,13 @@ namespace CostumeFW::SmfUI
         {
             // + New box (free slot picker)
             if (ImGui::BeginCombo("+ New box##cfwnew", "(pick a free slot)")) {
+                // Capacity, inside the combo because that is where it answers a
+                // question and because counting it walks the ARMO array - which
+                // the list below does anyway, but not every frame the page is up.
+                const auto stats = BoxTokenPoolStats();
+                ImGui::TextDisabled("%d free of %d token(s) - %d in boxes, %d held by published costumes",
+                    stats.free, stats.total, stats.inBoxes, stats.reserved);
+                ImGui::Separator();
                 for (const auto& t : FreeTokens()) {
                     const int slot = TokenSlot(t);
                     const std::string lbl =
@@ -556,16 +583,40 @@ namespace CostumeFW::SmfUI
 
             BeginScrollList("##cfwboxlist");
             const int n = BoxCount();
+            // One pass first: the header needs to know whether a biped slot has
+            // company, and TokenSlot is a form lookup - the same number of them
+            // as before, asked once each instead of once per row per row.
+            std::vector<BoxDefInfo> boxes;
+            std::vector<int> slots;
+            boxes.reserve(static_cast<std::size_t>(n));
+            slots.reserve(static_cast<std::size_t>(n));
+            std::unordered_map<int, int> boxesPerSlot;
             for (int i = 0; i < n; ++i) {
-                const BoxDefInfo b = BoxAt(i);
+                boxes.push_back(BoxAt(i));
+                slots.push_back(TokenSlot(boxes.back().token));
+                ++boxesPerSlot[slots.back()];
+            }
+            for (int i = 0; i < n; ++i) {
+                const BoxDefInfo& b = boxes[static_cast<std::size_t>(i)];
                 const std::string token = b.token;
-                const int slot = TokenSlot(token);
+                const int slot = slots[static_cast<std::size_t>(i)];
                 const bool worn = BoxWornAt(i);
-                // "###" id keyed by SLOT (stable): a deletion shifting box indices
-                // must not re-target open tree nodes (the MCM's ROOT I analog).
+                // Every "##"/"###" id on this row is keyed by boxId. It used to
+                // be the slot, which was stable against a deletion shifting box
+                // indices (the MCM's ROOT I analog) and unique while one slot
+                // meant one box. From v1.6.4 a slot can hold four, and ImGui
+                // treats two widgets with one id as ONE widget - so the second
+                // box's Wear checkbox, combos, popups and Delete button were all
+                // about to become the first box's (PLAN §6.2). boxId is stable
+                // against both, and survives a publish round trip besides.
+                const std::string& scope = b.boxId;
                 const std::string headTitle = b.label.empty() ? SlotName(slot) : b.label;
-                const std::string header = std::format("Box {}: {} - {} item(s){}###cfwbox{}",
-                    slot, headTitle, b.contents.size(), worn ? "  [WORN]" : "", slot);
+                // Name the token when the slot has company: two rows otherwise
+                // read "Box 55: Costume Box 55" twice over.
+                const std::string shared = boxesPerSlot[slot] > 1 ?
+                    std::format("  [{}]", CarrierKeyForToken(token)) : std::string{};
+                const std::string header = std::format("Box {}: {}{} - {} item(s){}###cfwbox{}",
+                    slot, headTitle, shared, b.contents.size(), worn ? "  [WORN]" : "", scope);
                 if (!ImGui::TreeNode(header.c_str())) {
                     continue;
                 }
@@ -578,14 +629,14 @@ namespace CostumeFW::SmfUI
                         w = pend->second;           // show the queued intent
                     }
                 }
-                if (ImGui::Checkbox(std::format("Wear (show contents)##w{}", slot).c_str(), &w)) {
+                if (ImGui::Checkbox(std::format("Wear (show contents)##w{}", scope).c_str(), &w)) {
                     const bool want = w;
                     s_pendingWear[token] = want;
                     SKSE::GetTaskInterface()->AddTask([token, want] { WearBoxToken(token, want); });
                 }
                 ImGui::SameLine();
                 bool dist = b.enabled;
-                if (ImGui::Checkbox(std::format("Distribute token##d{}", slot).c_str(), &dist)) {
+                if (ImGui::Checkbox(std::format("Distribute token##d{}", scope).c_str(), &dist)) {
                     const bool want = dist;
                     UiOps::SetBoxEnabled(token, want);  // flag + json (sync, like the MCM)
                     SKSE::GetTaskInterface()->AddTask([token, want] { GiveOrRemoveToken(token, want); });
@@ -596,7 +647,7 @@ namespace CostumeFW::SmfUI
                 if (at < 0 || at > 2) {
                     at = 0;
                 }
-                if (ImGui::BeginCombo(std::format("Armor type##at{}", slot).c_str(), kTypes[at])) {
+                if (ImGui::BeginCombo(std::format("Armor type##at{}", scope).c_str(), kTypes[at])) {
                     for (int t = 0; t < 3; ++t) {
                         if (ImGui::Selectable(kTypes[t], t == at) && t != at) {
                             UiOps::SetBoxArmorType(token, t);
@@ -613,7 +664,7 @@ namespace CostumeFW::SmfUI
 
                 const std::string preset = BoxPreset(token);          // file = identity
                 const std::string presetName = BoxPresetName(token);  // what to show
-                if (ImGui::BeginCombo(std::format("Preset##pr{}", slot).c_str(),
+                if (ImGui::BeginCombo(std::format("Preset##pr{}", scope).c_str(),
                         presetName.empty() ? "(manual)" : presetName.c_str())) {
                     // Snapshot on combo OPEN, not per frame (List() scans the
                     // presets folder; a combo renders every frame while open).
@@ -639,28 +690,23 @@ namespace CostumeFW::SmfUI
                     }
                     ImGui::EndCombo();
                 }
-                ImGui::InputText(std::format("##expn{}", slot).c_str(), s_exportName, sizeof(s_exportName));
+                char* exportName = EditBuffer("exp:" + scope, {});
+                ImGui::InputText(std::format("##expn{}", scope).c_str(), exportName, 64);
                 ImGui::SameLine();
-                if (ImGui::Button(std::format("Export as preset##expb{}", slot).c_str()) &&
-                    s_exportName[0] != '\0') {
-                    const std::string file = UiOps::ExportPreset(token, s_exportName);
+                if (ImGui::Button(std::format("Export as preset##expb{}", scope).c_str()) &&
+                    exportName[0] != '\0') {
+                    const std::string file = UiOps::ExportPreset(token, exportName);
                     s_status = file.empty() ? "export failed (see log)" : ("exported " + file);
                 }
 
                 // Rename (Nexus request): the label follows into the token's
                 // inventory name, so the item reads as the outfit it holds.
-                static char s_boxLabel[64] = {};
-                static std::string s_boxLabelFor;
-                if (s_boxLabelFor != token) {
-                    std::snprintf(s_boxLabel, sizeof(s_boxLabel), "%s", b.label.c_str());
-                    s_boxLabelFor = token;
-                }
-                ImGui::InputText(std::format("##bxl{}", slot).c_str(), s_boxLabel,
-                    sizeof(s_boxLabel));
+                char* boxLabel = EditBuffer("lbl:" + scope, b.label);
+                ImGui::InputText(std::format("##bxl{}", scope).c_str(), boxLabel, 64);
                 ImGui::SameLine();
-                if (ImGui::Button(std::format("Rename##bxlb{}", slot).c_str()) &&
-                    s_boxLabel[0] != '\0') {
-                    const std::string label = s_boxLabel;
+                if (ImGui::Button(std::format("Rename##bxlb{}", scope).c_str()) &&
+                    boxLabel[0] != '\0') {
+                    const std::string label = boxLabel;
                     SKSE::GetTaskInterface()->AddTask([token, label] {
                         SetBoxLabel(token, label);
                     });
@@ -669,25 +715,25 @@ namespace CostumeFW::SmfUI
 
                 ImGui::Text("Stats: %s", BoxStatsSummary(i).c_str());
 
-                if (ImGui::BeginCombo(std::format("+ Add worn item##aw{}", slot).c_str(), "(pick)")) {
+                if (ImGui::BeginCombo(std::format("+ Add worn item##aw{}", scope).c_str(), "(pick)")) {
                     static std::vector<WornItem> s_worn;  // snapshot on combo open
                     if (ImGui::IsWindowAppearing()) {
                         s_worn = WornArmors();
                     }
                     for (const auto& wi : s_worn) {
-                        if (ImGui::Selectable(std::format("{}##aw{}{}", wi.name, slot, wi.id).c_str())) {
+                        if (ImGui::Selectable(std::format("{}##aw{}{}", wi.name, scope, wi.id).c_str())) {
                             QueueCapture(token, wi.id);
                         }
                     }
                     ImGui::EndCombo();
                 }
-                if (ImGui::BeginCombo(std::format("+ Add from inventory##ai{}", slot).c_str(), "(pick)")) {
+                if (ImGui::BeginCombo(std::format("+ Add from inventory##ai{}", scope).c_str(), "(pick)")) {
                     static std::vector<WornItem> s_inv;  // snapshot on combo open
                     if (ImGui::IsWindowAppearing()) {
                         s_inv = InventoryArmors(s_invFilter);
                     }
                     for (const auto& wi : s_inv) {
-                        if (ImGui::Selectable(std::format("{}##ai{}{}", wi.name, slot, wi.id).c_str())) {
+                        if (ImGui::Selectable(std::format("{}##ai{}{}", wi.name, scope, wi.id).c_str())) {
                             QueueCapture(token, wi.id);
                         }
                     }
@@ -695,23 +741,24 @@ namespace CostumeFW::SmfUI
                 }
 
                 ImGui::SeparatorText(std::format("Contents ({})", b.contents.size()).c_str());
+                std::string& selected = s_selContent[scope];
                 for (const auto& c : b.contents) {
-                    const bool sel = (c == s_selContent);
+                    const bool sel = (c == selected);
                     if (ImGui::Selectable(
-                            std::format("{}##sel{}{}", ItemDisplayName(c), slot, c).c_str(), sel)) {
-                        s_selContent = c;
+                            std::format("{}##sel{}{}", ItemDisplayName(c), scope, c).c_str(), sel)) {
+                        selected = c;
                     }
                 }
-                if (!s_selContent.empty() &&
-                    std::find(b.contents.begin(), b.contents.end(), s_selContent) != b.contents.end()) {
-                    RenderContentDetail(token, slot, s_selContent);
+                if (const std::string pick = selected; !pick.empty() &&
+                    std::find(b.contents.begin(), b.contents.end(), pick) != b.contents.end()) {
+                    RenderContentDetail(token, scope, pick, selected);
                 }
 
                 ImGui::Spacing();
                 const bool npcReady = NpcEspLoaded();
-                const auto publishPopup = std::format("Publish box for NPC?###pubp{}", slot);
+                const auto publishPopup = std::format("Publish box for NPC?###pubp{}", scope);
                 ImGui::BeginDisabled(!npcReady);
-                if (ImGui::Button(std::format("Publish for NPC##pub{}", slot).c_str()))
+                if (ImGui::Button(std::format("Publish for NPC##pub{}", scope).c_str()))
                     ImGui::OpenPopup(publishPopup.c_str());
                 ImGui::EndDisabled();
                 if (!npcReady && ImGui::IsItemHovered(ImGui::ImGuiHoveredFlags_AllowWhenDisabled))
@@ -731,8 +778,8 @@ namespace CostumeFW::SmfUI
                     ImGui::EndPopup();
                 }
                 ImGui::Spacing();
-                const std::string popupId = std::format("Delete box?###delp{}", slot);
-                if (ImGui::Button(std::format("Delete box##delb{}", slot).c_str())) {
+                const std::string popupId = std::format("Delete box?###delp{}", scope);
+                if (ImGui::Button(std::format("Delete box##delb{}", scope).c_str())) {
                     ImGui::OpenPopup(popupId.c_str());
                 }
                 // Width pinned: TextWrapped inside an auto-sizing modal wraps at a
@@ -808,10 +855,11 @@ namespace CostumeFW::SmfUI
                 }
                 ImGui::EndCombo();
             }
-            ImGui::InputText("##pexn", s_exportName, sizeof(s_exportName));
+            char* persistExport = EditBuffer("exp:persist", {});
+            ImGui::InputText("##pexn", persistExport, 64);
             ImGui::SameLine();
-            if (ImGui::Button("Export as preset##pexb") && s_exportName[0] != '\0') {
-                const std::string file = UiOps::ExportPersist(s_exportName);
+            if (ImGui::Button("Export as preset##pexb") && persistExport[0] != '\0') {
+                const std::string file = UiOps::ExportPersist(persistExport);
                 s_status = file.empty() ? "export failed (see log)" : ("exported " + file);
             }
             if (!s_status.empty()) {
@@ -898,16 +946,14 @@ namespace CostumeFW::SmfUI
                     }
                     ImGui::EndCombo();
                 }
-                if (s_hideSlotsFor != id) {
-                    std::snprintf(s_hideSlots, sizeof(s_hideSlots), "%s",
-                        UiOps::GetHideSlotsStr(id).c_str());
-                    s_hideSlotsFor = id;
-                }
+                // Same buffer the box page's detail block uses for this content:
+                // it is the same setting, edited from a second place.
+                char* persistHide = EditBuffer("hs:" + id, UiOps::GetHideSlotsStr(id));
                 ImGui::InputText(std::format("Hide when worn (slots)##ph{}", id).c_str(),
-                    s_hideSlots, sizeof(s_hideSlots));
+                    persistHide, 64);
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("Apply##phb{}", id).c_str())) {
-                    UiOps::SetHideSlotsStr(id, s_hideSlots);
+                    UiOps::SetHideSlotsStr(id, persistHide);
                 }
                 RenderItemDataFold(id, std::format("p{}", id), false);
                 if (ImGui::Button(std::format("Remove from catalog##prm{}", id).c_str())) {

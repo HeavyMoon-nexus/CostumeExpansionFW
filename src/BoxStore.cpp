@@ -52,6 +52,7 @@
 #include <random>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -2479,6 +2480,13 @@ namespace CostumeFW
         auto* player = RE::PlayerCharacter::GetSingleton();
 
         out.push_back("# Boxes");
+        {
+            const auto stats = BoxTokenPoolStats();
+            out.push_back(std::format(
+                "token pool: {} total ({} in boxes, {} reserved by publish, {} free); "
+                "box definitions: {}",
+                stats.total, stats.inBoxes, stats.reserved, stats.free, stats.definitions));
+        }
         if (g_boxes.empty()) {
             out.push_back("(no boxes)");
         }
@@ -3372,16 +3380,48 @@ namespace CostumeFW
         if (free.empty()) {
             return {};
         }
-        for (const auto& token : free) {
-            if (!IsRiskyAutoSlot(TokenSlot(token))) {
-                return token;
-            }
+        // How many boxes each biped slot already holds. Asked for every
+        // candidate below, and a box's slot costs a form lookup, so once.
+        std::unordered_map<int, int> boxesPerSlot;
+        for (const auto& b : g_boxes) {
+            ++boxesPerSlot[SlotNumberOf(ResolveArmo(b.token))];
         }
-        SKSE::log::warn(
-            "boxes: only head/hair slots are free - auto-picking '{}' (slot {}); wearing it "
-            "hides that body part",
-            free.front(), TokenSlot(free.front()));
-        return free.front();
+        // PLAN §5.2 / review A07. The pool is offered in slot order, so before
+        // BoxPool1 the first free token WAS the lowest free slot. With four
+        // tokens per slot that stopped being true: slot 32's three pool tokens
+        // all sort ahead of slot 33's, and a run of NewBox calls would have put
+        // every box on one biped slot - where they fight over the same
+        // equipment slot and hide the same thing.
+        //
+        //   1. a slot no box is on yet          (spread out first)
+        //   2. a slot that already has one      (generation ascending)
+        //   3. head and hair                    (see IsRiskyAutoSlot)
+        //
+        // Within a tier: generation ascending, then local FormID, which is the
+        // candidate order §5.2 defines and FreeTokenOnSlot also implements.
+        std::vector<std::tuple<int, int, int, std::uint32_t, std::string>> ranked;
+        for (const auto& token : free) {
+            const int slot = TokenSlot(token);
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                continue;
+            }
+            ranked.emplace_back(IsRiskyAutoSlot(slot) ? 1 : 0,
+                boxesPerSlot[slot] > 0 ? 1 : 0, tokenid::BoxPoolGeneration(plugin), local, token);
+        }
+        if (ranked.empty()) {
+            return free.front();  // nothing parsed: keep the old answer
+        }
+        std::sort(ranked.begin(), ranked.end());
+        const auto& pick = ranked.front();
+        if (std::get<0>(pick) == 1) {
+            SKSE::log::warn(
+                "boxes: only head/hair slots are free - auto-picking '{}' (slot {}); wearing it "
+                "hides that body part",
+                std::get<4>(pick), TokenSlot(std::get<4>(pick)));
+        }
+        return std::get<4>(pick);
     }
 
     int TokenSlot(const std::string& a_token)
@@ -3404,6 +3444,12 @@ namespace CostumeFW
         StoreLock lk;
         auto* armo = ResolveArmo(a_token);
         return armo ? static_cast<std::uint32_t>(armo->GetSlotMask()) : 0u;
+    }
+
+    std::string CarrierKeyForToken(const std::string& a_token)
+    {
+        StoreLock lk;
+        return tokenid::CarrierKeyFor(a_token, TokenSlot(a_token));
     }
 
     TokenState ClassifyBoxToken(const std::string& a_colonId)
@@ -3459,6 +3505,24 @@ namespace CostumeFW
             }
         }
         return {};
+    }
+
+    TokenPoolStats BoxTokenPoolStats()
+    {
+        StoreLock lk;
+        TokenPoolStats out;
+        out.definitions = static_cast<int>(g_boxes.size());
+        for (const auto& token : TokenPool()) {
+            ++out.total;
+            if (FindBox(token) >= 0) {
+                ++out.inBoxes;
+            } else if (TokenReservedByPublish(token)) {
+                ++out.reserved;
+            } else {
+                ++out.free;
+            }
+        }
+        return out;
     }
 
     std::string FreeTokenOnSlot(int a_slot)
@@ -3535,11 +3599,19 @@ namespace CostumeFW
         return found;
     }
 
-    std::string LoreBoxContentsForSlot(int a_slot)
+    std::string LoreBoxContentsForCarrierKey(const std::string& a_carrierKey)
     {
         StoreLock lk;
+        if (a_carrierKey.empty()) {
+            return {};
+        }
         for (const auto& b : g_boxes) {
-            if (SlotNumberOf(ResolveArmo(b.token)) != a_slot) {
+            auto* armo = ResolveArmo(b.token);
+            if (!armo) {
+                continue;
+            }
+            if (!policy::EqualsCI(tokenid::CarrierKeyFor(b.token, SlotNumberOf(armo)),
+                    a_carrierKey)) {
                 continue;
             }
             std::string out;
@@ -3551,7 +3623,7 @@ namespace CostumeFW
             }
             return out;  // "" if this box is empty
         }
-        return {};  // no box on this slot
+        return {};  // no box holds that token
     }
 
     bool BoxEnabled(const std::string& a_token)

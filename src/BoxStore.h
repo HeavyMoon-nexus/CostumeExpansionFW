@@ -193,11 +193,17 @@ namespace CostumeFW
         const std::vector<std::pair<std::string, int>>& a_shapes);
 
     // --- LoreBox tooltip integration (soft dependency) -----------------------
-    // The comma-joined in-game names of the contents of the box on biped slot
-    // a_slot ("" if there is no box on that slot, or it is empty). Fed to the
+    // The comma-joined in-game names of the contents of the box whose token has
+    // this carrier key ("" when no box has it, or it is empty). Fed to the
     // BSScaleformTranslator hook so the LoreBox mod (if installed) can show a
     // token's packed contents when the token is hovered in the inventory.
-    std::string LoreBoxContentsForSlot(int a_slot);
+    //
+    // Keyed by CARRIER KEY rather than biped slot since v1.6.4: a slot can hold
+    // several boxes, and the old lookup returned whichever it found first, so
+    // two tokens in an inventory showed one box's contents between them.
+    // Generation 0's carrier key is "Box<slot>" (PLAN §3.4), which is what lets
+    // the keyword that shipped in CostumeFW_KID.ini keep working unchanged.
+    std::string LoreBoxContentsForCarrierKey(const std::string& a_carrierKey);
 
     // --- Presets (assignment; def + json only, exclusivity-checked) ----------
     // The token of the box currently using preset FILE a_file, "" if none
@@ -438,6 +444,20 @@ namespace CostumeFW
     // yet bound to a box def (for the MCM "new box" slot picker).
     std::vector<std::string> TokenPool();
     std::vector<std::string> FreeTokens();
+
+    // What the box token pool is doing, measured in one walk of it. Derived
+    // counts (BoxCount() + FreeTokens().size()) do not answer this: BoxCount is
+    // DEFINITIONS, which includes boxes whose token has dropped out of the pool,
+    // and it cannot see a token a published costume is holding in reserve.
+    struct TokenPoolStats
+    {
+        int total{ 0 };        // tokens the loaded pool plugins define
+        int inBoxes{ 0 };      // ... held by a box definition
+        int reserved{ 0 };     // ... held in reserve by a published costume
+        int free{ 0 };         // ... available to a new box
+        int definitions{ 0 };  // box definitions, pool members or not
+    };
+    TokenPoolStats BoxTokenPoolStats();
     std::string NextFreeToken();  // first free slot-token ("" if none) - legacy auto-assign
 
     // The biped slot number (30-61) a token ARMO occupies, 0 if none/unresolved.
@@ -448,6 +468,13 @@ namespace CostumeFW
     // which is what makes a wig hide the real hair. Anything that copies a
     // token's occupancy has to copy the mask, not rebuild it from TokenSlot.
     std::uint32_t TokenSlotMask(const std::string& a_token);
+
+    // The carrier namespace a token's artifacts are built under, "" when the
+    // token does not resolve to one (tokenid::CarrierKeyFor). "Box55" for the
+    // shipped tokens, "BP01_000800" for a pool one - short, stable, and the
+    // name that appears in carriers.json and CEF_sync.log, so it is what the UI
+    // shows to tell apart two boxes sharing a biped slot.
+    std::string CarrierKeyForToken(const std::string& a_token);
 
     // The GENERATION 0 box token on a biped slot, or "" when there is none.
     //

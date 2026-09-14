@@ -13,8 +13,23 @@ namespace CostumeFW
 {
     namespace
     {
-        // Our LoreBox keyword family: "LoreBox_CEFBox<slot>" (see CostumeFW_KID.ini).
-        constexpr wchar_t kKeyPrefix[] = L"LoreBox_CEFBox";
+        // Our two LoreBox keyword families. BOTH name a box by its CARRIER KEY:
+        //
+        //   LoreBox_CEFBox55            generation 0, whose carrier key IS "Box55"
+        //   LoreBox_CEFTok_BP01_000800  generation 1 and up
+        //
+        // The first is the spelling that shipped in CostumeFW_KID.ini and stays
+        // exactly as it is - an alias, not a legacy path - because generation
+        // 0's carrier key was deliberately kept as "Box<slot>" (PLAN §3.4). The
+        // second is what the pool generator writes into
+        // CostumeFW_BoxPoolN_KID.ini, one keyword per TOKEN, because a biped
+        // slot stopped naming one box in v1.6.4 and a slot-keyed tooltip would
+        // have shown whichever of that slot's boxes CEF found first.
+        constexpr wchar_t kSlotPrefix[] = L"LoreBox_CEFBox";
+        constexpr wchar_t kTokenPrefix[] = L"LoreBox_CEFTok_";
+        // Carrier keys are at most 64 characters of [A-Za-z0-9_] - the alphabet
+        // the generator and nifcarrier's IsSafeCarrierKey agree on.
+        constexpr std::size_t kMaxCarrierKey = 64;
 
         std::wstring Utf8ToWide(const std::string& a_utf8)
         {
@@ -32,7 +47,59 @@ namespace CostumeFW
             return out;
         }
 
-        // If a_key is one of our "LoreBox_CEFBox<slot>" keys AND that box has
+        // The carrier key one of our keyword names refers to, or false when the
+        // name is not ours. Both families land in the same key space, so the
+        // lookup that follows is one lookup rather than two code paths.
+        bool CarrierKeyFromKeyword(const wchar_t* a_key, std::string& a_out)
+        {
+            const auto narrow = [](const wchar_t* a_p, std::string& a_dst) {
+                for (; *a_p; ++a_p) {
+                    if (a_dst.size() >= kMaxCarrierKey) {
+                        return false;
+                    }
+                    const wchar_t c = *a_p;
+                    const bool ok = (c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'Z') ||
+                                    (c >= L'a' && c <= L'z') || c == L'_';
+                    if (!ok) {
+                        return false;
+                    }
+                    a_dst.push_back(static_cast<char>(c));
+                }
+                return true;
+            };
+            if (const std::size_t plen = std::wcslen(kTokenPrefix);
+                std::wcsncmp(a_key, kTokenPrefix, plen) == 0) {
+                std::string key;
+                if (!narrow(a_key + plen, key) || key.empty()) {
+                    return false;
+                }
+                a_out = std::move(key);
+                return true;
+            }
+            if (const std::size_t plen = std::wcslen(kSlotPrefix);
+                std::wcsncmp(a_key, kSlotPrefix, plen) == 0) {
+                const wchar_t* p = a_key + plen;
+                if (!*p) {
+                    return false;
+                }
+                for (const wchar_t* q = p; *q; ++q) {
+                    if (*q < L'0' || *q > L'9') {
+                        return false;  // not a pure "<prefix><number>" key
+                    }
+                }
+                // Generation 0's carrier key is literally "Box<slot>", which is
+                // what lets one lookup serve both keyword families.
+                std::string key = "Box";
+                if (!narrow(p, key)) {
+                    return false;
+                }
+                a_out = std::move(key);
+                return true;
+            }
+            return false;
+        }
+
+        // If a_key is one of our keyword names AND the box it names has
         // contents, fill a_out with the tooltip HTML and return true. Otherwise
         // return false (the caller falls through to the game translator, leaving
         // the text untranslated so LoreBox simply skips it).
@@ -44,24 +111,13 @@ namespace CostumeFW
             if (*a_key == L'$') {  // tolerate an unexpected leading translation marker
                 ++a_key;
             }
-            const std::size_t plen = std::wcslen(kKeyPrefix);
-            if (std::wcsncmp(a_key, kKeyPrefix, plen) != 0) {
+            std::string carrierKey;
+            if (!CarrierKeyFromKeyword(a_key, carrierKey)) {
                 return false;
             }
-            const wchar_t* p = a_key + plen;
-            if (!*p) {
-                return false;
-            }
-            int slot = 0;
-            for (; *p; ++p) {
-                if (*p < L'0' || *p > L'9') {
-                    return false;  // not a pure "<prefix><number>" key
-                }
-                slot = slot * 10 + (*p - L'0');
-            }
-            const std::string contents = LoreBoxContentsForSlot(slot);
+            const std::string contents = LoreBoxContentsForCarrierKey(carrierKey);
             if (contents.empty()) {
-                return false;  // no box on this slot / empty -> leave untranslated
+                return false;  // no box on that token / empty -> leave untranslated
             }
             a_out = Utf8ToWide(
                 "<font face='$EverywhereBoldFont'>Costume box contents:</font><br>" + contents);

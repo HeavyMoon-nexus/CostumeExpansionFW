@@ -1692,16 +1692,7 @@ namespace CostumeFW
         // counted as one, and the total never moved. Publishing now reserves a
         // token rather than releasing it, which would have made the derived
         // figure wrong in a second way.
-        const auto pool = TokenPool();
-        int inBoxes = 0;
-        int reservedTokens = 0;
-        for (const auto& token : pool) {
-            if (FindBoxByToken(token) >= 0) {
-                ++inBoxes;
-            } else if (TokenReservedByPublish(token)) {
-                ++reservedTokens;
-            }
-        }
+        const auto poolStats = BoxTokenPoolStats();
         std::vector<std::string> out{
             "# NPC",
             std::string("addon esp: ") + (NpcEspLoaded() ? "loaded" : "NOT LOADED"),
@@ -1717,7 +1708,8 @@ namespace CostumeFW
             "publish token forms: " + std::to_string(resolvedTokens) + " / 8",
             std::format("box token pool: {} total ({} in boxes, {} reserved by publish, {} free); "
                         "box definitions: {}",
-                pool.size(), inBoxes, reservedTokens, FreeTokens().size(), BoxCount())
+                poolStats.total, poolStats.inBoxes, poolStats.reserved, poolStats.free,
+                poolStats.definitions)
         };
         for (const auto& snap : g_published) {
             int slotWearers = 0;
