@@ -4,6 +4,7 @@
 #include "BoxStore.h"
 #include "Config.h"
 #include "SkinRebind.h"
+#include "TokenIdentity.h"  // canonical CEF plugin casing for the reserved token
 
 #include "RE/E/Effect.h"
 #include "RE/E/EffectSetting.h"
@@ -473,12 +474,67 @@ namespace CostumeFW
         return -1;
     }
 
+    bool TokenReservedByPublish(const std::string& a_token)
+    {
+        if (a_token.empty()) {
+            return false;
+        }
+        for (const auto& snap : g_published) {
+            if (snap->sourceToken == a_token) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    PubRestore PublishRestoreState(int a_pubSlot)
+    {
+        const auto* snap = PubBySlot(a_pubSlot);
+        if (!snap) {
+            return PubRestore::NoSnapshot;
+        }
+        if (snap->sourceToken.empty()) {
+            return PubRestore::SourceUnknown;
+        }
+        if (ClassifyBoxToken(snap->sourceToken) != TokenState::Resolved) {
+            return PubRestore::SourceMissing;
+        }
+        // The reservation is not a flag, it is the absence of a box on the
+        // token - so this is also the answer to "did something take it anyway".
+        // A hand-edited settings file can do that, and so can a file written by
+        // 1.6.3, where publishing really did release the token (PLAN §5.1).
+        if (FindBoxByToken(snap->sourceToken) >= 0) {
+            return PubRestore::SourceTaken;
+        }
+        return PubRestore::Ready;
+    }
+
+    const char* PubRestoreReason(PubRestore a_state)
+    {
+        switch (a_state) {
+        case PubRestore::Ready:
+            return "ready";
+        case PubRestore::NoSnapshot:
+            return "nothing is published in that slot";
+        case PubRestore::SourceUnknown:
+            return "this costume does not record which box token it came from";
+        case PubRestore::SourceMissing:
+            return "the box token it came from is not loaded - put its plugin back";
+        case PubRestore::SourceTaken:
+            return "another box now holds the box token it came from";
+        }
+        return "unknown";
+    }
+
+    void MigrateLegacyPublishIdentity();  // fwd (defined below, next to PublishBox)
+
     void EmitPublishJson(nlohmann::json& a_doc)
     {
         auto published = nlohmann::json::array();
         for (const auto& snap : g_published) {
             nlohmann::json item{
                 { "pubSlot", snap->pubSlot }, { "label", snap->label },
+                { "boxId", snap->boxId }, { "sourceToken", snap->sourceToken },
                 { "sourceSlot", snap->sourceSlot }, { "armorType", snap->armorType },
                 { "manualAbility", snap->manualAbility }, { "rev", snap->rev },
                 { "contents", snap->contents }
@@ -522,6 +578,10 @@ namespace CostumeFW
             if (snap->pubSlot < 0 || snap->pubSlot >= kPoolSize || !slots.insert(snap->pubSlot).second)
                 continue;
             snap->label = item.value("label", std::string{});
+            snap->boxId = item.value("boxId", std::string{});
+            snap->sourceToken = item.value("sourceToken", std::string{});
+            CanonicalizeColonId(snap->sourceToken);
+            tokenid::CanonicalizeCefColonId(snap->sourceToken);
             snap->sourceSlot = item.value("sourceSlot", 0);
             snap->armorType = item.value("armorType", 0);
             snap->manualAbility = item.value("manualAbility", std::string{});
@@ -568,7 +628,77 @@ namespace CostumeFW
                 ResetPublishedTokenState(slot);
             }
         }
+        MigrateLegacyPublishIdentity();
         InitializeNpcSupport();
+    }
+
+    // PLAN §5.5. A snapshot written before 1.6.4 records only the biped slot it
+    // came from - but 1.6.3 had exactly one token per slot, generation 0's, so
+    // the token it was published from is not a guess, it is arithmetic. Deriving
+    // it from "a free token on that slot" instead would never fire once BoxPool1
+    // is installed: three pool tokens share the slot and one of them would
+    // always look like a candidate, and the costume would come back on a token
+    // it was never published from.
+    //
+    // Runs at the end of the settings load, which is before anything can call
+    // the allocator - §5.2 hands out generation 0 first, so a new box created
+    // ahead of this would take the very token being reserved here.
+    void MigrateLegacyPublishIdentity()
+    {
+        std::vector<std::string> reservedBy;  // PLAN §5.1 rule 4: first snapshot owns it
+        for (const auto& snap : g_published) {
+            if (snap->sourceToken.empty() && snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
+                snap->sourceToken = Gen0TokenForSlot(snap->sourceSlot);
+                if (snap->sourceToken.empty()) {
+                    SKSE::log::warn(
+                        "publish: slot {} '{}' came from biped slot {}, which no generation-0 "
+                        "token occupies - it has no token to go back to and unpublish will say so",
+                        snap->pubSlot, snap->label, snap->sourceSlot);
+                } else {
+                    SKSE::log::info("publish: slot {} '{}' reserves '{}' (from biped slot {})",
+                        snap->pubSlot, snap->label, snap->sourceToken, snap->sourceSlot);
+                }
+            }
+            if (snap->boxId.empty()) {
+                // A snapshot written before 1.6.4 has no id to preserve, so this
+                // only has to be stable and unique. The pool slot is in the seed
+                // for the uniqueness: 1.6.3 released the token on publish, so a
+                // box created afterwards legitimately holds it AND two costumes
+                // can legitimately name the same source slot (publish a box on
+                // slot 55, make another there, publish that too) - seeding on the
+                // token alone would hand them one id between them.
+                snap->boxId = DeriveBoxId("pub" + std::to_string(snap->pubSlot) + ":" +
+                    (snap->sourceToken.empty() ? "slot" + std::to_string(snap->sourceSlot) :
+                                                 snap->sourceToken));
+            }
+            if (snap->sourceToken.empty()) {
+                continue;
+            }
+            // Say both of these once, at load, rather than only when the user
+            // tries to unpublish.
+            //
+            // A box holding the token (rule 3): 1.6.3 released the source token
+            // on publish, so a box made afterwards legitimately owns it and the
+            // BOX wins. The snapshot keeps its sourceToken and holds no
+            // reservation.
+            if (const int idx = FindBoxByToken(snap->sourceToken); idx >= 0) {
+                SKSE::log::warn(
+                    "publish: slot {} '{}' cannot be unpublished as it stands - box '{}' now holds "
+                    "its token '{}'. Free that box's token to get the costume back on its own slot.",
+                    snap->pubSlot, snap->label, BoxAt(idx).label, snap->sourceToken);
+            }
+            // Two costumes naming one token (rule 4): the first owns it, and the
+            // second gets the token back only once the first has taken it.
+            if (std::find(reservedBy.begin(), reservedBy.end(), snap->sourceToken) !=
+                reservedBy.end()) {
+                SKSE::log::warn(
+                    "publish: slot {} '{}' names token '{}', which an earlier published costume "
+                    "already reserves - only one of them can have it back",
+                    snap->pubSlot, snap->label, snap->sourceToken);
+            } else {
+                reservedBy.push_back(snap->sourceToken);
+            }
+        }
     }
 
     bool PublishBox(int a_boxIndex)
@@ -582,6 +712,10 @@ namespace CostumeFW
         auto snap = std::make_shared<PubSnapshot>();
         snap->pubSlot = slot;
         snap->label = box.label;
+        // The box is not destroyed here, it is frozen: its id comes back out of
+        // unpublish, and its token is reserved rather than released (PLAN §5.3).
+        snap->boxId = box.boxId;
+        snap->sourceToken = box.token;
         snap->sourceSlot = TokenSlot(box.token);
         snap->armorType = box.armorType;
         snap->manualAbility = box.ability;
@@ -919,27 +1053,24 @@ namespace CostumeFW
         for (const auto& binding : g_bindings)
             if (binding.pubSlot == a_slot && binding.holder && binding.actorFormID != playerID)
                 return false;
-        auto token = NextFreeToken();
-        if (token.empty()) return false;
-        for (const auto& candidate : FreeTokens()) {
-            if (TokenSlot(candidate) == snap->sourceSlot) {
-                token = candidate;
-                break;
-            }
+        // PLAN §5.4: back to the token that was held in reserve for it, or not at
+        // all. This used to ask the general allocator and then prefer a free
+        // token on the same biped slot, so a costume whose slot had been handed
+        // to another box came back SOMEWHERE ELSE - a different slot, hiding
+        // different parts. The test run on 2026-09-10 landed one on slot 30 and
+        // it read as "unpublish re-stamped my box". A reservation removes the
+        // case rather than reporting it: while this costume is published nothing
+        // can take its token, so the only ways to reach a refusal here are a
+        // missing pool generation, a snapshot from 1.6.3 whose token was taken
+        // before the reservation existed, and a hand-edited settings file.
+        const auto restore = PublishRestoreState(a_slot);
+        if (restore != PubRestore::Ready) {
+            SKSE::log::warn("unpublish: slot {} '{}' kept - {} (source token '{}')",
+                a_slot, snap->label, PubRestoreReason(restore),
+                snap->sourceToken.empty() ? "none" : snap->sourceToken);
+            return false;
         }
-        // The box's ORIGINAL slot may have been handed to another box while this
-        // costume was published (publish frees the source token). There is one
-        // token per biped slot, so the costume then has to come back somewhere
-        // else - and its slot decides what it hides. Say so: silently changing
-        // it read as "unpublish re-stamped my box" (test run 2026-09-10).
-        const int landedSlot = TokenSlot(token);
-        const bool relocated = landedSlot != snap->sourceSlot;
-        if (relocated) {
-            SKSE::log::warn(
-                "unpublish: slot {} is taken by another box - '{}' comes back on slot {} ('{}'). "
-                "Its biped slot decides what it hides, so the outfit may behave differently.",
-                snap->sourceSlot, snap->label, landedSlot, token);
-        }
+        const std::string token = snap->sourceToken;
         // PHASE 1 - validate the WHOLE restore before anything is touched
         // (review 2026-09-09 F03). This used to ignore every AddBox result and
         // then delete the snapshot regardless, so a single refused content left
@@ -1004,6 +1135,10 @@ namespace CostumeFW
         g_published.erase(std::remove(g_published.begin(), g_published.end(), snap), g_published.end());
         bool restored = AddBox(snap->label, token, {});
         if (restored) {
+            // Same box, not a new one that happens to look like it (PLAN §2.4).
+            // AddBox issues a fresh id to every box it creates, which is right
+            // everywhere except here.
+            AdoptBoxId(token, snap->boxId);
             for (const auto& id : restorable) {
                 if (!AddBox(snap->label, token, id)) {
                     restored = false;
@@ -1048,13 +1183,8 @@ namespace CostumeFW
         ApplyBoxAbilities();
         RefreshWornToken(token);
         SaveGlobalSettings();
-        SKSE::log::info("unpublish: slot {} -> box '{}' ({}/{} content(s) restored)",
-            a_slot, token, restorable.size(), snap->contents.size());
-        if (relocated) {
-            RE::DebugNotification(std::format(
-                "CostumeFW: slot {} was taken - '{}' came back on slot {}",
-                snap->sourceSlot, snap->label, landedSlot).c_str());
-        }
+        SKSE::log::info("unpublish: slot {} -> box '{}' on biped slot {} ({}/{} content(s) restored)",
+            a_slot, token, TokenSlot(token), restorable.size(), snap->contents.size());
         return true;
     }
 
@@ -1483,6 +1613,22 @@ namespace CostumeFW
         for (int i = 0; i < kPoolSize; ++i)
             if (auto* token = PubTokenArmo(i); token && IsPublishToken(token->GetFormID()))
                 ++resolvedTokens;
+        // Measured, not derived (PLAN §9.1 / old plan C5). This used to read
+        // BoxCount() + FreeTokens().size(), which counts DEFINITIONS plus free
+        // tokens - so a definition whose token had dropped out of the pool still
+        // counted as one, and the total never moved. Publishing now reserves a
+        // token rather than releasing it, which would have made the derived
+        // figure wrong in a second way.
+        const auto pool = TokenPool();
+        int inBoxes = 0;
+        int reservedTokens = 0;
+        for (const auto& token : pool) {
+            if (FindBoxByToken(token) >= 0) {
+                ++inBoxes;
+            } else if (TokenReservedByPublish(token)) {
+                ++reservedTokens;
+            }
+        }
         std::vector<std::string> out{
             "# NPC",
             std::string("addon esp: ") + (NpcEspLoaded() ? "loaded" : "NOT LOADED"),
@@ -1495,15 +1641,20 @@ namespace CostumeFW
                 std::to_string(g_maxNpcInjected) + " (cap)",
             "NPC persist: " + std::to_string(g_nprAssignments.size()) + " active, " +
                 std::to_string(g_unresolvedNpr.size()) + " unresolved",
-            "publish token forms: " + std::to_string(resolvedTokens) + " / 8; box token pool: " +
-                std::to_string(BoxCount() + static_cast<int>(FreeTokens().size()))
+            "publish token forms: " + std::to_string(resolvedTokens) + " / 8",
+            std::format("box token pool: {} total ({} in boxes, {} reserved by publish, {} free); "
+                        "box definitions: {}",
+                pool.size(), inBoxes, reservedTokens, FreeTokens().size(), BoxCount())
         };
         for (const auto& snap : g_published) {
             int slotWearers = 0;
             for (const auto& binding : g_bindings)
                 if (binding.pubSlot == snap->pubSlot && binding.wearer) ++slotWearers;
-            out.push_back(std::format("pub {:02} '{}': rev {}, {} wearer(s)",
-                snap->pubSlot + 1, snap->label, snap->rev, slotWearers));
+            const auto restore = PublishRestoreState(snap->pubSlot);
+            out.push_back(std::format("pub {:02} '{}': rev {}, {} wearer(s), reserves {} [{}]",
+                snap->pubSlot + 1, snap->label, snap->rev, slotWearers,
+                snap->sourceToken.empty() ? "nothing" : snap->sourceToken,
+                PubRestoreReason(restore)));
         }
         return out;
     }

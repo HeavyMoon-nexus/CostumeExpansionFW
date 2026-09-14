@@ -88,6 +88,20 @@ namespace CostumeFW
     // "foreign-plugin". Empty for a resolved token.
     [[nodiscard]] const char* TokenStateReason(TokenState a_state);
 
+    // What the CURRENT load order can deliver for a box token. The same probe
+    // the settings load runs over every box, exported because the publish store
+    // has to ask it too: a published costume reserves the token it came from,
+    // and whether that token can be handed back is the whole of whether the
+    // costume can stop being published (PLAN §5.4).
+    [[nodiscard]] TokenState ClassifyBoxToken(const std::string& a_colonId);
+
+    // A logical box id derived from a seed string, stable across runs and
+    // builds: the same seed always gives the same id, so a migration that is
+    // interrupted before its save cannot hand one box two identities. Boxes
+    // seed it with their canonical token; a pre-1.6.4 published snapshot seeds
+    // it with its own (PublishStore).
+    [[nodiscard]] std::string DeriveBoxId(std::string_view a_seed);
+
     // --- Global CEF settings (CEF_settings.json) ----------------------------
     // Master on/off for the whole framework (Main page). Off = nothing injected.
     bool CefEnabled();
@@ -428,6 +442,16 @@ namespace CostumeFW
 
     // The biped slot number (30-61) a token ARMO occupies, 0 if none/unresolved.
     int TokenSlot(const std::string& a_token);
+
+    // The GENERATION 0 box token on a biped slot, or "" when there is none.
+    //
+    // 1.6.3 had exactly one token per slot and every one of them came from
+    // CostumeFW.esp, which is what lets a published snapshot written back then
+    // name the token it was published from out of a slot number alone (PLAN
+    // §5.5). Asking for "a free token on that slot" instead would never fire
+    // once BoxPool1 is installed: three pool tokens share the slot and one of
+    // them would always look like a candidate.
+    std::string Gen0TokenForSlot(int a_slot);
 
     // The box index whose token occupies biped slot a_slot, or -1 if none. Lets
     // the MCM's per-box pages (named by slot) resolve to their box even after a
@@ -813,4 +837,11 @@ namespace CostumeFW
     bool RemoveBoxContent(const std::string& a_token, const std::string& a_content);
     bool RemoveBox(const std::string& a_token);
     bool SetBoxLabel(const std::string& a_token, const std::string& a_label);
+
+    // Give a freshly re-created box the logical identity it had before, so a
+    // box keeps its boxId across a publish round trip (PLAN §2.4). Only
+    // unpublish uses this: every other box is created once and keeps the id
+    // AddBox issued. False when the box does not exist or another box already
+    // carries the id.
+    bool AdoptBoxId(const std::string& a_token, const std::string& a_boxId);
 }

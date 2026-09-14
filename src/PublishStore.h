@@ -28,6 +28,17 @@ namespace CostumeFW
     {
         int pubSlot{ -1 };
         std::string label;
+        // The logical box this costume IS. Publishing does not destroy the box,
+        // it moves it into a frozen state, so the id survives the round trip and
+        // the box that comes back out of unpublish is the same box (PLAN §2.4).
+        std::string boxId;
+        // The box token held in reserve for it, canonical colon-id. Unpublish
+        // returns to THIS token or to none; FreeTokens will not hand it out while
+        // the costume is published (PLAN §5.3/§5.4).
+        std::string sourceToken;
+        // The biped slot the costume was published from. Display, the published
+        // token's biped mask, and the one-time migration that fills sourceToken
+        // for a snapshot written before 1.6.4 - never identity.
         int sourceSlot{ 0 };
         int armorType{ 0 };
         std::string manualAbility;
@@ -87,6 +98,26 @@ namespace CostumeFW
     bool IsCefToken(RE::FormID a_form);
     RE::TESObjectARMO* PubTokenArmo(int a_slot);
     RE::TESObjectARMO* NprTokenArmo(int a_slot);
+    // Whether a published costume can become a box again right now, and why
+    // not when it cannot. Unpublish refuses on anything but Ready rather than
+    // looking for a substitute token: the substitute is a different biped slot,
+    // and a costume's slot decides what it hides.
+    enum class PubRestore
+    {
+        Ready,          // the reserved token is loaded and unclaimed
+        NoSnapshot,     // nothing is published in that pool slot
+        SourceUnknown,  // a pre-1.6.4 snapshot whose slot named no generation-0 token
+        SourceMissing,  // the token's pool generation is not loaded (put it back)
+        SourceTaken     // a box holds it - the reservation was lost (PLAN §5.1 rule 3)
+    };
+    [[nodiscard]] PubRestore PublishRestoreState(int a_pubSlot);
+    [[nodiscard]] const char* PubRestoreReason(PubRestore a_state);
+
+    // True while a published costume is holding this box token in reserve.
+    // FreeTokens() asks on every candidate, so it stays a scan of at most eight
+    // string compares and takes no lock of its own.
+    [[nodiscard]] bool TokenReservedByPublish(const std::string& a_token);
+
     const PubSnapshot* PubBySlot(int a_slot);
     const PubSnapshot* PubByTokenForm(RE::FormID a_form);
     std::vector<PubSnapshot> PublishedSnapshot();

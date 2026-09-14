@@ -465,27 +465,7 @@ namespace CostumeFW
         // The logical identity of a box, as opposed to the physical token it
         // currently holds. Sixteen hex characters either way, so nothing
         // downstream has to know whether an id was migrated or issued.
-        //
-        // A box that existed before 1.6.4 gets its id DERIVED from its canonical
-        // token, deterministically: the same file migrated twice produces the
-        // same ids, so a migration that is interrupted between the rewrite and
-        // the save cannot hand the same box two different identities. That is
-        // sound exactly because one box holds one token (ROOT B), which is still
-        // true in 1.6.4 - only the biped slot stops being unique.
-        std::string DeriveBoxId(std::string_view a_canonicalToken)
-        {
-            // FNV-1a 64. Not a security hash; it needs to be stable across runs
-            // and builds, which std::hash explicitly is not.
-            std::uint64_t h = 1469598103934665603ULL;
-            for (const unsigned char c : a_canonicalToken) {
-                h ^= c;
-                h *= 1099511628211ULL;
-            }
-            char buf[17]{};
-            std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(h));
-            return buf;
-        }
-
+        // DeriveBoxId (the migrated half) is exported - see BoxStore.h.
         std::string NewBoxId()
         {
             // Issued once per box and never reused. Seeded per call from
@@ -608,10 +588,10 @@ namespace CostumeFW
         }
 
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
+        bool PluginLoaded(std::string_view a_name);                    // fwd (defined below)
         bool CorePluginLoaded();                                       // fwd (defined below)
         std::string_view FilenameOf(const RE::TESFile* a_file);        // fwd (defined below)
         RE::BGSKeyword* BoxTokenMarkerKeyword();                       // fwd (defined below)
-        TokenState ClassifyBoxToken(const std::string& a_colonId);     // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
         void RestoreTokenDefaultName(const std::string& a_token);      // fwd (defined below)
@@ -1465,6 +1445,24 @@ namespace CostumeFW
                 }
             });
         }
+    }
+
+    std::string DeriveBoxId(std::string_view a_seed)
+    {
+        // FNV-1a 64. Not a security hash; it needs to be stable across runs and
+        // builds, which std::hash explicitly is not.
+        //
+        // A box that existed before 1.6.4 seeds this with its canonical token,
+        // which is sound exactly because one box holds one token (ROOT B) - a
+        // rule 1.6.4 keeps; only the biped slot stops being unique.
+        std::uint64_t h = 1469598103934665603ULL;
+        for (const unsigned char c : a_seed) {
+            h ^= c;
+            h *= 1099511628211ULL;
+        }
+        char buf[17]{};
+        std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(h));
+        return buf;
     }
 
     void LoadBoxes()
@@ -3335,9 +3333,19 @@ namespace CostumeFW
         StoreLock lk;
         std::vector<std::string> out;
         for (const auto& t : TokenPool()) {
-            if (FindBox(t) < 0) {
-                out.push_back(t);
+            if (FindBox(t) >= 0) {
+                continue;
             }
+            // Publishing a box does not RELEASE its token, it RESERVES it
+            // (PLAN §5.3). Offering it here is what used to let a new box take
+            // the slot a published costume came from, after which unpublish had
+            // nowhere to put the costume back and landed it on whatever token
+            // the allocator happened to reach - a different biped slot, hiding
+            // different things (test run 2026-09-10).
+            if (TokenReservedByPublish(t)) {
+                continue;
+            }
+            out.push_back(t);
         }
         return out;
     }
@@ -3380,6 +3388,70 @@ namespace CostumeFW
     {
         StoreLock lk;
         return SlotNumberOf(ResolveArmo(a_token));
+    }
+
+    // What the current load order can say about a box's token. Cheap and
+    // stateless: it reads the live data handler, so it re-derives correctly
+    // after a plugin is added or removed without anything to invalidate.
+    //
+    // NOTE the ordering. The plugin question is asked BEFORE the form is
+    // resolved, because "resolves to an ARMO" is not the same as "is a box
+    // token": a publish token in CostumeFW_NPC.esp resolves to an ARMO perfectly
+    // well, and letting it through is the whole defect this release exists to
+    // close.
+    TokenState ClassifyBoxToken(const std::string& a_colonId)
+    {
+        StoreLock lk;
+        std::uint32_t local = 0;
+        std::string plugin;
+        if (!policy::ParseColonId(a_colonId, local, plugin)) {
+            return TokenState::ParseError;
+        }
+        if (!tokenid::IsBoxTokenPlugin(plugin)) {
+            return TokenState::ForeignPlugin;
+        }
+        if (!PluginLoaded(plugin)) {
+            // A pool generation that is simply not installed right now. The box
+            // is dormant, not broken: put the plugin back and it returns with
+            // the same boxId, token and carrier.
+            return TokenState::PoolMissing;
+        }
+        const std::uint32_t formId = ResolveFormId(a_colonId);
+        auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+        if (!form) {
+            return TokenState::UnresolvedForm;
+        }
+        auto* armo = form->As<RE::TESObjectARMO>();
+        if (!armo) {
+            return TokenState::NotArmo;
+        }
+        // Condition 3 of the role test. LoadBoxes refuses to run at all when the
+        // marker's own record is missing (CoreOutdated), so reaching here with a
+        // null marker means a caller outside that path - treat "cannot check" as
+        // "do not reject", the same way TokenPool does.
+        if (auto* marker = BoxTokenMarkerKeyword(); marker && !armo->HasKeyword(marker)) {
+            return TokenState::NoMarker;
+        }
+        return TokenState::Resolved;
+    }
+
+    std::string Gen0TokenForSlot(int a_slot)
+    {
+        StoreLock lk;
+        if (a_slot < 30 || a_slot > 61) {
+            return {};
+        }
+        for (const auto& token : TokenPool()) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                continue;
+            }
+            if (policy::EqualsCI(plugin, tokenid::kCorePlugin) && TokenSlot(token) == a_slot) {
+                return token;
+            }
+        }
+        return {};
     }
 
     int BoxesOnSlot(int a_slot)
@@ -3860,50 +3932,6 @@ namespace CostumeFW
         bool CorePluginLoaded()
         {
             return PluginLoaded(tokenid::kCorePlugin);
-        }
-
-        // What the current load order can say about a box's token. Cheap and
-        // stateless: it reads the live data handler, so it re-derives correctly
-        // after a plugin is added or removed without anything to invalidate.
-        //
-        // NOTE the ordering. The plugin question is asked BEFORE the form is
-        // resolved, because "resolves to an ARMO" is not the same as "is a box
-        // token": a publish token in CostumeFW_NPC.esp resolves to an ARMO
-        // perfectly well, and letting it through is the whole defect this
-        // release exists to close.
-        TokenState ClassifyBoxToken(const std::string& a_colonId)
-        {
-            std::uint32_t local = 0;
-            std::string plugin;
-            if (!policy::ParseColonId(a_colonId, local, plugin)) {
-                return TokenState::ParseError;
-            }
-            if (!tokenid::IsBoxTokenPlugin(plugin)) {
-                return TokenState::ForeignPlugin;
-            }
-            if (!PluginLoaded(plugin)) {
-                // A pool generation that is simply not installed right now. The
-                // box is dormant, not broken: put the plugin back and it returns
-                // with the same boxId, token and carrier.
-                return TokenState::PoolMissing;
-            }
-            const std::uint32_t formId = ResolveFormId(a_colonId);
-            auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
-            if (!form) {
-                return TokenState::UnresolvedForm;
-            }
-            auto* armo = form->As<RE::TESObjectARMO>();
-            if (!armo) {
-                return TokenState::NotArmo;
-            }
-            // Condition 3 of the role test. LoadBoxes refuses to run at all when
-            // the marker's own record is missing (CoreOutdated), so reaching here
-            // with a null marker means a caller outside that path - treat "cannot
-            // check" as "do not reject", the same way TokenPool does.
-            if (auto* marker = BoxTokenMarkerKeyword(); marker && !armo->HasKeyword(marker)) {
-                return TokenState::NoMarker;
-            }
-            return TokenState::Resolved;
         }
 
         RE::EffectSetting* ResolveMgef(const std::string& a_colonId)
@@ -5757,6 +5785,32 @@ namespace CostumeFW
         }
         SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, token, content);
         return true;
+    }
+
+    bool AdoptBoxId(const std::string& a_token, const std::string& a_boxId)
+    {
+        StoreLock lk;
+        if (a_boxId.empty()) {
+            return false;
+        }
+        const int idx = FindBox(a_token);
+        if (idx < 0) {
+            return false;
+        }
+        if (g_boxes[idx].boxId == a_boxId) {
+            return true;
+        }
+        if (const int other = FindBoxById(a_boxId); other >= 0 && other != idx) {
+            // One id, one box - the rule FindBoxById depends on. Keep the id
+            // AddBox just issued rather than making two boxes answer to one.
+            SKSE::log::warn("boxes: box '{}' cannot take id '{}' - box '{}' already carries it",
+                a_token, a_boxId, g_boxes[other].token);
+            return false;
+        }
+        SKSE::log::info("boxes: box '{}' takes back its id '{}' (was '{}')", a_token, a_boxId,
+            g_boxes[idx].boxId);
+        g_boxes[idx].boxId = a_boxId;
+        return WriteJson();
     }
 
     bool RemoveBoxContent(const std::string& a_token, const std::string& a_content)

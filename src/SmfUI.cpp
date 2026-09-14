@@ -1382,14 +1382,21 @@ namespace CostumeFW::SmfUI
                 if (ImGui::Button(std::format("Recall##nprec{}", snap.pubSlot).c_str()))
                     ImGui::OpenPopup(recallPopup.c_str());
                 ImGui::SameLine();
-                const bool canUnpublish = npcHolders == 0 && unresolved == 0;
+                // v1.6.4: a costume goes back to the box token reserved for it or
+                // to none at all, so the reason it cannot belongs here rather than
+                // in a notification after the click (PLAN §5.4).
+                const auto restore = PublishRestoreState(snap.pubSlot);
+                const bool canUnpublish =
+                    npcHolders == 0 && unresolved == 0 && restore == PubRestore::Ready;
                 const auto unpublishPopup = std::format("Unpublish costume?###npu{}", snap.pubSlot);
                 ImGui::BeginDisabled(!canUnpublish);
                 if (ImGui::Button(std::format("Unpublish##npunp{}", snap.pubSlot).c_str()))
                     ImGui::OpenPopup(unpublishPopup.c_str());
                 ImGui::EndDisabled();
-                if (!canUnpublish)
+                if (npcHolders != 0 || unresolved != 0)
                     ImGui::TextDisabled("Recall all known holders before unpublishing.");
+                else if (restore != PubRestore::Ready)
+                    ImGui::TextDisabled("Cannot unpublish: %s.", PubRestoreReason(restore));
 
                 ImGui::SetNextWindowSize(ImGui::ImVec2(480, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal(recallPopup.c_str())) {
@@ -1417,8 +1424,12 @@ namespace CostumeFW::SmfUI
                         // every refusal look like a completed operation.
                         SKSE::GetTaskInterface()->AddTask([slot] {
                             if (!UnpublishToBox(slot)) {
-                                RE::DebugNotification(
-                                    "CostumeFW: unpublish refused - the costume is unchanged (see log)");
+                                const auto why = PublishRestoreState(slot);
+                                const std::string said = why == PubRestore::Ready ?
+                                    "CostumeFW: unpublish refused - the costume is unchanged (see log)" :
+                                    std::format("CostumeFW: unpublish refused - {}",
+                                        PubRestoreReason(why));
+                                RE::DebugNotification(said.c_str());
                             }
                         });
                         ImGui::CloseCurrentPopup();
