@@ -63,6 +63,16 @@ internal static class Program
             try { return AddBoxTokenMarker(args[1]); }
             catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
         }
+        if (args.Length >= 4 && args[0] == "--build-boxpool") {
+            try {
+                var perSlot = args.Length > 4 ? int.Parse(args[4]) : kDefaultPerSlot;
+                return BuildBoxPool(int.Parse(args[1]), args[2], args[3], perSlot);
+            } catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 3 && args[0] == "--verify-pool") {
+            try { return VerifyBoxPool(args[1], args[2]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
         if (args.Length >= 3 && args[0] == "--build-npc") {
             try {
                 var result = BuildNpcAddon(args[1], args[2]);
@@ -389,6 +399,296 @@ internal static class Program
         Console.WriteLine("verify core: " + armors.Count + " ARMO + " + addons.Count +
                           " ARMA, ESL, HEDR " + kHeaderVersion +
                           ", Skyrim.esm-only, marker/BOD2/ARMA-link/races OK");
+        return 0;
+    }
+
+    // --- v1.6.4 BOX pool generations ---------------------------------------
+    // CostumeFW_BoxPoolN.esp adds more physical box tokens, so several boxes can
+    // share one biped slot. Every record is DERIVED from the matching generation
+    // 0 token rather than built from a slot number, because gen 0 carries two
+    // things that are easy to get wrong and invisible when wrong:
+    //
+    //   the BOD2 mask   - slot 31's token is 31|41 (Hair + LongHair), not one bit
+    //   the race list   - RNAM plus 23 additional races. Without them a box
+    //                     silently does nothing on an ArmorRace custom race, the
+    //                     exact bug tools/esprace was written to fix
+    //
+    // Copying the template keeps both correct by construction; --verify-core and
+    // --verify-pool then assert they stayed that way.
+    private const int kDefaultPerSlot = 3;
+
+    private static string CarrierKey(int generation, uint armoLocalId) =>
+        "BP" + generation.ToString("00") + "_" + armoLocalId.ToString("X6");
+
+    private static int BuildBoxPool(int generation, string corePath, string outDir, int perSlot)
+    {
+        if (generation < 1) {
+            Console.Error.WriteLine("generation must be >= 1 (generation 0 is CostumeFW.esp)");
+            return 1;
+        }
+        if (perSlot < 1) {
+            Console.Error.WriteLine("per-slot count must be >= 1");
+            return 1;
+        }
+        if (!File.Exists(corePath)) {
+            Console.Error.WriteLine("missing core plugin: " + corePath);
+            return 1;
+        }
+        using var core = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(corePath), SkyrimRelease.SkyrimSE);
+
+        var marker = core.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) {
+            Console.Error.WriteLine("the core plugin has no " + kMarkerEdid +
+                                    " - run --add-marker on it first");
+            return 1;
+        }
+
+        // Templates in slot order, so the generated ids are stable across runs.
+        var templates = core.Armors
+            .Where(x => IsBoxTokenEdid(x.EditorID))
+            .Select(x => new {
+                Armor = x,
+                Slot = int.Parse(x.EditorID.Substring(kBoxTokenEdidPrefix.Length)),
+            })
+            .OrderBy(x => x.Slot)
+            .ToList();
+        if (templates.Count != kCoreArmorCount) {
+            Console.Error.WriteLine("expected " + kCoreArmorCount + " gen-0 tokens, found " +
+                                    templates.Count);
+            return 1;
+        }
+
+        var outName = "CostumeFW_BoxPool" + generation + ".esp";
+        var outKey = ModKey.FromNameAndExtension(outName);
+        var outMod = new SkyrimMod(outKey, SkyrimRelease.SkyrimSE);
+        outMod.ModHeader.Flags |= (SkyrimModHeader.HeaderFlag)0x200;  // ESL
+        outMod.ModHeader.Stats.Version = kHeaderVersion;
+
+        var kid = new List<string>();
+        var index = 0;
+        foreach (var t in templates) {
+            var addonTemplate = core.ArmorAddons.FirstOrDefault(
+                a => t.Armor.Armature.Count == 1 && a.FormKey == t.Armor.Armature[0].FormKey);
+            if (addonTemplate == null) {
+                Console.Error.WriteLine("gen-0 token " + t.Armor.EditorID + " has no single ARMA");
+                return 1;
+            }
+            for (var ord = 1; ord <= perSlot; ++ord, ++index) {
+                var armoId = (uint)(0x800 + index * 2);
+                var armaId = armoId + 1;
+                if (armaId > 0xFFF) {
+                    Console.Error.WriteLine("this generation does not fit the ESL range - " +
+                                            "lower --per-slot or add another generation");
+                    return 1;
+                }
+                var armor = t.Armor.Duplicate(new FormKey(outKey, armoId));
+                var addon = addonTemplate.Duplicate(new FormKey(outKey, armaId));
+
+                var tag = "CFW_BP" + generation.ToString("00") + "_S" + t.Slot + "_" +
+                          ord.ToString("00");
+                armor.EditorID = tag;
+                addon.EditorID = tag + "_AA";
+                // The FULL must NOT start with "Costume Box". A 1.6.3 DLL finds
+                // box tokens by "a CostumeFW* plugin AND that name prefix", and
+                // BoxPoolN satisfies the first half - so keeping the prefix off
+                // means a user who rolls back to 1.6.3 cannot be handed a pool
+                // token and build an unguarded same-slot box with it. At runtime
+                // CEF overwrites this with the box's label anyway; it is visible
+                // only in the free-token picker and diagnostics.
+                armor.Name = "CFW Pool " + generation + " Slot " + t.Slot + " #" + ord;
+
+                armor.Armature.Clear();
+                armor.Armature.Add(new FormLink<IArmorAddonGetter>(addon.FormKey));
+
+                // Duplicate carried the marker over with the rest of the keywords;
+                // assert rather than assume, since it is the membership test.
+                if (armor.Keywords == null ||
+                    !armor.Keywords.Any(k => k.FormKey == marker.FormKey)) {
+                    Console.Error.WriteLine("template " + t.Armor.EditorID +
+                                            " did not carry the marker into " + tag);
+                    return 1;
+                }
+
+                // One carrier namespace per TOKEN, not per slot: several tokens
+                // share slot 55 now, and slot-keyed file names would have them
+                // overwrite each other's meshes.
+                var key = CarrierKey(generation, armoId);
+                var nif = "CostumeFW\\" + key + "_carrier_r0.nif";
+                addon.WorldModel.Male.File = nif;
+                addon.WorldModel.Female.File = nif;
+
+                outMod.Armors.RecordCache.Set(armor);
+                outMod.ArmorAddons.RecordCache.Set(addon);
+
+                // LoreBox tooltips are keyed per token from this generation on;
+                // gen 0 keeps its LoreBox_CEFBox<slot> names as slot aliases.
+                kid.Add("Keyword = LoreBox_CEFTok_" + key + "|Armor|0x" +
+                        armoId.ToString("X") + "~" + outName);
+            }
+        }
+
+        Directory.CreateDirectory(outDir);
+        var outPath = Path.Combine(outDir, outName);
+        outMod.WriteToBinary(outPath);
+
+        var kidPath = Path.Combine(outDir, "CostumeFW_BoxPool" + generation + "_KID.ini");
+        var header = new List<string> {
+            "; Costume Expansion FW - LoreBox tooltip keywords for box pool generation " +
+                generation + ".",
+            "; Generated by tools/espmerge --build-boxpool; do not edit by hand.",
+            ";",
+            "; One keyword per TOKEN (LoreBox_CEFTok_<carrierKey>), not per slot: a slot",
+            "; can hold several boxes from 1.6.4 on, and a slot-keyed tooltip would show",
+            "; whichever of them CEF happened to find first.",
+            ";",
+            "; Soft dependency: without \"LoreBox - Item and Spell Tooltips\" nothing reads",
+            "; these and there is no effect. KID auto-creates the keywords.",
+            "",
+        };
+        File.WriteAllLines(kidPath, header.Concat(kid));
+
+        Console.WriteLine("box pool " + generation + " -> " + outPath);
+        Console.WriteLine("  " + outMod.Armors.Count + " ARMO + " + outMod.ArmorAddons.Count +
+                          " ARMA (" + perSlot + " per slot x " + templates.Count + " slots)");
+        Console.WriteLine("  " + kidPath + " (" + kid.Count + " keyword lines)");
+        return VerifyBoxPool(outPath, corePath);
+    }
+
+    private static int VerifyBoxPool(string path, string corePath)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing pool plugin: " + path);
+            return 1;
+        }
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        using var core = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(corePath), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+
+        var generation = 0;
+        var name = Path.GetFileName(path);
+        var stem = "CostumeFW_BoxPool";
+        if (name.StartsWith(stem, StringComparison.OrdinalIgnoreCase) &&
+            name.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)) {
+            var digits = name.Substring(stem.Length, name.Length - stem.Length - 4);
+            if (digits.Length > 0 && digits[0] != '0' && digits.All(char.IsDigit))
+                generation = int.Parse(digits);
+        }
+        if (generation < 1)
+            errors.Add("file name " + name + " is not CostumeFW_BoxPool<N>.esp with N >= 1");
+
+        if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
+            errors.Add("ESL flag missing");
+        if (Math.Abs(mod.ModHeader.Stats.Version - kHeaderVersion) > 0.001f)
+            errors.Add("HEDR version must be " + kHeaderVersion + ", got " + mod.ModHeader.Stats.Version);
+
+        // Masters are FIXED and checked for exact equality. The cumulative chain
+        // across pool generations was withdrawn in rev.5: a missing master is a
+        // startup CTD in SE, which takes the diagnostic CEF would otherwise print
+        // away from the user entirely.
+        var masters = mod.ModHeader.MasterReferences
+            .Select(x => x.Master.FileName.String).ToList();
+        var wanted = new[] { "Skyrim.esm", "CostumeFW.esp" };
+        if (masters.Count != wanted.Length ||
+            !masters.Select(m => m.ToLowerInvariant()).OrderBy(m => m)
+                .SequenceEqual(wanted.Select(m => m.ToLowerInvariant()).OrderBy(m => m)))
+            errors.Add("masters must be exactly [" + string.Join(", ", wanted) + "], got [" +
+                       string.Join(", ", masters) + "]");
+
+        var marker = core.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) errors.Add("the core plugin has no " + kMarkerEdid);
+
+        var armors = mod.Armors.ToList();
+        var addons = mod.ArmorAddons.ToList();
+        if (armors.Count != addons.Count)
+            errors.Add("ARMO/ARMA counts differ: " + armors.Count + " vs " + addons.Count);
+
+        // gen 0 keyed by slot, to compare masks and race lists against.
+        var coreBySlot = core.Armors
+            .Where(x => IsBoxTokenEdid(x.EditorID))
+            .ToDictionary(x => int.Parse(x.EditorID.Substring(kBoxTokenEdidPrefix.Length)));
+
+        var carrierKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var armor in armors) {
+            var who = armor.EditorID ?? armor.FormKey.ID.ToString("X6");
+            if (armor.FormKey.ID < 0x800 || armor.FormKey.ID > 0xFFF)
+                errors.Add(who + " local id " + armor.FormKey.ID.ToString("X6") +
+                           " is outside the ESL range 800-FFF");
+            if (armor.Name != null &&
+                armor.Name.String != null &&
+                armor.Name.String.StartsWith("Costume Box", StringComparison.OrdinalIgnoreCase))
+                errors.Add(who + " FULL starts with \"Costume Box\" - a 1.6.3 DLL would hand it out");
+            if (marker != null &&
+                (armor.Keywords == null || !armor.Keywords.Any(k => k.FormKey == marker.FormKey)))
+                errors.Add(who + " does not carry " + kMarkerEdid);
+            if (armor.Armature.Count != 1) {
+                errors.Add(who + " references " + armor.Armature.Count + " ARMA (want exactly 1)");
+                continue;
+            }
+            var addon = addons.FirstOrDefault(a => a.FormKey == armor.Armature[0].FormKey);
+            if (addon == null) { errors.Add(who + " points at an ARMA outside this plugin"); continue; }
+
+            var mask = (uint)armor.BodyTemplate.FirstPersonFlags;
+            if (mask == 0) errors.Add(who + " has an empty BOD2");
+            if (mask != (uint)addon.BodyTemplate.FirstPersonFlags)
+                errors.Add(who + " BOD2 does not match its ARMA");
+            var slot = SlotOfMask(mask);
+            if (!coreBySlot.TryGetValue(slot, out var gen0)) {
+                errors.Add(who + " slot " + slot + " has no generation 0 token");
+            } else if (mask != (uint)gen0.BodyTemplate.FirstPersonFlags) {
+                // slot 31 is the one this catches: 31|41, not a single bit.
+                errors.Add(who + " BOD2 " + mask.ToString("X") + " differs from generation 0's " +
+                           ((uint)gen0.BodyTemplate.FirstPersonFlags).ToString("X") +
+                           " for slot " + slot);
+            } else {
+                var gen0Addon = core.ArmorAddons.FirstOrDefault(
+                    a => gen0.Armature.Count == 1 && a.FormKey == gen0.Armature[0].FormKey);
+                if (gen0Addon != null) {
+                    if (addon.Race.FormKey != gen0Addon.Race.FormKey)
+                        errors.Add(addon.EditorID + " RNAM differs from generation 0's");
+                    if (!addon.AdditionalRaces.Select(x => x.FormKey).ToHashSet()
+                            .SetEquals(gen0Addon.AdditionalRaces.Select(x => x.FormKey)))
+                        errors.Add(addon.EditorID + " additional-race list differs from generation 0's");
+                }
+            }
+
+            var key = CarrierKey(generation, armor.FormKey.ID);
+            if (!carrierKeys.Add(key)) errors.Add("duplicate carrier key " + key);
+            var expected = "CostumeFW\\" + key + "_carrier_r0.nif";
+            var male = addon.WorldModel?.Male?.File?.RawPath?.Replace('/', '\\');
+            var female = addon.WorldModel?.Female?.File?.RawPath?.Replace('/', '\\');
+            if (!string.Equals(male, expected, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(female, expected, StringComparison.OrdinalIgnoreCase))
+                errors.Add(addon.EditorID + " model path is not " + expected +
+                           " (got " + male + " / " + female + ")");
+        }
+
+        // The KID file beside it must name every token exactly once.
+        var kidPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".",
+            "CostumeFW_BoxPool" + generation + "_KID.ini");
+        if (!File.Exists(kidPath)) {
+            errors.Add("missing " + Path.GetFileName(kidPath));
+        } else {
+            var lines = File.ReadAllLines(kidPath)
+                .Where(l => l.StartsWith("Keyword =", StringComparison.Ordinal)).ToList();
+            if (lines.Count != armors.Count)
+                errors.Add("KID ini has " + lines.Count + " keyword lines for " + armors.Count +
+                           " token(s)");
+            foreach (var armor in armors) {
+                var key = CarrierKey(generation, armor.FormKey.ID);
+                var want = "Keyword = LoreBox_CEFTok_" + key + "|Armor|0x" +
+                           armor.FormKey.ID.ToString("X") + "~" + Path.GetFileName(path);
+                if (!lines.Contains(want)) errors.Add("KID ini is missing: " + want);
+            }
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify pool " + generation + ": " + armors.Count + " ARMO + " +
+                          addons.Count + " ARMA, ESL, HEDR " + kHeaderVersion +
+                          ", masters/marker/BOD2-vs-gen0/races/carrier-keys/KID OK");
         return 0;
     }
 
