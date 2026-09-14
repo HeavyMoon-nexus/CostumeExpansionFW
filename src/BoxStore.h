@@ -21,12 +21,43 @@ namespace RE
 
 namespace CostumeFW
 {
+    // Why a box's token is not usable, when it is not. The entry is KEPT in the
+    // settings file either way - a definition is the only copy of what a costume
+    // was made of, and dropping it to "heal" the file destroys that. An unusable
+    // token is quarantined instead: excluded from the allocator, the normal UI
+    // list, stat stamping, token handout and carrier repointing, and surfaced on
+    // the Recovery page with the reason, where re-pointing it at another token is
+    // an explicit choice the user makes.
+    enum class TokenState
+    {
+        Resolved,      // in a box-token plugin, resolves to an ARMO
+        PoolMissing,   // a valid pool name whose generation is not loaded right now
+                       // (dormant: put the plugin back and the same box returns)
+        ParseError,    // "801junk:" / "XYZ:" / no colon
+        ForeignPlugin, // resolves, but its plugin does not define box tokens
+                       // (a publish token, an ability, someone else's armor)
+        NotArmo,       // right plugin, but the form is a QUST/CONT/SPEL/HDPT
+        UnresolvedForm // right plugin, but no such record in it
+    };
+
     // A box definition: a token ARMO (colon-form id) that, while worn, shows its
     // packed contents (colon-form ARMA ids). label is a user-facing name. Box
     // defs are GLOBAL config (all saves), persisted in CEF_settings.json - NOT
-    // in the co-save (which holds only per-save persist items). One box per token.
+    // in the co-save (which holds only per-save persist items).
+    //
+    // THREE identities, and keeping them apart is what lets 1.6.4 put several
+    // boxes on one biped slot:
+    //   boxId     - the logical box. Issued once, never changes: not on rename,
+    //               not on a contents change, not across a publish round trip.
+    //               Everything that means "this box" keys on it.
+    //   token     - the physical ARMO it currently holds. ONE box per token,
+    //               still (ROOT B): the token is what the player equips, and two
+    //               boxes on one token is a dead item printer.
+    //   biped slot - NOT unique from 1.6.4 on. It is a Skyrim equip-conflict
+    //               property of the token, not a name for the box.
     struct BoxDefInfo
     {
+        std::string boxId;  // stable logical identity (see above); never reused
         std::string label;
         std::string token;
         std::vector<std::string> contents;
@@ -42,7 +73,19 @@ namespace CostumeFW
         std::string presetName;  // display name for the UI
         bool uiVisible{ true };  // show this box in the MCM box list
         bool wear{ false };      // desired default Wear (show contents) state
+        // Runtime only - re-derived on every settings load, never serialized.
+        // The file records what the user meant; this records what the current
+        // load order can actually deliver.
+        TokenState tokenState{ TokenState::Resolved };
     };
+
+    // True while the box's token is usable: the allocator, the stat stamp, the
+    // token handout and the carrier repoint all gate on this.
+    [[nodiscard]] bool BoxTokenUsable(const BoxDefInfo& a_box);
+
+    // Human-readable reason code for the Recovery page and the log, e.g.
+    // "foreign-plugin". Empty for a resolved token.
+    [[nodiscard]] const char* TokenStateReason(TokenState a_state);
 
     // --- Global CEF settings (CEF_settings.json) ----------------------------
     // Master on/off for the whole framework (Main page). Off = nothing injected.
@@ -697,6 +740,13 @@ namespace CostumeFW
     // --- Queries (read-only; index-based for MCM listing) ---
     int BoxCount();
     BoxDefInfo BoxAt(int a_index);            // empty fields if out of range
+    // Find a box by its LOGICAL identity. This is what anything that means "this
+    // box" should use from 1.6.4 on: an index shifts when another box is removed,
+    // and a biped slot stops being unique once a slot can hold several boxes.
+    // -1 when there is no such box.
+    int FindBoxById(const std::string& a_boxId);
+    // ...and by the physical token it holds (still one box per token).
+    int FindBoxByToken(const std::string& a_token);
     bool BoxWornAt(int a_index);              // token currently equipped on player
     std::uint32_t BoxTokenFormAt(int a_index);  // resolved token FormID (0 if none)
     std::vector<std::string> BoxContents(const std::string& a_token);  // by token (for detach)

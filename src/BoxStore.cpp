@@ -6,6 +6,7 @@
 #include "StoreLock.h"
 #include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
 #include "FormId.h"       // MakeColonId (shared with the ability pool)
+#include "TokenIdentity.h"  // who owns a form, decided from its plugin (v1.6.4)
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "nifcarrier/NifCarrierCore.h"
 
@@ -48,6 +49,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <random>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -67,6 +69,13 @@ namespace CostumeFW
         // (never touched by WriteJson, so a corrupt main file can't clobber it).
         constexpr const char* kSettingsBakPath = "Data\\SKSE\\Plugins\\CEF_settings.json.bak";
         constexpr const char* kOldBoxesPath = "Data\\SKSE\\Plugins\\costume_boxes.json";  // migrated
+        // The 1.6.3-shaped settings, kept once at the moment 1.6.4 first rewrites
+        // them. The .bak above is "last known good", overwritten on every clean
+        // load - so one save under 1.6.4 and the old shape is nowhere. CEF never
+        // reads this file; it exists so going back to 1.6.3 is a copy, not a
+        // reconstruction. Written once and never again (MaybeWritePre164Backup).
+        constexpr const char* kSettingsPre164Path =
+            "Data\\SKSE\\Plugins\\CEF_settings.pre164.json";
         constexpr const char* kSchema = "cef.settings/1";
 
         // GLOBAL box definitions (config; all saves). One box per token. Mutated
@@ -89,6 +98,12 @@ namespace CostumeFW
         // clean load; a fresh install with no file at all is NOT this case and
         // writes normally.
         bool g_settingsUnreadable = false;
+
+        // The settings file just read was still in the 1.6.3 shape (no box
+        // carried a boxId). Set at load, consumed by the first write after it:
+        // that write is the moment the old shape stops existing anywhere, so a
+        // copy of it is kept first. See MaybeWritePre164Backup.
+        bool g_settingsWasPre164 = false;
 
         // Custody history (v1.6.2): ONE row per content id CEF has ever taken
         // custody of, holding what last happened to it. Keyed by id on purpose,
@@ -280,7 +295,15 @@ namespace CostumeFW
         // the same guarantee, and a second copy of it would be a second place to
         // fix.
 
-        void WriteJson(bool a_writeManifest = true)
+        void MaybeWritePre164Backup();  // fwd (defined below)
+
+        // Returns whether the settings actually reached disk. It used to be void,
+        // so every caller reported success no matter what happened (F05 / X5) -
+        // including AddBox, whose true/false the capture flow reads to decide
+        // whether to move the physical item into the hidden store. Taking the
+        // user's item and then failing to record where it went is the one
+        // outcome worth refusing.
+        bool WriteJson(bool a_writeManifest = true)
         {
             if (g_settingsUnreadable) {
                 // One line per attempt: the user needs to know their edits are
@@ -290,14 +313,16 @@ namespace CostumeFW
                     "disk is your real data and is left alone; fix or remove it (a "
                     "last-known-good copy is at {}), then restart the game.",
                     kSettingsPath, kSettingsBakPath);
-                return;
+                return false;
             }
+            MaybeWritePre164Backup();
             nlohmann::json doc;
             doc["schema"] = kSchema;
             doc["enabled"] = g_cefEnabled;
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
                 nlohmann::json jb;
+                jb["boxId"] = b.boxId;
                 jb["label"] = b.label;
                 jb["token"] = b.token;
                 jb["contents"] = b.contents;
@@ -403,12 +428,13 @@ namespace CostumeFW
 
             if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
                 SKSE::log::error("settings: cannot write {}", kSettingsPath);
-                return;
+                return false;
             }
             SKSE::log::info("settings: wrote {} box def(s) (enabled={})", g_boxes.size(), g_cefEnabled);
             if (a_writeManifest) {
                 WriteCarrierManifest();
             }
+            return true;
         }
 
         // The single plugin that ships every CEF record (v1.2.1: the old
@@ -434,6 +460,66 @@ namespace CostumeFW
         // MakeColonId moved to src/FormId.h (the ability pool needs it too). Call
         // sites are unchanged: it is still CostumeFW::MakeColonId, just one
         // namespace further out.
+
+        // --- boxId (v1.6.4) ---------------------------------------------------
+        // The logical identity of a box, as opposed to the physical token it
+        // currently holds. Sixteen hex characters either way, so nothing
+        // downstream has to know whether an id was migrated or issued.
+        //
+        // A box that existed before 1.6.4 gets its id DERIVED from its canonical
+        // token, deterministically: the same file migrated twice produces the
+        // same ids, so a migration that is interrupted between the rewrite and
+        // the save cannot hand the same box two different identities. That is
+        // sound exactly because one box holds one token (ROOT B), which is still
+        // true in 1.6.4 - only the biped slot stops being unique.
+        std::string DeriveBoxId(std::string_view a_canonicalToken)
+        {
+            // FNV-1a 64. Not a security hash; it needs to be stable across runs
+            // and builds, which std::hash explicitly is not.
+            std::uint64_t h = 1469598103934665603ULL;
+            for (const unsigned char c : a_canonicalToken) {
+                h ^= c;
+                h *= 1099511628211ULL;
+            }
+            char buf[17]{};
+            std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(h));
+            return buf;
+        }
+
+        std::string NewBoxId()
+        {
+            // Issued once per box and never reused. Seeded per call from
+            // random_device: boxes are created by hand, minutes apart, so the
+            // cost is irrelevant and a shared engine would be one more piece of
+            // mutable state under the store lock.
+            static std::mt19937_64 s_rng{ std::random_device{}() };
+            char buf[17]{};
+            std::snprintf(buf, sizeof(buf), "%016llX",
+                static_cast<unsigned long long>(s_rng()));
+            return buf;
+        }
+
+        // --- pre-1.6.4 settings snapshot --------------------------------------
+        // Taken at the moment 1.6.4 is about to write a file that was still in
+        // the 1.6.3 shape, and never again. CopyFileA with bFailIfExists=TRUE is
+        // the whole "once" mechanism: no flag to keep in sync, and a pre164 file
+        // the user restored by hand is not silently overwritten.
+        void MaybeWritePre164Backup()
+        {
+            if (!g_settingsWasPre164) {
+                return;
+            }
+            g_settingsWasPre164 = false;  // one attempt per load, whatever happens
+            if (::CopyFileA(kSettingsPath, kSettingsPre164Path, TRUE)) {
+                SKSE::log::info(
+                    "settings: kept the pre-1.6.4 file as {} before the first 1.6.4 write "
+                    "(CEF never reads it; it is there if you go back to 1.6.3)",
+                    kSettingsPre164Path);
+            } else if (::GetLastError() != ERROR_FILE_EXISTS) {
+                SKSE::log::warn("settings: could not keep a pre-1.6.4 copy at {} (error {})",
+                    kSettingsPre164Path, ::GetLastError());
+            }
+        }
 
         // v1.2.1 plugin consolidation: CostumeFW_Boxes.esp and
         // CostumeFW_Boxes_FSMPCarrier_001.esp were merged into CostumeFW.esp
@@ -522,6 +608,8 @@ namespace CostumeFW
         }
 
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
+        bool CorePluginLoaded();                                       // fwd (defined below)
+        TokenState ClassifyBoxToken(const std::string& a_colonId);     // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
         void RestoreTokenDefaultName(const std::string& a_token);      // fwd (defined below)
@@ -1422,9 +1510,31 @@ namespace CostumeFW
                             "it is rewritten on the next settings change)",
                 kSettingsBakPath);
         }
+        // --- CoreMissing: judge nothing, change nothing (v1.6.4) -------------
+        // Every question this function asks about a token - is it an ARMO, does
+        // its plugin define box tokens - is answered against the loaded plugins.
+        // Without CostumeFW.esp the honest answer to all of them is "cannot say",
+        // not "broken", so the definitions are left exactly as they are and the
+        // file is not rewritten. CEF can do nothing useful this session anyway.
+        //
+        // This runs BEFORE the G3 circuit breaker below on purpose: G3 only trips
+        // at two or more dropped boxes, so a user with a single box would not be
+        // covered by it.
+        if (!CorePluginLoaded()) {
+            SKSE::log::error(
+                "settings: {} is not loaded - leaving {} untouched. Box definitions are "
+                "not read, judged or rewritten this session; install/enable the plugin "
+                "and restart.",
+                tokenid::kCorePlugin, kSettingsPath);
+            g_settingsUnreadable = true;  // every WriteJson refuses while set
+            return;
+        }
         // Heal pre-merge colon-ids (v1.2.1 plugin consolidation) wherever the
         // settings persist them; a healed file is rewritten once below.
         bool healed = false;
+        // Set when a box arrives without a boxId: the file is still in the 1.6.3
+        // shape, so a copy of it is kept before the first 1.6.4 write.
+        bool wasPre164 = false;
         // ROOT B (border audit 2026-07-09): the field reads below are typed
         // value()/get<> accesses. A WRONG-TYPED field in a hand-edited settings file
         // (e.g. "boxes": 5) throws json::type_error - which the parse-only guard above
@@ -1434,33 +1544,66 @@ namespace CostumeFW
         // invariants here (one box per token, one holder per content id).
         std::vector<std::string> seenTokens;    // ROOT B: one box per token
         std::vector<std::string> seenContents;  // ROOT B: one holder per content id
+        std::vector<std::string> seenBoxIds;    // v1.6.4: one definition per boxId
+        int boxesSeen = 0;                      // rows the file offered
+        int boxesDropped = 0;                   // rows this load refused (G3)
         try {
         g_cefEnabled = doc.value("enabled", true);
         const auto boxes = doc.value("boxes", nlohmann::json::array());
         for (const auto& jb : boxes) {
+            ++boxesSeen;
             BoxDefInfo b;
+            b.boxId = jb.value("boxId", std::string{});
             b.label = jb.value("label", std::string{});
             b.token = jb.value("token", std::string{});
             healed |= MigrateLegacyColonId(b.token);
             healed |= CanonicalizeColonId(b.token);  // ROOT D
+            // v1.6.4: fold a CEF plugin name written in the wrong case onto the
+            // official spelling. Both resolve to the same record, but the store
+            // keys on the STRING - so "costumefw.esp" and "CostumeFW.esp" were two
+            // different tokens, and FreeTokens would offer a token a box already
+            // held.
+            healed |= tokenid::CanonicalizeCefColonId(b.token);
             if (b.token.empty()) {
+                ++boxesDropped;
                 continue;
             }
-            if (!IsTokenColonId(b.token)) {
-                // ROOT C: a box token must be a CEF plugin record; anything else means
-                // SetTokenStats below would rewrite a foreign/vanilla ARMO's stats.
-                SKSE::log::warn("boxes: LoadBoxes drops box with non-CEF token '{}'", b.token);
+            if (b.boxId.empty()) {
+                // Pre-1.6.4 definition. Derive the id from the canonical token
+                // rather than issuing a random one: migrating the same file twice
+                // then produces the same ids, so a migration interrupted before
+                // the save cannot hand one box two identities.
+                b.boxId = DeriveBoxId(b.token);
+                wasPre164 = true;
+                healed = true;
+            }
+            if (std::find(seenBoxIds.begin(), seenBoxIds.end(), b.boxId) != seenBoxIds.end()) {
+                SKSE::log::warn("boxes: LoadBoxes drops a second definition on boxId '{}'", b.boxId);
+                ++boxesDropped;
                 healed = true;
                 continue;
+            }
+            // What the CURRENT load order can deliver for this token. The entry is
+            // kept either way (see TokenState): a definition is the only record of
+            // what a costume was made of, and dropping it to tidy the file is how
+            // that record is lost. An unusable token is quarantined instead.
+            b.tokenState = ClassifyBoxToken(b.token);
+            if (b.tokenState != TokenState::Resolved) {
+                SKSE::log::warn(
+                    "boxes: box '{}' token '{}' is not usable ({}) - the definition is KEPT and "
+                    "quarantined; see the Recovery page to re-point or remove it",
+                    b.boxId, b.token, TokenStateReason(b.tokenState));
             }
             if (std::find(seenTokens.begin(), seenTokens.end(), b.token) != seenTokens.end()) {
                 // ROOT B: token-keyed mutators only ever reach the first box, so a
                 // second box on the same token is a dead "item printer" - drop it.
                 SKSE::log::warn("boxes: LoadBoxes drops second box on token '{}'", b.token);
+                ++boxesDropped;
                 healed = true;
                 continue;
             }
             seenTokens.push_back(b.token);
+            seenBoxIds.push_back(b.boxId);
             for (const auto& c : jb.value("contents", nlohmann::json::array())) {
                 if (c.is_string()) {
                     auto id = c.get<std::string>();
@@ -1504,6 +1647,28 @@ namespace CostumeFW
             b.uiVisible = jb.value("uiVisible", true);
             b.wear = jb.value("wear", false);
             g_boxes.push_back(std::move(b));
+        }
+        // --- G3: the all-or-nothing circuit breaker (v1.6.4) -----------------
+        // If this load refused EVERY box the file offered, the likely cause is
+        // something wrong on our side - a plugin that failed to load, an ingest
+        // rule of ours that is too strict, a schema mistake - not a user who
+        // corrupted all of their boxes at once. Applying that result and writing
+        // it back turns a bad session into permanent data loss. The 2026-09-08
+        // incident is exactly this shape, and only the .bak saved those boxes.
+        //
+        // Two or more, because refusing the single box a one-box file contains is
+        // a legitimate outcome (it really was a publish token) and must stay
+        // reportable. The one-box user is covered by the CoreMissing guard above,
+        // which is the case that actually produces a false wipe.
+        if (boxesDropped >= 2 && boxesDropped >= boxesSeen) {
+            SKSE::log::error(
+                "settings: REFUSED every box in {} ({} of {}) - that is far more likely to be "
+                "our fault than yours, so nothing is applied and the file is left alone. "
+                "Check the warnings above, then restart.",
+                kSettingsPath, boxesDropped, boxesSeen);
+            g_boxes.clear();
+            g_settingsUnreadable = true;  // every WriteJson refuses while set
+            return;
         }
         const auto persist = doc.value("persist", nlohmann::json::object());
         for (const auto& c : persist.value("contents", nlohmann::json::array())) {
@@ -1733,6 +1898,14 @@ namespace CostumeFW
         }
         // Clean, fully validated load - the held sets are now trustworthy.
         g_settingsLoadOk = true;
+        // Only now: the file really was the 1.6.3 shape and we really did read it.
+        // The next write is the moment that shape stops existing anywhere, so
+        // WriteJson keeps a copy of it first (MaybeWritePre164Backup).
+        g_settingsWasPre164 = wasPre164;
+        if (wasPre164) {
+            SKSE::log::info("settings: pre-1.6.4 file - {} box(es) given a boxId derived from "
+                            "their token", g_boxes.size());
+        }
         // ROOT B: snapshot the last-known-good backup only AFTER a clean, fully
         // validated load (previously taken before the field reads, so a file that
         // parsed but had a bad field could clobber the good .bak).
@@ -1858,6 +2031,24 @@ namespace CostumeFW
         g_cefEnabled = a_on;
         WriteJson();
         return g_cefEnabled;
+    }
+
+    bool BoxTokenUsable(const BoxDefInfo& a_box)
+    {
+        return a_box.tokenState == TokenState::Resolved;
+    }
+
+    const char* TokenStateReason(TokenState a_state)
+    {
+        switch (a_state) {
+        case TokenState::Resolved:       return "";
+        case TokenState::PoolMissing:    return "pool-missing";
+        case TokenState::ParseError:     return "parse-error";
+        case TokenState::ForeignPlugin:  return "foreign-plugin";
+        case TokenState::NotArmo:        return "not-armo";
+        case TokenState::UnresolvedForm: return "unresolved-form";
+        }
+        return "unknown";
     }
 
     bool IsBoxToken(std::uint32_t a_form)
@@ -3510,6 +3701,67 @@ namespace CostumeFW
             return form ? form->As<RE::TESObjectARMO>() : nullptr;
         }
 
+        // Is this plugin loaded right now?
+        //
+        // BOTH collections have to be asked. LookupLoadedModByName walks only the
+        // regular files; an ESL-flagged plugin lives in the small-file collection
+        // and LookupLoadedLightModByName is what reaches it. CostumeFW.esp is
+        // ESL, CostumeFW_NPC.esp is ESL, and every CostumeFW_BoxPoolN.esp will be
+        // - so asking the regular collection alone answers "not loaded" for all
+        // of CEF's own plugins. Combined with the no-touch rule below, that would
+        // have meant CEF silently refusing to load anybody's boxes, forever.
+        bool PluginLoaded(std::string_view a_name)
+        {
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            return dh && (dh->LookupLoadedModByName(a_name) != nullptr ||
+                             dh->LookupLoadedLightModByName(a_name) != nullptr);
+        }
+
+        // Is the plugin that defines generation 0 present at all? Everything the
+        // box store does assumes it, so when it is absent the answer is not
+        // "every box is broken" - it is "CEF cannot judge anything right now",
+        // and the settings must be left exactly as they are.
+        bool CorePluginLoaded()
+        {
+            return PluginLoaded(tokenid::kCorePlugin);
+        }
+
+        // What the current load order can say about a box's token. Cheap and
+        // stateless: it reads the live data handler, so it re-derives correctly
+        // after a plugin is added or removed without anything to invalidate.
+        //
+        // NOTE the ordering. The plugin question is asked BEFORE the form is
+        // resolved, because "resolves to an ARMO" is not the same as "is a box
+        // token": a publish token in CostumeFW_NPC.esp resolves to an ARMO
+        // perfectly well, and letting it through is the whole defect this
+        // release exists to close.
+        TokenState ClassifyBoxToken(const std::string& a_colonId)
+        {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(a_colonId, local, plugin)) {
+                return TokenState::ParseError;
+            }
+            if (!tokenid::IsBoxTokenPlugin(plugin)) {
+                return TokenState::ForeignPlugin;
+            }
+            if (!PluginLoaded(plugin)) {
+                // A pool generation that is simply not installed right now. The
+                // box is dormant, not broken: put the plugin back and it returns
+                // with the same boxId, token and carrier.
+                return TokenState::PoolMissing;
+            }
+            const std::uint32_t formId = ResolveFormId(a_colonId);
+            auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+            if (!form) {
+                return TokenState::UnresolvedForm;
+            }
+            if (!form->As<RE::TESObjectARMO>()) {
+                return TokenState::NotArmo;
+            }
+            return TokenState::Resolved;
+        }
+
         RE::EffectSetting* ResolveMgef(const std::string& a_colonId)
         {
             const std::uint32_t formId = ResolveFormId(a_colonId);
@@ -5126,6 +5378,26 @@ namespace CostumeFW
         return static_cast<int>(g_boxes.size());
     }
 
+    int FindBoxById(const std::string& a_boxId)
+    {
+        StoreLock lk;
+        if (a_boxId.empty()) {
+            return -1;
+        }
+        for (std::size_t i = 0; i < g_boxes.size(); ++i) {
+            if (g_boxes[i].boxId == a_boxId) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    int FindBoxByToken(const std::string& a_token)
+    {
+        StoreLock lk;
+        return FindBox(a_token);
+    }
+
     BoxDefInfo BoxAt(int a_index)
     {
         StoreLock lk;
@@ -5267,8 +5539,16 @@ namespace CostumeFW
         // but the native / preset / hand-edited-JSON routes reach here unchecked.
         std::string token = a_token;
         CanonicalizeColonId(token);
-        if (!IsTokenColonId(token)) {  // ROOT C: token must be a CEF plugin record
-            SKSE::log::warn("boxes: AddBox rejects non-CEF token '{}'", token);
+        tokenid::CanonicalizeCefColonId(token);  // v1.6.4: fold the plugin's casing
+        // The token must be a record of a plugin that DEFINES box tokens, and it
+        // must resolve to an ARMO there. The old test was "any CostumeFW* plugin",
+        // which accepted 000800:CostumeFW_NPC.esp - a publish token - and built a
+        // box on it, with both machineries then stamping the same record. It also
+        // accepted the quest and the container in CostumeFW.esp, and ids naming
+        // records that do not exist.
+        if (const TokenState state = ClassifyBoxToken(token); state != TokenState::Resolved) {
+            SKSE::log::warn("boxes: AddBox rejects token '{}' ({})", token,
+                TokenStateReason(state));
             return false;
         }
         std::string content = a_content;
@@ -5293,7 +5573,11 @@ namespace CostumeFW
         }
         int idx = FindBox(token);
         if (idx < 0) {
-            g_boxes.push_back({ a_label, token, {} });
+            BoxDefInfo fresh;
+            fresh.boxId = NewBoxId();  // issued once; survives rename and publish
+            fresh.label = a_label;
+            fresh.token = token;
+            g_boxes.push_back(std::move(fresh));
             idx = static_cast<int>(g_boxes.size()) - 1;
         } else if (!a_label.empty()) {
             g_boxes[idx].label = a_label;
@@ -5312,8 +5596,21 @@ namespace CostumeFW
             box.contents.push_back(content);  // caller registers + reconciles
         }
 
-        WriteJson();
+        // The settings are the record of what just happened. If they did not
+        // reach disk, say so: the capture flow reads this result to decide
+        // whether to move the physical item into the hidden store, and taking
+        // the item while failing to record where it went is the one outcome
+        // worth refusing (F05).
+        const bool saved = WriteJson();
         SetTokenStats(g_boxes[idx]);  // write armor/weight onto the token now
+        if (!saved) {
+            SKSE::log::error(
+                "boxes: AddBox label='{}' token='{}' content='{}' applied in memory but the "
+                "settings could NOT be saved - reporting failure so nothing is moved into "
+                "storage on the strength of it",
+                a_label, token, content);
+            return false;
+        }
         SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, token, content);
         return true;
     }
