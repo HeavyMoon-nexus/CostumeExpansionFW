@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <format>
 #include <optional>
 #include <sstream>
@@ -112,6 +113,13 @@ namespace CostumeFW::abilities
         // and a message box every load for that is how a mod teaches people to
         // dismiss its message boxes.
         bool g_faulted = false;
+
+        // Plugins a recipe named for a magic effect that would not resolve at
+        // hydration. The pool as a whole is fine, so this is not a fault state -
+        // but every slot that named one is an ability with no effects, holding a
+        // modifier nobody can take off, and the user has to be told before they
+        // save over it.
+        std::set<std::string> g_missingPlugins;
 
         void Disable(std::string a_why)
         {
@@ -637,6 +645,17 @@ namespace CostumeFW::abilities
                     SKSE::log::warn("abilities: slot {} wants magic effect {}, which does not "
                                     "resolve - is its plugin still enabled?",
                         a_slot, re.mgef);
+                    // Remember WHICH plugin, so the warning can name it. The
+                    // effect list is left untouched below, which means the
+                    // spell stays the empty form the pool plugin ships - and an
+                    // active effect the save restores onto an empty spell has
+                    // nothing to end, so its modifier is stuck. There is no way
+                    // to synthesise a remover: the actor value it wrote lives
+                    // on the magic effect, and the magic effect is what is gone.
+                    if (const auto colon = re.mgef.find(':');
+                        colon != std::string::npos && colon + 1 < re.mgef.size()) {
+                        g_missingPlugins.insert(re.mgef.substr(colon + 1));
+                    }
                     ok = false;
                     break;
                 }
@@ -862,11 +881,41 @@ namespace CostumeFW::abilities
     void ReportStateToUser()
     {
         static bool s_told = false;
-        if (s_told || !g_faulted || g_why.empty()) {
+        if (s_told) {
+            return;
+        }
+        std::string why;
+        if (g_faulted && !g_why.empty()) {
+            why = g_why;
+        } else if (!g_missingPlugins.empty()) {
+            // The pool is READY and most of it works, so this is not a disabled
+            // state - only the slots whose magic effect is gone are dead, and
+            // they are dead in the one way that cannot be undone from here:
+            // their spell has no effects, so the modifier the save restored has
+            // nothing to end. Measured 2026-09-14 (7.2 #23b): +175 Health left
+            // on the character after the ability was removed, with nothing in
+            // Active Effects. Turning the plugin back on fixes it; saving first
+            // does not. So the only thing worth stopping is the save.
+            std::string list;
+            for (const auto& p : g_missingPlugins) {
+                list += "\n    " + p;
+            }
+            why = std::format(
+                "Some of the enchantments your costumes pass through come from plugins that are "
+                "not loaded any more:\n{}\n\n"
+                "Those bonuses are on your character right now and cannot be taken off while "
+                "the plugins are missing.\n\n"
+                "DO NOT SAVE. Quit to desktop, turn them back on, and load this save again. The "
+                "bonuses come off by themselves once they are there.\n\n"
+                "Save while they are missing and the numbers are baked into that save for good.\n\n"
+                "Everything from plugins you still have is working normally.",
+                list);
+        }
+        if (why.empty()) {
             return;
         }
         s_told = true;
-        const std::string box = "Costume Expansion FW\n\n" + g_why;
+        const std::string box = "Costume Expansion FW\n\n" + why;
         // Same delay as the legacy report: a message box thrown at a fading-in
         // UI is a message box nobody sees.
         RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
