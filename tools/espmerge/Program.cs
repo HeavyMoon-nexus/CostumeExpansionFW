@@ -55,6 +55,14 @@ internal static class Program
             try { return VerifyNpcAddon(args[1]); }
             catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
         }
+        if (args.Length >= 2 && args[0] == "--verify-core") {
+            try { return VerifyCore(args[1]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 2 && args[0] == "--add-marker") {
+            try { return AddBoxTokenMarker(args[1]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
         if (args.Length >= 3 && args[0] == "--build-npc") {
             try {
                 var result = BuildNpcAddon(args[1], args[2]);
@@ -192,13 +200,207 @@ internal static class Program
             addon.AdditionalRaces.Add(new FormLink<IRaceGetter>(new FormKey(skyrimKey, id)));
     }
 
+    // --- v1.6.4 generation 0: the box-token marker -------------------------
+    // Membership in the box token pool stopped being a question about a display
+    // name in 1.6.4 (a token's FULL is rewritten at runtime and can be
+    // translated). It is a keyword now, and this is the one place that puts it
+    // on the 27 tokens that shipped before it existed.
+    private const string kMarkerEdid = "CFW_BoxTokenMarker";
+    private const string kBoxTokenEdidPrefix = "CFW_BoxToken_";
+    private const int kCoreArmorCount = 27;
+    private const int kCoreAddonCount = 31;
+    private const float kHeaderVersion = 1.71f;
+
+    // Every ARMO whose editor ID is CFW_BoxToken_<slot>. The ARMA records are
+    // named ..._<slot>AA, so the all-digits tail is what keeps them out.
+    private static bool IsBoxTokenEdid(string edid)
+    {
+        if (edid == null || !edid.StartsWith(kBoxTokenEdidPrefix, StringComparison.Ordinal))
+            return false;
+        var tail = edid.Substring(kBoxTokenEdidPrefix.Length);
+        return tail.Length > 0 && tail.All(char.IsDigit);
+    }
+
+    private static int SlotOfMask(uint mask)
+    {
+        for (var bit = 0; bit < 32; ++bit)
+            if ((mask & (1u << bit)) != 0) return bit + 30;
+        return 0;
+    }
+
+    private static int AddBoxTokenMarker(string path)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing core plugin: " + path);
+            return 1;
+        }
+        var mod = SkyrimMod.CreateFromBinary(ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var modKey = mod.ModKey;
+
+        var marker = mod.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) {
+            // Append past the used range; never renumber an existing record.
+            // Local ids are published identity - the settings file, the co-save
+            // and every shared preset name records by FormID.
+            uint next = 0x800;
+            foreach (var rec in mod.EnumerateMajorRecords())
+                if (rec.FormKey.ModKey == modKey && rec.FormKey.ID >= next)
+                    next = rec.FormKey.ID + 1;
+            if (next > 0xFFF) {
+                Console.Error.WriteLine("no room for the marker: next free id " + next.ToString("X") +
+                                        " is past the ESL range");
+                return 1;
+            }
+            marker = new Keyword(new FormKey(modKey, next), SkyrimRelease.SkyrimSE) {
+                EditorID = kMarkerEdid,
+            };
+            mod.Keywords.RecordCache.Set(marker);
+            Console.WriteLine("created KYWD " + kMarkerEdid + " at " + next.ToString("X6"));
+        } else {
+            Console.WriteLine("KYWD " + kMarkerEdid + " already present at " +
+                              marker.FormKey.ID.ToString("X6"));
+        }
+
+        var tagged = 0;
+        var already = 0;
+        foreach (var armor in mod.Armors.ToList()) {
+            if (!IsBoxTokenEdid(armor.EditorID)) continue;
+            if (armor.Keywords == null)
+                armor.Keywords = new Noggog.ExtendedList<IFormLinkGetter<IKeywordGetter>>();
+            if (armor.Keywords.Any(x => x.FormKey == marker.FormKey)) { ++already; continue; }
+            armor.Keywords.Add(new FormLink<IKeywordGetter>(marker.FormKey));
+            ++tagged;
+        }
+        Console.WriteLine("marker on " + tagged + " newly tagged + " + already +
+                          " already tagged box token(s)");
+        if (tagged == 0 && already == 0) {
+            Console.Error.WriteLine("no CFW_BoxToken_* ARMO found - wrong file?");
+            return 1;
+        }
+
+        // Write beside the original and swap only once the result verifies, so a
+        // half-written plugin never replaces a shipping one. The staging copy
+        // keeps the REAL file name in a scratch directory rather than picking up
+        // a .tmp suffix: Mutagen resolves the output path to a ModKey to check
+        // its masters, and "CostumeFW.esp.tmp" is not a plugin name.
+        var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+        var stageDir = Path.Combine(dir, ".espmerge_stage");
+        Directory.CreateDirectory(stageDir);
+        var staged = Path.Combine(stageDir, Path.GetFileName(path));
+        if (File.Exists(staged)) File.Delete(staged);
+        mod.WriteToBinary(staged);
+        if (VerifyCore(staged) != 0) {
+            Console.Error.WriteLine("the rewritten plugin does not verify - original untouched. " +
+                                    "The rejected result is at " + staged);
+            return 1;
+        }
+        File.Copy(staged, path, true);
+        File.Delete(staged);
+        try { Directory.Delete(stageDir); } catch (IOException) { /* not empty: leave it */ }
+        Console.WriteLine("add-marker -> " + path);
+        return 0;
+    }
+
+    private static int VerifyCore(string path)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing core plugin: " + path);
+            return 1;
+        }
+        // using: the overlay memory-maps the file and HOLDS it. Without this the
+        // staged copy in --add-marker cannot be deleted after it verifies.
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+
+        if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
+            errors.Add("ESL flag missing");
+        if (Math.Abs(mod.ModHeader.Stats.Version - kHeaderVersion) > 0.001f)
+            errors.Add("HEDR version must be " + kHeaderVersion + ", got " + mod.ModHeader.Stats.Version);
+        var masters = mod.ModHeader.MasterReferences.Select(x => x.Master.FileName.String).ToList();
+        if (masters.Count != 1 || !masters[0].Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+            errors.Add("masters must be [Skyrim.esm], got [" + string.Join(", ", masters) + "]");
+
+        foreach (var rec in mod.EnumerateMajorRecords()) {
+            if (rec.FormKey.ModKey != mod.ModKey) continue;
+            if (rec.FormKey.ID < 0x800 || rec.FormKey.ID > 0xFFF)
+                errors.Add("local id " + rec.FormKey.ID.ToString("X6") + " (" + rec.EditorID +
+                           ") is outside the ESL range 800-FFF");
+        }
+
+        var marker = mod.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) errors.Add("KYWD " + kMarkerEdid + " is missing");
+
+        var armors = mod.Armors.ToList();
+        var addons = mod.ArmorAddons.ToList();
+        if (armors.Count != kCoreArmorCount)
+            errors.Add("expected " + kCoreArmorCount + " ARMO, got " + armors.Count);
+        if (addons.Count != kCoreAddonCount)
+            errors.Add("expected " + kCoreAddonCount + " ARMA, got " + addons.Count);
+
+        var skyrimKey = ModKey.FromNameAndExtension("Skyrim.esm");
+        var expectedRaces = kNpcRaceIds.Select(id => new FormKey(skyrimKey, id)).ToHashSet();
+
+        foreach (var armor in armors) {
+            var who = armor.EditorID ?? armor.FormKey.ID.ToString("X6");
+            if (!IsBoxTokenEdid(armor.EditorID)) {
+                // The pool is "every ARMO this plugin defines", so a non-token
+                // ARMO landing here would silently join it.
+                errors.Add("ARMO " + who + " is not a CFW_BoxToken_<slot> record");
+                continue;
+            }
+            if (marker != null &&
+                (armor.Keywords == null || !armor.Keywords.Any(k => k.FormKey == marker.FormKey)))
+                errors.Add(who + " does not carry " + kMarkerEdid);
+
+            if (armor.Armature.Count != 1) {
+                errors.Add(who + " references " + armor.Armature.Count + " ARMA (want exactly 1)");
+                continue;
+            }
+            var addon = addons.FirstOrDefault(a => a.FormKey == armor.Armature[0].FormKey);
+            if (addon == null) { errors.Add(who + " points at an ARMA outside this plugin"); continue; }
+
+            var armorMask = (uint)armor.BodyTemplate.FirstPersonFlags;
+            var addonMask = (uint)addon.BodyTemplate.FirstPersonFlags;
+            // NOT "exactly one bit": the shipped slot-31 wig token carries 31|41
+            // (Hair + LongHair) and that is correct. What must hold is that the
+            // pair agree and that the slot is real.
+            if (armorMask == 0) errors.Add(who + " has an empty BOD2");
+            if (armorMask != addonMask)
+                errors.Add(who + " BOD2 " + armorMask.ToString("X") + " != its ARMA's " +
+                           addonMask.ToString("X"));
+            var slot = SlotOfMask(armorMask);
+            if (slot < 30 || slot > 61) errors.Add(who + " slot " + slot + " is outside 30-61");
+            var edidSlot = int.Parse(armor.EditorID.Substring(kBoxTokenEdidPrefix.Length));
+            if (slot != edidSlot)
+                errors.Add(who + " names slot " + edidSlot + " but its BOD2 says " + slot);
+
+            // The 23-race list is the fix for "a box silently does nothing on an
+            // ArmorRace custom race"; a generated pool that loses it would
+            // reproduce that bug for its own boxes only.
+            if (addon.Race.FormKey != new FormKey(skyrimKey, 0x19))
+                errors.Add(addon.EditorID + " RNAM is not DefaultRace");
+            if (!addon.AdditionalRaces.Select(x => x.FormKey).ToHashSet().SetEquals(expectedRaces))
+                errors.Add(addon.EditorID + " additional-race list does not match the 23-race set");
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify core: " + armors.Count + " ARMO + " + addons.Count +
+                          " ARMA, ESL, HEDR " + kHeaderVersion +
+                          ", Skyrim.esm-only, marker/BOD2/ARMA-link/races OK");
+        return 0;
+    }
+
     private static int VerifyNpcAddon(string path)
     {
         if (!File.Exists(path)) {
             Console.Error.WriteLine("missing NPC add-on: " + path);
             return 1;
         }
-        var mod = SkyrimMod.CreateFromBinaryOverlay(
+        // using: the overlay memory-maps the file and HOLDS it. Without this the
+        // staged copy in --add-marker cannot be deleted after it verifies.
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
             ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
         var errors = new List<string>();
         if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
@@ -264,9 +466,23 @@ internal static class Program
 
         }
 
+        // Role split. This add-on and the core both pass "is it a CEF plugin",
+        // so what keeps a publish token out of the box pool is that it is not a
+        // box token: no CFW_BoxToken_* editor ID, and no box-token marker. Both
+        // are asserted here rather than left as a naming convention, because the
+        // convention is what failed - a display name is not identity.
+        foreach (var armor in mod.Armors) {
+            if (IsBoxTokenEdid(armor.EditorID))
+                errors.Add("ARMO " + armor.EditorID + " uses a box-token editor ID - it would " +
+                           "read as a box token");
+            if (armor.Keywords != null && armor.Keywords.Count != 0)
+                errors.Add("ARMO " + armor.EditorID + " carries keywords; this add-on's tokens " +
+                           "must carry none (a box-token marker here joins the box pool)");
+        }
+
         foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
         if (errors.Count != 0) return 1;
-        Console.WriteLine("verify NPC: 16 ARMO + 16 ARMA, ESL, Skyrim.esm-only, links/slots/races OK");
+        Console.WriteLine("verify NPC: 16 ARMO + 16 ARMA, ESL, Skyrim.esm-only, links/slots/races/role-split OK");
         return 0;
     }
 

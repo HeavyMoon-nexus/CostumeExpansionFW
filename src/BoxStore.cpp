@@ -609,6 +609,8 @@ namespace CostumeFW
 
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
         bool CorePluginLoaded();                                       // fwd (defined below)
+        std::string_view FilenameOf(const RE::TESFile* a_file);        // fwd (defined below)
+        RE::BGSKeyword* BoxTokenMarkerKeyword();                       // fwd (defined below)
         TokenState ClassifyBoxToken(const std::string& a_colonId);     // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
@@ -1529,6 +1531,20 @@ namespace CostumeFW
             g_settingsUnreadable = true;  // every WriteJson refuses while set
             return;
         }
+        // CoreOutdated: the plugin is there but CFW_BoxTokenMarker is not, so the
+        // DLL is 1.6.4 and the plugin files are still 1.6.3. Every token would
+        // fail the marker test and be quarantined - a whole catalogue declared
+        // broken by a half-finished install. The VR patch has shipped as a
+        // DLL-only download before, so this is a real way to arrive here.
+        if (!BoxTokenMarkerKeyword()) {
+            SKSE::log::error(
+                "settings: {} is older than this DLL - it has no CFW_BoxTokenMarker, so no "
+                "token can be recognised. Leaving {} untouched; update the plugin files to "
+                "1.6.4 and restart.",
+                tokenid::kCorePlugin, kSettingsPath);
+            g_settingsUnreadable = true;
+            return;
+        }
         // Heal pre-merge colon-ids (v1.2.1 plugin consolidation) wherever the
         // settings persist them; a healed file is rewritten once below.
         bool healed = false;
@@ -2046,6 +2062,7 @@ namespace CostumeFW
         case TokenState::ParseError:     return "parse-error";
         case TokenState::ForeignPlugin:  return "foreign-plugin";
         case TokenState::NotArmo:        return "not-armo";
+        case TokenState::NoMarker:       return "no-marker";
         case TokenState::UnresolvedForm: return "unresolved-form";
         }
         return "unknown";
@@ -3242,20 +3259,31 @@ namespace CostumeFW
         if (!dh) {
             return {};
         }
+        auto* marker = BoxTokenMarkerKeyword();
         for (auto* armo : dh->GetFormArray<RE::TESObjectARMO>()) {
             if (!armo) {
                 continue;
             }
-            auto* file = armo->GetFile(0);
-            if (!IsTokenPluginFile(file)) {
+            // GetFile(0) is the plugin that DEFINED the record, not the load-order
+            // winner, so a patch that overrides a token still answers CostumeFW.esp
+            // and a translated copy of the plugin changes nothing here.
+            if (!tokenid::IsBoxTokenPlugin(FilenameOf(armo->GetFile(0)))) {
                 continue;
             }
-            const char* nm = armo->GetFullName();
-            if (nm && std::string_view(nm).starts_with("Costume Box")) {
-                pairs.emplace_back(SlotNumberOf(armo), MakeColonId(armo));
+            // The marker, not the display name. A token's FULL is overwritten with
+            // the box's label while it is in use, and an xTranslator'd copy of the
+            // plugin translates it - so the old "name starts with Costume Box" test
+            // dropped every renamed token out of the pool (F10) and would have
+            // emptied the pool entirely for anyone running a translation.
+            if (marker && !armo->HasKeyword(marker)) {
+                continue;
             }
+            pairs.emplace_back(SlotNumberOf(armo), MakeColonId(armo));
         }
-        std::sort(pairs.begin(), pairs.end());  // by slot number
+        // (slot, colon-id): the slot orders the list for the pickers, and the
+        // colon-id breaks ties. From 1.6.4 a slot can hold several tokens, so
+        // without the tie-break the order would depend on form-array order.
+        std::sort(pairs.begin(), pairs.end());
         std::vector<std::string> out;
         out.reserve(pairs.size());
         for (auto& p : pairs) {
@@ -3701,6 +3729,44 @@ namespace CostumeFW
             return form ? form->As<RE::TESObjectARMO>() : nullptr;
         }
 
+        // The defining plugin's file name, or "" when a form has none (a runtime
+        // form). string_view over TESFile's own buffer; valid for the call.
+        std::string_view FilenameOf(const RE::TESFile* a_file)
+        {
+            return a_file ? a_file->GetFilename() : std::string_view{};
+        }
+
+        // CFW_BoxTokenMarker, resolved once per process. Null means the DLL is
+        // 1.6.4 but CostumeFW.esp is still the 1.6.3 file (CoreOutdated): the
+        // keyword's own record does not exist, so no token can carry it and
+        // testing for it would empty the pool. Callers treat null as "cannot
+        // check" rather than "nothing qualifies".
+        RE::BGSKeyword* BoxTokenMarkerKeyword()
+        {
+            // Latches only on SUCCESS. A plain "compute once" static would cache
+            // whatever the first call saw - and a call that happens to land
+            // before the data handler is up would then pin null for the rest of
+            // the process, which reads exactly like "the plugin is out of date".
+            // Caching the miss is the initialisation-order hazard this codebase
+            // has been bitten by before; not caching it costs one form-array
+            // walk on the paths that run before kDataLoaded.
+            static RE::BGSKeyword* s_marker = nullptr;
+            if (s_marker) {
+                return s_marker;
+            }
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) {
+                return nullptr;
+            }
+            for (auto* kw : dh->GetFormArray<RE::BGSKeyword>()) {
+                if (kw && kw->formEditorID == "CFW_BoxTokenMarker") {
+                    s_marker = kw;
+                    return s_marker;
+                }
+            }
+            return nullptr;
+        }
+
         // Is this plugin loaded right now?
         //
         // BOTH collections have to be asked. LookupLoadedModByName walks only the
@@ -3756,8 +3822,16 @@ namespace CostumeFW
             if (!form) {
                 return TokenState::UnresolvedForm;
             }
-            if (!form->As<RE::TESObjectARMO>()) {
+            auto* armo = form->As<RE::TESObjectARMO>();
+            if (!armo) {
                 return TokenState::NotArmo;
+            }
+            // Condition 3 of the role test. LoadBoxes refuses to run at all when
+            // the marker's own record is missing (CoreOutdated), so reaching here
+            // with a null marker means a caller outside that path - treat "cannot
+            // check" as "do not reject", the same way TokenPool does.
+            if (auto* marker = BoxTokenMarkerKeyword(); marker && !armo->HasKeyword(marker)) {
+                return TokenState::NoMarker;
             }
             return TokenState::Resolved;
         }
@@ -5707,15 +5781,18 @@ namespace CostumeFW
         // The ESP name each token had before a label was ever stamped over it,
         // by FormID. Process-lifetime, exactly like the fullName edit it undoes.
         //
-        // TokenPool identifies a free box by that ESP name ("Costume Box ..."),
-        // so renaming a box and then freeing it used to drop the token out of
-        // the pool until the next game start - the rename feature ate boxes
-        // (review 2026-09-09 F10). The name test cannot simply go: every CEF
-        // plugin passes IsTokenPluginFile, so dropping it would sweep in
-        // CostumeFW_NPC.esp's publish tokens and NPC-persist carriers. And a
-        // stable id is not available either - SSE keeps no EditorID on ARMO at
-        // runtime. So restore the invariant the pool already relies on: a token
-        // that is not in a box carries its ESP name.
+        // NO LONGER LOAD-BEARING (v1.6.4). This restore used to be the only thing
+        // keeping a renamed token in the pool: TokenPool found a free box by its
+        // ESP name, so renaming a box and then freeing it dropped the token out
+        // of the pool until the next game start, and the rename feature ate boxes
+        // (review 2026-09-09 F10). The name test could not simply go at the time,
+        // because every CEF plugin passed IsTokenPluginFile and dropping it would
+        // have swept in CostumeFW_NPC.esp's publish tokens.
+        //
+        // Membership is the CFW_BoxTokenMarker keyword now, which a rename cannot
+        // touch, so F10 cannot recur and a miss here costs nothing but a stale
+        // name in the inventory. Kept because that name SHOULD go back - not
+        // because anything depends on it.
         std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;
 
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box)

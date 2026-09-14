@@ -37,6 +37,7 @@ namespace CostumeFW
         ForeignPlugin, // resolves, but its plugin does not define box tokens
                        // (a publish token, an ability, someone else's armor)
         NotArmo,       // right plugin, but the form is a QUST/CONT/SPEL/HDPT
+        NoMarker,      // right plugin and an ARMO, but not tagged as a box token
         UnresolvedForm // right plugin, but no such record in it
     };
 

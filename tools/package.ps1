@@ -25,6 +25,17 @@ $out = Join-Path $repo "dist\CostumeExpansionFW-$Version.7z"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
+# Verify the core ESP BEFORE staging anything. The pool is "every ARMO this
+# plugin defines", so a stray record, a lost box-token marker, a BOD2 that no
+# longer matches its ARMA or an armature race list that regressed all change
+# what CEF hands the user - and none of them are visible in a file listing.
+# Reads only; the verifier is the Mutagen one in tools/espmerge.
+& dotnet run --project (Join-Path $PSScriptRoot 'espmerge\espmerge.csproj') --no-restore -- `
+    --verify-core "$mod\CostumeFW.esp"
+if ($LASTEXITCODE -ne 0) {
+    throw "espmerge --verify-core FAILED (exit $LASTEXITCODE) on $mod\CostumeFW.esp - nothing staged."
+}
+
 # --- from the deployed mod folder (explicit manifest) ---
 Copy-Item "$mod\CostumeFW.esp" $stage
 Copy-Item "$mod\CostumeFW_KID.ini" $stage
