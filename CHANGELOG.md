@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.6.3 (unreleased)
+## v1.6.3 (2026-09-14)
 
 Quit Skyrim while wearing a box and the bonus that box was giving you could
 stay on your character permanently. It happened once per session, every session,

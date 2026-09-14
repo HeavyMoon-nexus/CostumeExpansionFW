@@ -99,9 +99,9 @@ Your boxes and settings are not in those mods and are not affected.</description
             </plugin>
 
             <plugin name="Skyrim VR">
-              <description>The VR build of the DLL.
+              <description>Adds the VR notes. Nothing else changes.
 
-The plugin, meshes, scripts and KID files are identical across SE, AE and VR - only the DLL differs, so this replaces it rather than adding anything.
+Everything is identical across SE, AE and VR, the DLL included - it is one binary that works out which engine loaded it. Picking this only adds README_VR.txt, so if you install for SE and later move to VR you are not missing a file.
 
 VR also needs SkyrimVRESL, and the in-game menu needs ImGui VR Helper. SkyUI VR on its own will not give you a CEF menu once the MCM is gone in 1.6.4.</description>
               <conditionFlags><flag name="runtime">vr</flag></conditionFlags>
@@ -191,23 +191,22 @@ Once you have used this, leave it installed. Your saves refer to those form IDs,
         </files>
       </pattern>
 
-      <pattern>
-        <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
-          <flagDependency flag="runtime" value="se" />
-        </dependencies>
-        <files>
-          <folder source="dll_se" destination="" priority="1" />
-        </files>
-      </pattern>
-
+      <!--
+        There is no "se" pattern, and that is not an omission. CEF is ONE
+        CommonLibSSE-NG binary for SE, AE and VR - it branches on
+        REL::Module::IsVR() at runtime - so the DLL is in core/ and every
+        install gets the same one. The 1.6.2.2 main and VR downloads shipped
+        byte-identical DLLs; the VR download was this readme and nothing else.
+        The runtime question is still asked, because it is the only place a VR
+        user is told about SkyrimVRESL and ImGui VR Helper.
+      -->
       <pattern>
         <dependencies operator="And">
           <flagDependency flag="proceed" value="yes" />
           <flagDependency flag="runtime" value="vr" />
         </dependencies>
         <files>
-          <folder source="dll_vr" destination="" priority="1" />
+          <folder source="vr" destination="" priority="1" />
         </files>
       </pattern>
 

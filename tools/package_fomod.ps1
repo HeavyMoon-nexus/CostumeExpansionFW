@@ -5,24 +5,23 @@
 #   1. CMakeLists VERSION bump + build.cmd release (SE/AE DLL deployed)
 #   2. psc compile (pex deployed)
 #   3. any patch esp folded into CostumeFW.esp
-# and additionally:
-#   4. a VR build of the DLL, saved somewhere this script can be pointed at
-#      (-VrDll). The SE and VR DLLs have to exist AT THE SAME TIME, which the
-#      old two-script flow never needed - build one, stash it, build the other.
+# There is NO separate VR build. CEF is one CommonLibSSE-NG binary that serves
+# SE, AE and VR and branches on REL::Module::IsVR(); package_vr_patch.ps1 says so
+# and always staged the same deployed DLL, and the 1.6.2.2 main and VR archives
+# ship byte-identical DLLs (verified 2026-09-14). The VR download was the same
+# DLL plus README_VR.txt, which is all the vr/ folder holds here.
 #
 # Layout produced (what the FOMOD's ModuleConfig.xml refers to):
 #
 #   fomod/            info.xml + ModuleConfig.xml
 #   core/             everything common to every install, minus the DLL
-#   dll_se/           the SE/AE DLL
-#   dll_vr/           the VR DLL + README_VR.txt
+#   vr/               README_VR.txt (the DLL is NOT VR-specific - see below)
 #   npc/              CostumeFW_NPC.esp + its carriers + README_NPC.txt
 #   ench/             CostumeFW_Abilities.esp
 #   canceled/         install_canceled.txt
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$ModFolder = 'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW',
-    [Parameter(Mandatory = $true)][string]$VrDll,
     # The ability pool. Non-ESL on purpose: saves point at fixed form IDs in it,
     # and the light range cannot hold enough of them.
     [string]$AbilitiesEsp = 'K:\dev\CostumeExpansionFW\package_assets\CostumeFW_Abilities.esp',
@@ -36,7 +35,7 @@ $stage = Join-Path $env:TEMP "cef_fomod_$Version"
 $out = Join-Path $repo "dist\CostumeExpansionFW-$Version-FOMOD.7z"
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-$dirs = 'fomod', 'core', 'dll_se', 'dll_vr', 'npc', 'ench', 'canceled'
+$dirs = 'fomod', 'core', 'vr', 'npc', 'ench', 'canceled'
 foreach ($d in $dirs) { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
 
 # --- fomod/ ---------------------------------------------------------------
@@ -77,22 +76,15 @@ New-Item -ItemType Directory -Force "$core\Source\Scripts" | Out-Null
 Copy-Item "$repo\papyrus\CFW_Native.psc" "$core\Source\Scripts\"
 Copy-Item "$repo\papyrus\CostumeFW_MCM.psc" "$core\Source\Scripts\"
 
-# --- dll_se/ and dll_vr/ --------------------------------------------------
-New-Item -ItemType Directory -Force "$stage\dll_se\SKSE\Plugins" | Out-Null
-Copy-Item "$mod\SKSE\Plugins\CostumeExpansionFW.dll" "$stage\dll_se\SKSE\Plugins\"
-if (-not (Test-Path $VrDll)) { throw "VR DLL not found: $VrDll" }
-New-Item -ItemType Directory -Force "$stage\dll_vr\SKSE\Plugins" | Out-Null
-Copy-Item $VrDll "$stage\dll_vr\SKSE\Plugins\CostumeExpansionFW.dll"
-Copy-Item "$repo\README_VR.txt" "$stage\dll_vr\"
-
-# The two DLLs go to the SAME path and the installer picks one, so handing this
-# script the SE build twice would ship VR users the wrong binary with nothing to
-# see. Silent, and only findable by a VR user crashing.
-$seHash = (Get-FileHash "$stage\dll_se\SKSE\Plugins\CostumeExpansionFW.dll" -Algorithm SHA256).Hash
-$vrHash = (Get-FileHash "$stage\dll_vr\SKSE\Plugins\CostumeExpansionFW.dll" -Algorithm SHA256).Hash
-if ($seHash -eq $vrHash) {
-    throw "the SE and VR DLLs are the same file - -VrDll is pointing at the SE build"
-}
+# --- the DLL (core) and vr/ -----------------------------------------------
+# ONE binary for every runtime, so it goes in core/ with everything else. An
+# earlier version of this script took a -VrDll and REFUSED a package whose two
+# DLLs matched, which is backwards: in this project they have to match, and the
+# only way to satisfy that guard was to hand it a DLL from another build. It
+# did exactly that once, in a test package, before anyone compared the hashes.
+New-Item -ItemType Directory -Force "$core\SKSE\Plugins" | Out-Null
+Copy-Item "$mod\SKSE\Plugins\CostumeExpansionFW.dll" "$core\SKSE\Plugins\"
+Copy-Item "$repo\README_VR.txt" "$stage\vr\"
 
 # --- npc/ -----------------------------------------------------------------
 $assetRoot = "$repo\package_assets"
@@ -135,10 +127,8 @@ if ($flags -band 0x200) {
 Copy-Item "$repo\package_assets\install_canceled.txt" "$stage\canceled\"
 
 # --- sanity, same as package.ps1 ------------------------------------------
-$dll = Get-Item "$stage\dll_se\SKSE\Plugins\CostumeExpansionFW.dll"
-Write-Host "SE DLL: $($dll.LastWriteTime)  $($dll.Length) bytes"
-$vr = Get-Item "$stage\dll_vr\SKSE\Plugins\CostumeExpansionFW.dll"
-Write-Host "VR DLL: $($vr.LastWriteTime)  $($vr.Length) bytes"
+$dll = Get-Item "$core\SKSE\Plugins\CostumeExpansionFW.dll"
+Write-Host "DLL (SE/AE/VR): $($dll.LastWriteTime)  $($dll.Length) bytes"
 
 $espMirror = "$assetRoot\CostumeFW.esp"
 if (-not (Test-Path $espMirror)) { throw "repo mirror missing: $espMirror" }
