@@ -719,10 +719,44 @@ namespace CostumeFW::abilities
                 return nullptr;
             }
 
-            // Monotonic: never reuse a slot, not even a tombstoned one. An old
-            // save can still name it, and handing that id to different content
-            // would apply someone else's bonus rather than none at all - a
-            // wrong number is harder to notice than a missing one (design 5.2).
+            // A slot THIS content has already had, holding exactly these
+            // effects, is revived rather than duplicated. RefreshContent has
+            // always matched before taking a new generation; this path had no
+            // such check, so every route that goes through a tombstone and back
+            // burned a slot. Measured 2026-09-14 (7.2 #23b): turning a costume
+            // mod off and on again left
+            //     18 gen0 tomb  000802:...  mag 175  cost 2199.901123046875
+            //     19 gen0 live  000802:...  mag 175  cost 2199.901123046875
+            // identical to the last bit, one slot poorer, with nothing to stop
+            // the next toggle doing it again. Slots are never handed to other
+            // content (5.2), so one burned this way is burned for good.
+            const auto wanted = EffectsJson(effects);
+            for (int i = 0; i < kPoolSize; ++i) {
+                auto& e = g_slots[static_cast<std::size_t>(i)];
+                if (!e || e->invalid || e->content != a_contentId) {
+                    continue;
+                }
+                if (EffectsJson(e->effects) != wanted) {
+                    continue;
+                }
+                const bool revived = e->tombstone;
+                e->tombstone = false;
+                g_byContent[a_contentId] = i;
+                if (revived) {
+                    SaveRegistry();
+                    SKSE::log::info("abilities: {} is worth what slot {} (gen{}) already holds - "
+                                    "reviving it, no new slot taken",
+                        a_contentId, i, e->generation);
+                }
+                return PoolSpell(i);
+            }
+
+            // Monotonic: never reuse a slot for DIFFERENT content, not even a
+            // tombstoned one. An old save can still name it, and handing that id
+            // to other content would apply someone else's bonus rather than none
+            // at all - a wrong number is harder to notice than a missing one
+            // (design 5.2). The revival above is the same content at the same
+            // value, which is the one case that cannot be mistaken for another.
             int slot = -1;
             for (int i = 0; i < kPoolSize; ++i) {
                 if (!g_slots[static_cast<std::size_t>(i)]) {
