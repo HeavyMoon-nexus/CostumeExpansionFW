@@ -1,17 +1,32 @@
 # Changelog
 
-## v1.6.2.3 (unreleased)
+## v1.6.3 (unreleased)
 
-Boxes and published costumes have been handing out the wrong numbers. This
-release is ten separate reasons why, found by tracing a +180 Fortify Health on
-a character who was wearing nothing at all. Three of them were what that bonus
-was actually made of; the other seven turned up in the sweep that followed, and
-they are here because it is not worth asking you to update again for each one.
+Quit Skyrim while wearing a box and the bonus that box was giving you could
+stay on your character permanently. It happened once per session, every session,
+and it added up. The +180 Fortify Health that started this work was three
+sessions of one box.
 
-**This is still an MCM release**, and everything in 1.6.2.1 and 1.6.2.2 is here
-too. The MCM is still going, but later than those two releases said: it goes in
-1.6.4, not 1.6.3. 1.6.3 rebuilds how enchantment passthrough works, and that is
-enough for one release.
+That is fixed, and fixing it meant replacing how enchantment passthrough works
+rather than patching it. The old mechanism built a spell while the game was
+running. A spell built that way does not exist on the next launch, so your save
+drops the active effect that named it without ever ending it, and the number it
+added stays with nothing able to take it back off. No amount of care inside that
+approach avoids this - the spell has to still be there when the save is read.
+
+So the spells are pre-made now. A new plugin ships 1,024 empty ones and CEF
+fills them in from a small file it keeps next to your settings, before your save
+is loaded. That ordering is the whole fix.
+
+**The new plugin is optional, but the feature needs it.** The installer asks.
+Leave it unticked and your costumes look exactly the same; they just carry no
+stats, and CEF says so instead of pretending. It is a normal ESP rather than an
+ESL, so it costs one of your 254 plugin slots. That is the price of a spell that
+is still there next launch.
+
+Everything from 1.6.2.1, 1.6.2.2 and the unreleased 1.6.2.3 is here as well.
+1.6.2.3 never shipped on its own, so its fixes are listed below rather than
+referred to. **This is still an MCM release**; the MCM goes in 1.6.4.
 Nothing you have set up changes: boxes, presets and settings live in
 `CEF_settings.json` and in your save, not in the menu. If you are on VR, SKSE
 Menu Framework needs
@@ -21,9 +36,8 @@ Menu Framework needs
 
 - **Two pieces with the same enchantment were worth one.** A box holding two
   Imperial cuirasses, a heavy one and a light one carrying the same +40 Fortify
-  Health, gave you +40. CEF built both effects and the engine made a single
-  active effect out of them, because two entirely identical effects inside one
-  spell collapse into one.
+  Health, gave you +40. CEF put both effects in one spell, and two entirely
+  identical effects inside one spell collapse into one.
 
   This was measured rather than assumed. Two pieces with Resist Fire 40 behave
   the same way, so it is not about Health. Two effects of the same kind with
@@ -31,17 +45,13 @@ Menu Framework needs
   identical effects in *different* spells both apply. So what the engine keys
   on is the whole content of an effect, within one spell.
 
-  CEF now folds its effect list before the engine sees it, grouping by
-  everything that key looks at, and emits one effect per group. For the
-  fortify-style effects a group's magnitudes are added, which is what wearing
-  those pieces for real gives you. For anything else, such as waterbreathing,
-  invisibility, or an effect driven by a script, a magnitude is not an amount
-  you can add up, so the largest is kept and the log names what was folded.
+  Each piece has its own ability now, so nothing shares a spell and there is
+  nothing left to collapse. Two Resist Fire 40 pieces read +80, and two
+  different amounts of the same thing still add up the way they always did.
 
-  "+100 always" and "+100 while sneaking" are not the same effect, and both
-  still apply. That is what the condition half of the grouping is for, and the
-  conditions are compared field by field rather than as raw bytes, because two
-  identical conditions do not look identical in memory.
+  This is one of the places where replacing the mechanism was simpler than
+  fixing it: the 1.6.2.3 version of this fix folded the effect list by hand
+  before the engine could see it, and that code is gone.
 
 - **Stat passthrough asked whether your character could wear the piece.**
   Deciding what a captured piece was worth went through the same filter that
@@ -128,11 +138,22 @@ Menu Framework needs
   there you are about to delete the mod, and a record riding the next co-save
   is the worse outcome.
 
-- **A box with token distribution turned off still granted its enchantments.**
-  Turning "Distribute token" off zeroes the box's armor, weight and keywords on
-  the token. The ability ignored the switch and only asked whether the token
-  was worn, so equipping that token by any other means handed out the
-  enchantments while the other three channels read zero.
+- **"Distribute token" and "Wear" contradicted each other.** Turning
+  "Distribute token" off takes the box's token off you, removes every copy and
+  zeroes its armor, weight and keywords. The enchantments ignored the switch and
+  only asked whether the token was worn, so a token equipped by any other means
+  paid out while the other three channels read zero.
+
+  Making the enchantments respect the switch exposed the other half of it.
+  "Wear (show contents)" added the token straight back and equipped it without
+  looking at the switch at all, so CEF was putting a token on you and then
+  refusing to honour it, from two checkboxes in the same row of the same panel.
+  Wearing a box is a request to use it and you cannot wear what you were not
+  given, so wearing one now turns its distribution back on. The checkbox is in
+  the same row, so you see it happen.
+
+  A token worn while distribution is off - from an old save, or from the
+  console - still pays nothing, which is what the switch is for.
 
 - **Two NPC paths granted abilities the master switch had turned off.** Putting
   a published costume on an NPC from the UI passed an unconditional yes to the
@@ -141,6 +162,42 @@ Menu Framework needs
   runs at load checked the master switch but not the NPC add-on, and a co-save
   restores publish bindings whether the add-on is there or not, so without the
   add-on that pass still granted from them.
+
+The four below are new in 1.6.3. They were found by the regression pass over
+the rebuilt mechanism, and every one of them sat in a place the ordinary tests
+walked straight past.
+
+- **A piece whose enchantment changed paid twice.** When a costume's enchantment
+  is not what it was - the mod updated, you re-enchanted it, you switched to a
+  character whose copy is tempered differently - CEF gives it a new ability and
+  keeps the old one, because a save may still be holding the old one and it has
+  to keep resolving to the same numbers until it comes off. The pass that takes
+  abilities off an actor only walked the current ones, so the old one was never
+  visited again: it stayed on you, paying, and taking the box off could not
+  remove it either. Measured at +583 Health where +333 was due.
+
+- **Turning a box back on did nothing until you re-equipped its token.** The
+  "Distribute token" switch decides whether a worn box pays its enchantments
+  through, so flipping it changes what should be granted right then. It wrote
+  the setting and stopped. With the token already on, five minutes passed
+  between ticking the box back on and the bonus appearing, and what finally did
+  it was taking the token off and putting it on again.
+
+- **Disabling a costume's mod made its conditional enchantments unconditional.**
+  CEF keeps a flat copy of what each piece was worth, for the cases where the
+  piece itself cannot be reached. A flat copy cannot carry conditions. With the
+  mod switched off there was nothing else left to read, so "+250 while sneaking"
+  became "+250, always" - for a costume that was no longer in the game at all,
+  paying more than it ever had. A piece whose plugin is not loaded now
+  contributes nothing, which is what it already did when it happened to have no
+  flat copy.
+
+- **Turning a costume mod off and on again used up ability slots.** Coming back
+  from "this piece passes no stats through any more" took a fresh slot every
+  time, even though the identical one was sitting there unused. Slots are never
+  handed to different content, so each round trip cost one for good. The same
+  check that already existed elsewhere now runs here too, and a piece that comes
+  back to a value it has held before goes back to the slot it had.
 
 ### Added
 
@@ -188,21 +245,53 @@ Menu Framework needs
   look at it and the evidence is gone. If you are asked for a log after a crash,
   the one worth attaching is usually `prev1`.
 
+- **How many ability slots are left.** SKSE Menu Framework, Main page: whether
+  passthrough is working, and "N in use, M kept for old saves, K free of 1024".
+  A slot is never handed to different content, so nothing frees itself and the
+  number only goes one way. "The pool is full" would arrive at the point where
+  the only thing left to say is that your next costume keeps its looks and loses
+  its stats, which is too late to be useful, so it says something while there is
+  still room. A costume whose enchantment changes takes a new slot and keeps the
+  old one, so a piece you re-enchant or temper often is worth more than one - in
+  ordinary use you will not come near 1,024, but that is why the count is not
+  simply the number of costumes you own.
+
+  `cef abilities` prints the same, `cef abilities list` prints every slot.
+
+- **CEF says when passthrough is broken, instead of only writing it down.**
+  Three states it used to keep to itself. The plugin that holds the spells is
+  missing while your save already refers to it; the file CEF keeps its
+  assignments in has been edited or truncated; a costume's magic effect comes
+  from a plugin that is no longer loaded. Each of these leaves a bonus stuck on
+  you that nothing can take off, and none of them showed up anywhere you would
+  look. You get a message box now, once, saying which it is and what to do.
+
+  For the two where a bonus is stuck, the instruction is **do not save**. The
+  save on disk is still fine; loading it without the plugin is what strands the
+  number, and saving over it is what makes that permanent, with nothing left
+  anywhere to say what produced it. Quit, put the plugin back, load again, and
+  it comes off on its own.
+
+  `cef abilities restore` puts back the last good copy of the assignments file
+  if that is what went wrong. It keeps the broken one beside it.
+
 ### Notes
 
-- **Bonuses left over from earlier sessions are not removed by this release.**
-  The ten fixes above stop new ones being created. They do not clean up what is
-  already in your save, and there is a separate defect still open that puts
-  them there: quit Skyrim while wearing a box, and the bonus that box was
-  giving you can stay on your character permanently. It happens once per
-  session, every session, and it adds up. The +180 this release started from
-  was three sessions of one box.
+- **Bonuses left over from earlier versions are still in your save.** This
+  release stops new ones happening. It cannot clean up what is already there,
+  because CEF cannot tell its own leftovers from a bonus another mod applied on
+  purpose, and guessing wrong would take away something you meant to have.
 
-  You can check with `player.getavinfo health`, or whatever the box fortifies,
-  and read the number next to `Perm` with every box taken off. If it is not
-  zero, `player.modav health -<that number>` cancels it. An NPC wearing a
-  published costume collects the same leftovers and they are much harder to
-  notice. Taking your boxes off before you quit avoids it.
+  It will tell you what it thinks they are. Load a save made before 1.6.3 and
+  CEF adds up what the old mechanism would have been applying, and shows it.
+  `cef abilities legacy` prints the same again with the explanation. Values from
+  conditional enchantments are listed separately, because whether one of those
+  was applying depends on what you were doing at the moment you saved.
+
+  To clear one: take every box off, read `player.getavinfo health` - or whatever
+  the box fortifies - and look at the number next to `Perm`. If it is not zero,
+  `player.modav health -<that number>` cancels it. An NPC wearing a published
+  costume collects the same leftovers and they are much harder to notice.
 
 ## v1.6.2.2 (2026-09-11)
 
