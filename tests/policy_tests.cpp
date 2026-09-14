@@ -1,11 +1,14 @@
-// Host-side unit tests for the PURE capture-policy layers (v1.3.2 review r2).
+// Host-side unit tests for the PURE capture-policy and token-identity layers.
 // No CommonLib/RE - builds and runs on the build host. Covers the "policy"
-// rows of MARA_GUARD_ADVERSARIAL_REVIEW.md par.6.1: name exact/prefix, plugin
+// rows of MARA_GUARD_ADVERSARIAL_REVIEW.md par.6.1 (name exact/prefix, plugin
 // prefix, explicit id, defaults on/off, ASCII case, malformed ids, empty
-// plugin, and the never-truncate colon-id formatter. Form-level layers
-// (IsDynamicForm / record flags / keywords) need RE and stay in-game checks.
+// plugin, the never-truncate colon-id formatter) and the v1.6.4 token identity
+// rules (TH1-TH14 of PLAN_2026-09-15_164_token_pools.md). Form-level layers
+// (does it exist, is it an ARMO, which file defined it) need RE and stay
+// in-game checks.
 
 #include "CapturePolicy.h"
+#include "TokenIdentity.h"
 
 #include <cstdio>
 #include <string>
@@ -26,6 +29,105 @@ namespace
 }
 
 #define CHECK(expr) Check((expr), #expr)
+
+// v1.6.4 token identity (TH1-TH14). The two starred groups are the regression
+// guards: they fail if somebody narrows the BROAD predicate, or widens the
+// NARROW one to include the NPC add-on.
+namespace
+{
+    void TokenIdentityChecks()
+    {
+        using namespace CostumeFW::tokenid;
+
+        // TH1 - the core plugin defines generation 0's box tokens.
+        CHECK(IsBoxTokenColonId("000801:CostumeFW.esp"));
+        // TH2 - the publish tokens and the NPC persist carriers are NOT box
+        // tokens, even though they live in a plugin that passes the broad test.
+        CHECK(!IsBoxTokenColonId("000800:CostumeFW_NPC.esp"));
+        CHECK(!IsBoxTokenColonId("000810:CostumeFW_NPC.esp"));
+        // TH3 - neither is an ability pool.
+        CHECK(!IsBoxTokenColonId("000801:CostumeFW_Abilities.esp"));
+        CHECK(!IsBoxTokenColonId("000801:CostumeFW_Abilities2.esp"));
+        // TH4 / TH5 / TH8 - a malformed id is not a CEF id.
+        CHECK(!IsBoxTokenColonId("XYZ:CostumeFW.esp"));
+        CHECK(!IsBoxTokenColonId("801junk:CostumeFW.esp"));
+        CHECK(!IsBoxTokenColonId(":CostumeFW.esp"));
+        CHECK(!IsBoxTokenColonId(""));
+        CHECK(!IsBoxTokenColonId("CostumeFW.esp"));  // no colon
+        CHECK(!IsCefColonId("801junk:CostumeFW.esp"));
+        // TH6 - casing does not change which form an id names, so it must not
+        // change the answer; canonicalising rewrites it to the official spelling.
+        CHECK(IsBoxTokenColonId("000801:costumefw.esp"));
+        {
+            std::string id = "000801:costumefw.esp";
+            CHECK(CanonicalizeCefColonId(id) && id == "000801:CostumeFW.esp");
+            id = "801:COSTUMEFW_BOXPOOL2.ESP";
+            CHECK(CanonicalizeCefColonId(id) && id == "000801:CostumeFW_BoxPool2.esp");
+            id = "000801:CostumeFW.esp";
+            CHECK(!CanonicalizeCefColonId(id) && id == "000801:CostumeFW.esp");
+            id = "000801:SomeCostume.esp";  // not ours: left alone
+            CHECK(!CanonicalizeCefColonId(id) && id == "000801:SomeCostume.esp");
+        }
+        // TH7 - the NPC add-on in any casing: broad yes, narrow no.
+        CHECK(IsCefColonId("000800:costumefw_npc.esp"));
+        CHECK(!IsBoxTokenColonId("000800:costumefw_npc.esp"));
+        // TH9 - the narrow test is an allowlist, not a prefix match. A dev patch
+        // that is not registered does not silently join the pool either.
+        CHECK(!IsBoxTokenColonId("000801:CostumeFWX.esp"));
+        CHECK(!IsBoxTokenColonId("000801:CostumeFW_VanillaSlots_001.esp"));
+        CHECK(!IsBoxTokenColonId("000801:SomeCostume.esp"));
+
+        // TH10 - the suffix is a NUMBER, so BoxPool10 comes after BoxPool2.
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool1.esp") == 1);
+        CHECK(BoxPoolGeneration("costumefw_boxpool10.esp") == 10);
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool2.esp") == 2);
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool10.esp") >
+              BoxPoolGeneration("CostumeFW_BoxPool2.esp"));
+        CHECK(IsBoxTokenPlugin("CostumeFW_BoxPool1.esp"));
+        // TH11 - one generation, one spelling.
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool.esp") == 0);
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool0.esp") == 0);
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool01.esp") == 0);
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool1.esm") == 0);
+        CHECK(BoxPoolGeneration("CostumeFW_BoxPool1x.esp") == 0);
+        CHECK(!IsBoxTokenPlugin("CostumeFW_BoxPool.esp"));
+        // TH12 - the ability pool's generation 1 carries an exception name.
+        CHECK(AbilityPoolGeneration("CostumeFW_Abilities.esp") == 1);
+        CHECK(AbilityPoolGeneration("CostumeFW_Abilities2.esp") == 2);
+        CHECK(AbilityPoolGeneration("costumefw_abilities3.esp") == 3);
+        CHECK(AbilityPoolGeneration("CostumeFW_Abilities1.esp") == 0);
+        CHECK(AbilityPoolGeneration("CostumeFW_BoxPool2.esp") == 0);
+        CHECK(AbilityPoolPluginName(1) == "CostumeFW_Abilities.esp");
+        CHECK(AbilityPoolPluginName(2) == "CostumeFW_Abilities2.esp");
+        CHECK(BoxPoolPluginName(3) == "CostumeFW_BoxPool3.esp");
+        CHECK(BoxPoolPluginName(0).empty());
+
+        // TH13 * - the BROAD predicate must stay broad. Every CEF record has to
+        // keep failing the capture pickers and the box-content gate, publish
+        // tokens included; narrowing this is how a publish token becomes content.
+        CHECK(IsCefColonId("000801:CostumeFW.esp"));
+        CHECK(IsCefColonId("000800:CostumeFW_NPC.esp"));
+        CHECK(IsCefColonId("000810:CostumeFW_NPC.esp"));
+        CHECK(IsCefColonId("000801:CostumeFW_Abilities.esp"));
+        CHECK(IsCefColonId("000801:CostumeFW_Abilities2.esp"));
+        CHECK(IsCefColonId("000801:CostumeFW_BoxPool1.esp"));
+        CHECK(IsCefColonId("000801:CostumeFW_VanillaSlots_001.esp"));
+        CHECK(!IsCefColonId("000801:SomeCostume.esp"));
+
+        // TH14 * - the NARROW predicate must stay narrow. The NPC add-on in this
+        // allowlist is the exact defect this layer exists to prevent.
+        CHECK(IsBoxTokenPlugin("CostumeFW.esp"));
+        CHECK(IsBoxTokenPlugin("costumefw.esp"));
+        CHECK(IsBoxTokenPlugin("CostumeFW_BoxPool1.esp"));
+        CHECK(IsBoxTokenPlugin("CostumeFW_BoxPool9.esp"));
+        CHECK(!IsBoxTokenPlugin("CostumeFW_NPC.esp"));
+        CHECK(!IsBoxTokenPlugin("CostumeFW_Abilities.esp"));
+        CHECK(!IsBoxTokenPlugin("CostumeFW_Abilities2.esp"));
+        CHECK(!IsBoxTokenPlugin("CostumeFWX.esp"));
+        CHECK(!IsBoxTokenPlugin("CostumeFW_VanillaSlots_001.esp"));
+        CHECK(!IsBoxTokenPlugin(""));
+    }
+}
 
 int main()
 {
@@ -118,9 +220,20 @@ int main()
     id = "garbage";
     CHECK(!CanonicalizeColonIdStr(id) && id == "garbage");               // unparseable untouched
 
+    // --- ParseColonId is strict about the local id (v1.6.4) ------------------
+    // stoul eats the longest valid prefix and stops, so this came back as a
+    // clean 0x801 with the junk silently dropped. A border value has to be
+    // refused instead of reinterpreted (TH8).
+    CHECK(!ParseColonId("801junk:Plugin.esp", local, plugin));
+    CHECK(!ParseColonId(":Plugin.esp", local, plugin));       // no digits at all
+    CHECK(!ParseColonId("", local, plugin));
+    CHECK(!ParseColonId("0080 1:Plugin.esp", local, plugin));  // embedded space
+
     // --- Shipped defaults are what the docs claim ----------------------------
     CHECK(DefaultBlockNames().size() == 1 && DefaultBlockNames()[0] == "CORE Carrier");
     CHECK(DefaultBlockPlugins().size() == 1 && DefaultBlockPlugins()[0] == "MARA");
+
+    TokenIdentityChecks();
 
     std::printf("policy_tests: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

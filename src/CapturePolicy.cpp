@@ -1,5 +1,6 @@
 #include "CapturePolicy.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -101,11 +102,30 @@ namespace CostumeFW::policy
         if (colon == std::string_view::npos) {
             return false;
         }
-        try {
-            a_localOut = static_cast<std::uint32_t>(
-                std::stoul(std::string(a_id.substr(0, colon)), nullptr, 16));
-        } catch (...) {
+        const auto digits = a_id.substr(0, colon);
+        // EVERY character before the colon must be a hex digit, and there must be
+        // at least one. std::stoul alone is too permissive here: it consumes the
+        // longest valid prefix and stops, so "801junk:Plugin.esp" came back as a
+        // clean 0x801 and the junk vanished without a word. The id is a border
+        // value (settings file, preset, console, another mod's call), so a
+        // malformed one has to be refused rather than silently reinterpreted.
+        //
+        // What stays accepted, because both are real: a plugin part that is EMPTY
+        // (a dynamic 0xFF-range form has no source file), and fewer than 6 digits
+        // ("801:Plugin.esp" - FormatColonId's %06X is a minimum width, not a
+        // requirement on input).
+        if (digits.empty()) {
             return false;
+        }
+        for (const char c : digits) {
+            if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                return false;
+            }
+        }
+        try {
+            a_localOut = static_cast<std::uint32_t>(std::stoul(std::string(digits), nullptr, 16));
+        } catch (...) {
+            return false;  // out_of_range: more digits than a FormID can hold
         }
         a_pluginOut = std::string(a_id.substr(colon + 1));
         return true;

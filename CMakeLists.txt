@@ -50,7 +50,7 @@ endif()
 option(CEF_BUILD_POLICY_TESTS "Build the policy_tests.exe host-side unit tests" ON)
 if(CEF_BUILD_POLICY_TESTS)
     include(CTest)
-    add_executable(policy_tests tests/policy_tests.cpp src/CapturePolicy.cpp)
+    add_executable(policy_tests tests/policy_tests.cpp src/CapturePolicy.cpp src/TokenIdentity.cpp)
     target_include_directories(policy_tests PRIVATE src)
     target_compile_features(policy_tests PRIVATE cxx_std_23)
     add_test(NAME capture_policy COMMAND policy_tests)
@@ -64,6 +64,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
     src/Papyrus.cpp
     src/BoxStore.cpp
     src/CapturePolicy.cpp
+    src/TokenIdentity.cpp
     src/PublishStore.cpp
     src/BodyMorph.cpp
     src/Preset.cpp
