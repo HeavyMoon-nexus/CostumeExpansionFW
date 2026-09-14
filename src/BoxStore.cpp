@@ -633,13 +633,13 @@ namespace CostumeFW
         void RecordCustody(const std::string& a_id, const char* a_event);  // fwd (below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
-        // Inputs for the carrier `sync` (src/nifcarrier): per box, the resolved
-        // worn-NIF path
-        // of every content. sync rebuilds Box<slot>_carrier.nif (+ merged physics
-        // XML when 2+ contents carry SMP) from this; the per-token ARMA points at
-        // that carrier, so equipping the token makes FSMP grow the physics bones
-        // CEF's rebind then binds the injected meshes to. Written on every box-def
-        // persist, skipped when nothing changed (keeps sync's hash-skip effective).
+        // Inputs for the carrier `sync` (src/nifcarrier): per box, its carrier
+        // key and the resolved worn-NIF path of every content. sync rebuilds
+        // <carrierKey>_carrier.nif (+ merged physics XML when 2+ contents carry
+        // SMP) from this; the per-token ARMA points at that carrier, so equipping
+        // the token makes FSMP grow the physics bones CEF's rebind then binds the
+        // injected meshes to. Written on every box-def persist, skipped when
+        // nothing changed (keeps sync's hash-skip effective).
         constexpr const char* kManifestPath = "Data\\SKSE\\Plugins\\CEF_carrier_manifest.json";
 
         void ScheduleAutoSync();  // fwd (defined below)
@@ -664,7 +664,11 @@ namespace CostumeFW
             // injection. No private ARMO->ARMA walk is allowed here.
             const auto pol = CapturePolicySnapshot();
             nlohmann::json doc;
-            doc["version"] = 1;
+            // 2 (v1.6.4): every box entry carries a "carrierKey". A version-1
+            // manifest has only "slot", and the builder reads generation 0's
+            // key off it - "Box<slot>" is exactly what version 1 was already
+            // producing, so the fallback is byte-exact.
+            doc["version"] = 2;
             const auto resolveContent = [&](const std::string& id) -> nlohmann::json {
                 std::string nif;
                 if (!ResolveAdmittedModelPath(
@@ -690,9 +694,21 @@ namespace CostumeFW
             };
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
+                // Several boxes share one biped slot from v1.6.4 on, so the slot
+                // cannot name the artifacts any more - they would overwrite each
+                // other's NIF, XML, hash and revision pool. The carrier key names
+                // them, and a box whose token does not resolve has none: it used
+                // to go in as slot 0 and have the builder make a Box0 carrier
+                // nothing could ever wear.
+                const int slot = SlotNumberOf(ResolveArmo(b.token));
+                const std::string carrierKey = tokenid::CarrierKeyFor(b.token, slot);
+                if (carrierKey.empty()) {
+                    continue;
+                }
                 nlohmann::json jb;
-                jb["slot"] = SlotNumberOf(ResolveArmo(b.token));
+                jb["slot"] = slot;
                 jb["token"] = b.token;
+                jb["carrierKey"] = carrierKey;
                 auto contents = nlohmann::json::array();
                 for (const auto& id : b.contents) {
                     if (auto c = resolveContent(id); !c.is_null()) {
@@ -1033,11 +1049,24 @@ namespace CostumeFW
                     continue;
                 }
                 const int slot = SlotNumberOf(armoA);
-                const auto key = std::to_string(slot);
-                if (!doc.contains(key)) {
+                const std::string key = tokenid::CarrierKeyFor(b.token, slot);
+                if (key.empty()) {
+                    continue;  // not a box token: nothing of ours to repoint
+                }
+                auto entry = doc.find(key);
+                if (entry == doc.end() && key == "Box" + std::to_string(slot)) {
+                    // A carriers.json written before v1.6.4 keys generation 0 by
+                    // the bare slot number. The next sync rewrites it under the
+                    // carrier key; until then read the old key, or every box
+                    // would drop back to the ESP-default (stale) carrier for a
+                    // session. Generation 0 only - a pool token must never pick
+                    // up the generation-0 entry that happens to share its slot.
+                    entry = doc.find(std::to_string(slot));
+                }
+                if (entry == doc.end() || !entry->is_object()) {
                     continue;
                 }
-                const std::string file = doc[key].value("file", "");
+                const std::string file = entry->value("file", "");
                 if (file.empty()) {
                     continue;
                 }
@@ -1049,7 +1078,7 @@ namespace CostumeFW
                 // relative reads.
                 if (!CarrierFileOnDisk(file)) {
                     SKSE::log::warn(
-                        "carrier override: slot {} carrier '{}' missing/invalid on disk - keeping ESP default",
+                        "carrier override: {} carrier '{}' missing/invalid on disk - keeping ESP default",
                         key, file);
                     continue;
                 }
@@ -1059,7 +1088,7 @@ namespace CostumeFW
                 // equip queue and can't be automated reliably). A manual re-equip reloads
                 // cleanly once FSMP has settled.
                 if (RepointCarrier(armoA, file)) {
-                    SKSE::log::info("carrier override: slot {} token '{}' -> {} (re-equip to apply)",
+                    SKSE::log::info("carrier override: {} token '{}' -> {} (re-equip to apply)",
                         key, b.token, file);
                     anyChanged = true;
                 }
@@ -2457,7 +2486,11 @@ namespace CostumeFW
         }
         for (const auto& b : g_boxes) {
             const int slot = SlotNumberOf(ResolveArmo(b.token));
-            std::string line = "box " + std::to_string(slot) + ": " +
+            // The carrier key, not the slot: a slot can hold several boxes now,
+            // and "box 55" alone would name three of them the same.
+            const std::string key = tokenid::CarrierKeyFor(b.token, slot);
+            std::string line = "box " + std::to_string(slot) + " [" +
+                               (key.empty() ? b.token : key) + "]: " +
                                std::to_string(b.contents.size()) + " item(s)";
             if (!b.enabled) {
                 line += ", disabled";
@@ -2466,10 +2499,15 @@ namespace CostumeFW
             if (player && tf && player->GetWornArmor(tf)) {
                 line += ", WORN";
             }
-            const std::string key = std::to_string(slot);
-            if (cj.contains(key) && cj[key].is_object()) {
-                line += ", carrier r" + std::to_string(cj[key].value("rev", 0));
-                const std::string file = cj[key].value("file", std::string{});
+            // Same pre-1.6.4 fallback as ApplyCarrierOverridesImpl, so the
+            // report agrees with the carrier the token is actually pointed at.
+            auto entry = key.empty() ? cj.end() : cj.find(key);
+            if (entry == cj.end() && key == "Box" + std::to_string(slot)) {
+                entry = cj.find(std::to_string(slot));
+            }
+            if (entry != cj.end() && entry->is_object()) {
+                line += ", carrier r" + std::to_string(entry->value("rev", 0));
+                const std::string file = entry->value("file", std::string{});
                 if (!file.empty() && !CarrierFileOnDisk(file)) {
                     line += " (FILE MISSING)";
                 }

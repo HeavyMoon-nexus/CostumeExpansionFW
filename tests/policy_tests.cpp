@@ -126,6 +126,37 @@ namespace
         CHECK(!IsBoxTokenPlugin("CostumeFWX.esp"));
         CHECK(!IsBoxTokenPlugin("CostumeFW_VanillaSlots_001.esp"));
         CHECK(!IsBoxTokenPlugin(""));
+
+        // --- carrier keys (v1.6.4 step 5) -----------------------------------
+        // The name every carrier artifact of a token is built under. Two boxes
+        // on one slot must never produce the same key, and generation 0 must
+        // keep producing the name its shipped ARMA already points at.
+        CHECK(CarrierKeyFor("000811:CostumeFW.esp", 55) == "Box55");
+        CHECK(CarrierKeyFor("000811:costumefw.esp", 31) == "Box31");  // casing is not identity
+        CHECK(CarrierKeyFor("000800:CostumeFW_BoxPool1.esp", 55) == "BP01_000800");
+        CHECK(CarrierKeyFor("800:CostumeFW_BoxPool1.esp", 55) == "BP01_000800");  // short hex
+        CHECK(CarrierKeyFor("000800:costumefw_boxpool1.esp", 55) == "BP01_000800");
+        CHECK(CarrierKeyFor("000800:CostumeFW_BoxPool10.esp", 55) == "BP10_000800");
+        // The slot is generation 0's alone: a pool token's key does not move
+        // when the slot does, and the same local id in two generations gives
+        // two keys (the whole point of putting the generation in the name).
+        CHECK(CarrierKeyFor("000800:CostumeFW_BoxPool1.esp", 61) == "BP01_000800");
+        CHECK(CarrierKeyFor("000800:CostumeFW_BoxPool1.esp", 0) == "BP01_000800");
+        CHECK(CarrierKeyFor("000800:CostumeFW_BoxPool2.esp", 55) !=
+              CarrierKeyFor("000800:CostumeFW_BoxPool1.esp", 55));
+        // Three boxes sharing slot 55, three distinct namespaces.
+        CHECK(CarrierKeyFor("000801:CostumeFW_BoxPool1.esp", 55) !=
+              CarrierKeyFor("000800:CostumeFW_BoxPool1.esp", 55));
+        // Not a box token, or no slot to name generation 0 by -> no key at all,
+        // and the caller leaves the box out of the manifest.
+        CHECK(CarrierKeyFor("000800:CostumeFW_NPC.esp", 55).empty());
+        CHECK(CarrierKeyFor("000801:CostumeFW_Abilities.esp", 55).empty());
+        CHECK(CarrierKeyFor("000801:SomeCostume.esp", 55).empty());
+        CHECK(CarrierKeyFor("801junk:CostumeFW.esp", 55).empty());
+        CHECK(CarrierKeyFor("", 55).empty());
+        CHECK(CarrierKeyFor("000811:CostumeFW.esp", 0).empty());
+        CHECK(CarrierKeyFor("000811:CostumeFW.esp", 29).empty());
+        CHECK(CarrierKeyFor("000811:CostumeFW.esp", 62).empty());
     }
 }
 

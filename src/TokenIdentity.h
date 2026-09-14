@@ -84,6 +84,30 @@ namespace CostumeFW::tokenid
     [[nodiscard]] bool IsCefColonId(std::string_view a_id);       // BROAD
     [[nodiscard]] bool IsBoxTokenColonId(std::string_view a_id);  // NARROW
 
+    // --- carrier namespace ---------------------------------------------------
+    // Every artifact the carrier builder makes for a box - the NIF, the merged
+    // physics XML, the eight rotation slots, the hash, the carriers.json entry -
+    // is named after that box token's CARRIER KEY. Until 1.6.4 the name was the
+    // biped slot number, which was unique only while one slot held one box.
+    //
+    //   generation 0    "Box55"        the shipped spelling, kept as an alias.
+    //                                  The 27 generation-0 ARMA still carry a
+    //                                  MOD2 pointing at Box55_carrier.nif, and
+    //                                  ApplyCarrierOverridesImpl falls back to
+    //                                  that ESP default whenever carriers.json
+    //                                  has nothing for the box - renaming the
+    //                                  files would break the fallback.
+    //   generation >= 1 "BP01_000800"  BP<generation, 2+ digits>_<local id, 6 hex>.
+    //                                  The local id alone repeats in every
+    //                                  generation, so the generation is in the key.
+    //
+    // Must stay in lockstep with tools/espmerge's CarrierKey(), which stamps the
+    // same string into every pool ARMA's model path and into its KID keyword.
+    //
+    // a_slot is read for generation 0 only. Empty when a_colonId is not a box
+    // token, or when generation 0's slot is not a biped slot (30-61).
+    [[nodiscard]] std::string CarrierKeyFor(std::string_view a_colonId, int a_slot);
+
     // Rewrite a CEF colon-id into its canonical form: %06X local id + the plugin
     // name in official casing. True when a_id changed. A non-CEF or unparseable
     // id is left exactly as it was (the caller's resolver rejects it), so this is

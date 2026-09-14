@@ -3,6 +3,7 @@
 #include "CapturePolicy.h"  // EqualsCI / PrefixCI / ParseColonId / FormatColonId
 
 #include <cctype>
+#include <cstdio>
 
 namespace CostumeFW::tokenid
 {
@@ -109,6 +110,30 @@ namespace CostumeFW::tokenid
             return AbilityPoolPluginName(n);
         }
         return {};  // not one of ours (a dev patch included - it has no fixed casing here)
+    }
+
+    std::string CarrierKeyFor(std::string_view a_colonId, int a_slot)
+    {
+        std::uint32_t local = 0;
+        std::string plugin;
+        if (!policy::ParseColonId(a_colonId, local, plugin)) {
+            return {};
+        }
+        if (const int generation = BoxPoolGeneration(plugin); generation > 0) {
+            // %02d/%06X, byte for byte what tools/espmerge stamped into the
+            // pool ARMA's model path - the builder writes the file the ESP
+            // already names.
+            char buf[32]{};
+            std::snprintf(buf, sizeof(buf), "BP%02d_%06X", generation, local);
+            return buf;
+        }
+        if (!policy::EqualsCI(plugin, kCorePlugin)) {
+            return {};  // NPC add-on, ability pool, someone else's plugin
+        }
+        if (a_slot < 30 || a_slot > 61) {
+            return {};  // not a biped slot: the token does not resolve to one
+        }
+        return "Box" + std::to_string(a_slot);
     }
 
     bool IsCefColonId(std::string_view a_id)

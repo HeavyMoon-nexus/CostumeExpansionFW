@@ -1786,21 +1786,58 @@ namespace nifcarrier {
         // as C#; the digest VALUE differs from C#'s - timestamps use the C++
         // filesystem epoch - so the first in-proc run after a tool switch
         // rebuilds everything once).
-        std::string HashContents(const char* prefix, std::vector<SmpContent> smp)
+        //
+        // `salt` carries what the build is FOR, not just what it is built from
+        // (F17). The key used to be the files alone, so two things were invisible
+        // to it: the content's own id and namespace prefix (point a different
+        // ARMO at the same NIF and the rebuild was skipped, leaving the merged
+        // carrier isolated under the old prefix), and WHICH carrier was being
+        // built - which from v1.6.4 on is a per-token namespace rather than a
+        // per-slot one. Callers put the carrier key in the salt; the content id
+        // and prefix go in below.
+        std::string HashContents(const std::string& salt, std::vector<SmpContent> smp)
         {
             std::sort(smp.begin(), smp.end(),
                 [](const SmpContent& a, const SmpContent& b) { return a.nif.string() < b.nif.string(); });
-            std::string h = prefix;
+            std::string h = salt;
             for (const auto& s : smp) {
                 std::error_code ec;
                 const auto nlen = std::filesystem::file_size(s.nif, ec);
                 const auto ntime = std::filesystem::last_write_time(s.nif, ec).time_since_epoch().count();
                 const auto xlen = std::filesystem::file_size(s.xmlDisk, ec);
                 const auto xtime = std::filesystem::last_write_time(s.xmlDisk, ec).time_since_epoch().count();
-                h += s.nif.string() + "|" + std::to_string(nlen) + "|" + std::to_string(ntime) + "|" +
+                h += s.id + "|" + s.prefix + "|" +
+                     s.nif.string() + "|" + std::to_string(nlen) + "|" + std::to_string(ntime) + "|" +
                      s.xmlDisk.string() + "|" + std::to_string(xlen) + "|" + std::to_string(xtime) + "|";
             }
             return Sha256HexUpper(h);
+        }
+
+        // The carrier key names files, so it comes off the manifest through a
+        // gate: the manifest is a plain file on disk that anything can rewrite,
+        // and a key with a separator or a ".." in it would have the builder
+        // writing outside the mod. Matches what tools/espmerge and
+        // tokenid::CarrierKeyFor can produce (Box55 / BP01_000800), nothing wider,
+        // and keeps boxes out of the three stems the other pipelines own in the
+        // same folder - a box called "Persist" would overwrite the head carrier
+        // the facegen path depends on.
+        bool IsSafeCarrierKey(const std::string& key)
+        {
+            if (key.empty() || key.size() > 64) {
+                return false;
+            }
+            for (const unsigned char c : key) {
+                if (!std::isalnum(c) && c != '_') {
+                    return false;
+                }
+            }
+            for (const char* reserved : { "Persist", "Pub", "NpcPersist" }) {
+                const std::size_t n = std::strlen(reserved);
+                if (key.size() >= n && _strnicmp(key.c_str(), reserved, n) == 0) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         // Resolve the manifest's content list into validated SMP contents.
@@ -2065,8 +2102,9 @@ namespace nifcarrier {
                                    : std::nullopt;
             }
 
-            // p2: salt bump for the per-content namespace isolation.
-            const std::string hash = HashContents("p4|", smp);
+            // p5: salt bump for the per-content namespace isolation, then for
+            // the content id / prefix entering the key (F17).
+            const std::string hash = HashContents("p5|Persist|", smp);
             if (std::filesystem::exists(hashPath) && std::filesystem::exists(basePath) &&
                 ReadTextFile(hashPath) == hash && oldFragment) {
                 ensurePool();
@@ -2485,7 +2523,9 @@ namespace nifcarrier {
             std::filesystem::create_directories(tmpDir);
 
             const auto carriersJsonPath = carrierDir / "carriers.json";
-            std::map<std::string, std::pair<int, std::string>> carriers;  // slot -> (rev, file)
+            // carrier key -> (rev, file). Keyed by biped slot until v1.6.4; see
+            // the migration where it is read.
+            std::map<std::string, std::pair<int, std::string>> carriers;
             std::optional<std::string> persistFragment;
             nlohmann::json publishedCarriers = nlohmann::json::object();
             nlohmann::json npcPersistCarriers = nlohmann::json::object();
@@ -2505,7 +2545,23 @@ namespace nifcarrier {
                             if (it.value().is_object()) npcPersistCarriers = it.value();
                             continue;
                         }
-                        carriers[it.key()] = { it.value().at("rev").get<int>(),
+                        // v1.6.4 one-time migration: 1.6.3 keyed a box entry
+                        // by its biped slot ("55"). Generation 0's carrier key
+                        // is "Box55" and its FILES were deliberately left named
+                        // as they shipped, so the entry stays valid - only the
+                        // key moves. Written back under the new key below; the
+                        // old one is never generated again.
+                        std::string entryKey = it.key();
+                        if (!entryKey.empty() &&
+                            entryKey.find_first_not_of("0123456789") == std::string::npos) {
+                            entryKey = "Box" + entryKey;
+                        }
+                        if (!IsSafeCarrierKey(entryKey)) {
+                            Log(res.log, "[sync] carriers.json: dropping entry '%s' - not a carrier key",
+                                it.key().c_str());
+                            continue;
+                        }
+                        carriers[entryKey] = { it.value().at("rev").get<int>(),
                             it.value().at("file").get<std::string>() };
                     }
                 } catch (...) {
@@ -2523,15 +2579,32 @@ namespace nifcarrier {
             for (const auto& box : doc.at("boxes")) {
                 const int slot = box.at("slot").get<int>();
                 const std::string slotStr = std::to_string(slot);
+                // v1.6.4: artifacts are named after the box's CARRIER KEY, not
+                // its biped slot. Several boxes share a slot now, and slot-keyed
+                // names had them overwrite each other's carrier, XML, hash and
+                // revision pool. A pre-1.6.4 manifest carries no key: generation
+                // 0's key IS "Box<slot>", which is the name those manifests were
+                // already producing, so the fallback renames nothing.
+                std::string key = box.value("carrierKey", std::string{});
+                if (key.empty()) {
+                    key = "Box" + slotStr;
+                }
+                if (!IsSafeCarrierKey(key)) {
+                    Log(res.log, "[sync] slot %s: refusing carrier key '%s' - not a name we generate",
+                        slotStr.c_str(), key.c_str());
+                    ++res.failed;
+                    ++doneSteps;
+                    continue;
+                }
                 if (opts.progress) {
-                    opts.progress(("box " + slotStr).c_str(), doneSteps, totalSteps);
+                    opts.progress(("box " + key).c_str(), doneSteps, totalSteps);
                 }
                 ++doneSteps;
-                const std::string tag = "[sync] box" + slotStr + ":";
-                const auto carrierPath = carrierDir / ("Box" + slotStr + "_carrier.nif");
-                const auto mergedXmlDisk = xmlDir / ("Box" + slotStr + "_physics.xml");
-                const std::string mergedXmlRel = "meshes\\CostumeFW\\XML\\Box" + slotStr + "_physics.xml";
-                const auto hashPath = carrierDir / ("Box" + slotStr + "_carrier.hash");
+                const std::string tag = "[sync] " + key + ":";
+                const auto carrierPath = carrierDir / (key + "_carrier.nif");
+                const auto mergedXmlDisk = xmlDir / (key + "_physics.xml");
+                const std::string mergedXmlRel = "meshes\\CostumeFW\\XML\\" + key + "_physics.xml";
+                const auto hashPath = carrierDir / (key + "_carrier.hash");
 
                 // ROOT F [2294]: box["contents"] is a const operator[] - UB on a
                 // missing key. The persist loop guards with .contains; match it here.
@@ -2547,8 +2620,8 @@ namespace nifcarrier {
                         std::filesystem::exists(carrierPath) ? carrierPath : opts.emptyNif;
                     const bool haveSeed = !seed.empty() && std::filesystem::exists(seed);
                     for (int i = 0; i < kSlots; ++i) {
-                        const auto sn = carrierDir / ("Box" + slotStr + "_carrier_r" + std::to_string(i) + ".nif");
-                        const auto sx = xmlDir / ("Box" + slotStr + "_physics_r" + std::to_string(i) + ".xml");
+                        const auto sn = carrierDir / (key + "_carrier_r" + std::to_string(i) + ".nif");
+                        const auto sx = xmlDir / (key + "_physics_r" + std::to_string(i) + ".xml");
                         if (!std::filesystem::exists(sn) && haveSeed && CopyOverwrite(seed, sn)) {
                             ++poolCreated;
                         }
@@ -2556,8 +2629,8 @@ namespace nifcarrier {
                             ++poolCreated;
                         }
                     }
-                    if (!carriers.count(slotStr)) {
-                        carriers[slotStr] = { 0, "CostumeFW/Box" + slotStr + "_carrier.nif" };
+                    if (!carriers.count(key)) {
+                        carriers[key] = { 0, "CostumeFW/" + key + "_carrier.nif" };
                     }
                 };
 
@@ -2571,9 +2644,10 @@ namespace nifcarrier {
                     continue;
                 }
 
-                // v2: salt bump for the per-content namespace isolation - every
-                // existing multi-content carrier must rebuild with prefixes.
-                const std::string hash = HashContents("v4|", smp);
+                // v5: salt bump for the per-content namespace isolation, then
+                // for the carrier key and the content id / prefix entering the
+                // key (F17). Every existing carrier rebuilds once after each bump.
+                const std::string hash = HashContents("v5|" + key + "|", smp);
                 if (std::filesystem::exists(hashPath) && std::filesystem::exists(carrierPath) &&
                     ReadTextFile(hashPath) == hash) {
                     ensurePool();
@@ -2585,7 +2659,7 @@ namespace nifcarrier {
                 int rc = 0;
                 // Build into a temp, VALIDATE, then publish to the base
                 // carrier - a bad build never clobbers the last good carrier.
-                const auto outTmp = tmpDir / ("box" + slotStr + "_out.nif");
+                const auto outTmp = tmpDir / (key + "_out.nif");
                 if (smp.empty()) {
                     if (opts.emptyNif.empty() || !std::filesystem::exists(opts.emptyNif)) {
                         Log(res.log, "%s no SMP contents and no --empty template - skipped", tag.c_str());
@@ -2602,13 +2676,13 @@ namespace nifcarrier {
                     // same-named custom bones across contents alias otherwise),
                     // then merge, then zero-alpha the whole merged NIF, then
                     // point the extra data at the unified XML.
-                    if (!IsolateSmpSet(smp, tmpDir, "box" + slotStr, tag, res.log)) {
+                    if (!IsolateSmpSet(smp, tmpDir, key, tag, res.log)) {
                         Log(res.log, "%s FAILED namespace isolation", tag.c_str());
                         ++res.failed;
                         continue;
                     }
-                    const auto t1 = tmpDir / ("box" + slotStr + "_mg.nif");
-                    const auto t2 = tmpDir / ("box" + slotStr + "_za.nif");
+                    const auto t1 = tmpDir / (key + "_mg.nif");
+                    const auto t2 = tmpDir / (key + "_za.nif");
                     std::vector<std::filesystem::path> nifs;
                     std::vector<std::filesystem::path> xmls;
                     for (const auto& s : smp) {
@@ -2659,16 +2733,16 @@ namespace nifcarrier {
                 }
                 ensurePool();
 
-                const int rev = carriers.count(slotStr) ? carriers[slotStr].first + 1 : 1;
+                const int rev = carriers.count(key) ? carriers[key].first + 1 : 1;
                 const int slotIdx = rev % kSlots;
-                const auto slotNifDisk = carrierDir / ("Box" + slotStr + "_carrier_r" + std::to_string(slotIdx) + ".nif");
-                const std::string slotNifRel = "CostumeFW/Box" + slotStr + "_carrier_r" + std::to_string(slotIdx) + ".nif";
+                const auto slotNifDisk = carrierDir / (key + "_carrier_r" + std::to_string(slotIdx) + ".nif");
+                const std::string slotNifRel = "CostumeFW/" + key + "_carrier_r" + std::to_string(slotIdx) + ".nif";
                 if (smp.size() >= 2) {
                     // Slot carrier must reference the slot XML (FSMP may cache
                     // XML by path).
-                    const auto slotXmlDisk = xmlDir / ("Box" + slotStr + "_physics_r" + std::to_string(slotIdx) + ".xml");
+                    const auto slotXmlDisk = xmlDir / (key + "_physics_r" + std::to_string(slotIdx) + ".xml");
                     const std::string slotXmlRel =
-                        "meshes\\CostumeFW\\XML\\Box" + slotStr + "_physics_r" + std::to_string(slotIdx) + ".xml";
+                        "meshes\\CostumeFW\\XML\\" + key + "_physics_r" + std::to_string(slotIdx) + ".xml";
                     if (!CopyOverwrite(mergedXmlDisk, slotXmlDisk)) {
                         ++res.failed;
                         Log(res.log, "%s FAILED to publish slot xml - revision NOT bumped", tag.c_str());
@@ -2696,7 +2770,7 @@ namespace nifcarrier {
                     Log(res.log, "%s WARNING failed to write hash file - box rebuilds next run", tag.c_str());
                 }
                 ++res.built;
-                carriers[slotStr] = { rev, slotNifRel };
+                carriers[key] = { rev, slotNifRel };
                 Log(res.log, "%s rev=%d -> %s", tag.c_str(), rev, slotNifRel.c_str());
             }
 
@@ -2766,7 +2840,8 @@ namespace nifcarrier {
                         continue;
                     }
                     const std::string hash = Sha256HexUpper(
-                        "pub3|" + HashContents("m|", male) + "|" + HashContents("f|", female));
+                        "pub4|" + HashContents("m|" + stem + "|", male) + "|" +
+                        HashContents("f|" + stem + "|", female));
                     const auto hashPath = carrierDir / (stem + "_carrier.hash");
                     if (oldGood && std::filesystem::exists(hashPath) && ReadTextFile(hashPath) == hash) {
                         nextPublished[key] = oldEntry;
@@ -2876,8 +2951,9 @@ namespace nifcarrier {
                         ++res.skipped;
                         continue;
                     }
-                    const std::string hash = Sha256HexUpper("npr2|" +
-                        assignment.value("sex", std::string("m")) + "|" + HashContents("c|", contents));
+                    const std::string hash = Sha256HexUpper("npr3|" +
+                        assignment.value("sex", std::string("m")) + "|" +
+                        HashContents("c|" + stem + "|", contents));
                     const auto hashPath = carrierDir / (stem + "_carrier.hash");
                     if (oldGood && std::filesystem::exists(hashPath) && ReadTextFile(hashPath) == hash) {
                         nextNpc[key] = oldEntry;
