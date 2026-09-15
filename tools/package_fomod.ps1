@@ -46,6 +46,12 @@ Copy-Item "$repo\fomod\ModuleConfig.xml" "$stage\fomod\"
 $core = "$stage\core"
 Copy-Item "$mod\CostumeFW.esp" $core
 Copy-Item "$mod\CostumeFW_KID.ini" $core
+# BoxPool1 rides in core, not as an option (PLAN 4.3 / A11): a slot that can
+# hold only one box is what 1.6.4 exists to fix, and a box made on a pool token
+# goes dormant without it. Staged from the REPO, like the other tracked assets -
+# never from the deployed mod folder, which auto-sync rewrites.
+Copy-Item "$repo\package_assets\CostumeFW_BoxPool1.esp" $core
+Copy-Item "$repo\package_assets\CostumeFW_BoxPool1_KID.ini" $core
 Copy-Item "$repo\CostumeFW_NoCapture_KID.ini" $core
 New-Item -ItemType Directory -Force "$core\SEQ" | Out-Null
 Copy-Item "$mod\SEQ\CostumeFW.seq" "$core\SEQ\"

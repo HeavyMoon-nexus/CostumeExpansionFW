@@ -36,9 +36,26 @@ if ($LASTEXITCODE -ne 0) {
     throw "espmerge --verify-core FAILED (exit $LASTEXITCODE) on $mod\CostumeFW.esp - nothing staged."
 }
 
+# And the box pool, against the core it derives from. Every pool token inherits
+# generation 0's BOD2 mask and its 23-race armature list; a pool built against a
+# different core looks fine in a file listing and silently does nothing on a
+# custom race. Also checks the carrier keys are unique and the KID ini names
+# every token, because a duplicate key means two boxes overwriting each other's
+# meshes and a missing KID line means a tooltip that never appears.
+& dotnet run --project (Join-Path $PSScriptRoot 'espmerge\espmerge.csproj') --no-restore -- `
+    --verify-pool "$repo\package_assets\CostumeFW_BoxPool1.esp" "$mod\CostumeFW.esp"
+if ($LASTEXITCODE -ne 0) {
+    throw "espmerge --verify-pool FAILED (exit $LASTEXITCODE) on CostumeFW_BoxPool1.esp - nothing staged."
+}
+
 # --- from the deployed mod folder (explicit manifest) ---
 Copy-Item "$mod\CostumeFW.esp" $stage
 Copy-Item "$mod\CostumeFW_KID.ini" $stage
+# BoxPool1 and its KID ini are REPO-sourced (they have no deployed twin to
+# mirror - nothing in game rewrites them) and ship in core: a box made on one of
+# their tokens goes dormant without the plugin.
+Copy-Item "$repo\package_assets\CostumeFW_BoxPool1.esp" $stage
+Copy-Item "$repo\package_assets\CostumeFW_BoxPool1_KID.ini" $stage
 # v1.3.2 L3 opt-out template: a static repo file (never modified at runtime),
 # staged from the repo like the licenses.
 Copy-Item "$repo\CostumeFW_NoCapture_KID.ini" $stage

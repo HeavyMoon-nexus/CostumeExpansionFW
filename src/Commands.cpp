@@ -118,7 +118,8 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
+                  "repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
                   "slottest | invisdiag | av | abilities");
             return;
@@ -203,6 +204,16 @@ namespace CostumeFW
             });
         } else if (sub == "list") {
             SKSE::GetTaskInterface()->AddTask([] { ListActive(); });
+        } else if (sub == "tokens") {
+            // The one view of the token pools. Everything else reports what CEF
+            // DID; this reports what it had to work with, which is the question
+            // when a box did not appear or a name looks wrong.
+            SKSE::GetTaskInterface()->AddTask([] {
+                for (const auto& line : TokenDiagLines()) {
+                    Print(line.c_str());
+                    SKSE::log::info("tokens: {}", line);
+                }
+            });
         } else if (sub == "store") {
             // The hidden store is a disabled container - there is no in-game way
             // to open it, so this is the only view of what CEF is holding.
@@ -577,7 +588,8 @@ namespace CostumeFW
         } else if (sub == "abilities") {
             SKSE::GetTaskInterface()->AddTask([a_target, rest] { abilities::AbilitiesCommand(a_target, rest); });
         } else {
-            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
+                  "repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
                   "slottest | invisdiag | av | abilities");
         }

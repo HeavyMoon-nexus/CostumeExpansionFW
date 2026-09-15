@@ -7,6 +7,7 @@
 #include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
 #include "FormId.h"       // MakeColonId (shared with the ability pool)
 #include "TokenIdentity.h"  // who owns a form, decided from its plugin (v1.6.4)
+#include "AbilityPool.h"  // the audit reports the passthrough state alongside the pools
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "nifcarrier/NifCarrierCore.h"
 
@@ -37,6 +38,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -48,6 +50,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <random>
 #include <string_view>
@@ -591,6 +594,9 @@ namespace CostumeFW
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
         bool CorePluginLoaded();                                       // fwd (defined below)
         std::string_view FilenameOf(const RE::TESFile* a_file);        // fwd (defined below)
+        // The keyword that says "this ARMO is a box token". Named once: the
+        // audit prints it, and tools/espmerge stamps it (kMarkerEdid there).
+        constexpr const char* kBoxTokenMarkerEdid = "CFW_BoxTokenMarker";
         RE::BGSKeyword* BoxTokenMarkerKeyword();                       // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
@@ -598,6 +604,10 @@ namespace CostumeFW
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
         void ReapplyStatsForContent(const std::string& a_id);          // fwd (defined below)
         void ResetUnclaimedTokenStats();                               // fwd (defined below)
+        // The inventory name each token carried BEFORE a box label was stamped
+        // on it. Declared here so `cef tokens` can print it beside the current
+        // one; filled by ApplyBoxLabelToToken, far below.
+        extern std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;
 
         // Tokens SetTokenStats has written to in this process. A box's armor,
         // weight, class, name and keywords live on the token ARMO's BASE form,
@@ -3451,6 +3461,36 @@ namespace CostumeFW
         return tokenid::CarrierKeyFor(a_token, TokenSlot(a_token));
     }
 
+    // The master files a loaded plugin declares, in order. Empty when the
+    // plugin is not loaded - which the caller has already established, so an
+    // empty answer here means "no masters", the thing the ability pools are
+    // supposed to have none of beyond Skyrim.esm.
+    std::vector<std::string> MastersOf(std::string_view a_plugin)
+    {
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!dh) {
+            return {};
+        }
+        const RE::TESFile* file = dh->LookupLoadedModByName(a_plugin);
+        if (!file) {
+            file = dh->LookupLoadedLightModByName(a_plugin);
+        }
+        if (!file) {
+            return {};
+        }
+        // masterPtrs / masterCount rather than the `masters` name list: the
+        // name list is a BSSimpleList whose const iterator does not compile
+        // here, and the resolved pointers carry the same names in the same
+        // order once the load order is built (which it is, at kDataLoaded).
+        std::vector<std::string> out;
+        for (std::uint32_t i = 0; file->masterPtrs && i < file->masterCount; ++i) {
+            if (const auto* master = file->masterPtrs[i]) {
+                out.emplace_back(master->GetFilename());
+            }
+        }
+        return out;
+    }
+
     bool PluginIsLoaded(std::string_view a_name)
     {
         auto* dh = RE::TESDataHandler::GetSingleton();
@@ -3511,6 +3551,329 @@ namespace CostumeFW
             }
         }
         return {};
+    }
+
+    std::vector<std::string> TokenDiagLines()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        const auto pool = TokenPool();
+
+        // Per generation. "not installed" is a normal answer for the ones above
+        // what is here, and the interesting case is a generation that IS
+        // installed but holds nothing.
+        std::map<int, int> perGeneration;
+        for (const auto& token : pool) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (policy::ParseColonId(token, local, plugin)) {
+                ++perGeneration[policy::EqualsCI(plugin, tokenid::kCorePlugin)
+                        ? 0 : tokenid::BoxPoolGeneration(plugin)];
+            }
+        }
+        out.push_back(std::format("core legacy: {} resolved", perGeneration[0]));
+        for (int generation = 1; generation <= 9; ++generation) {
+            const auto plugin = tokenid::BoxPoolPluginName(generation);
+            if (PluginIsLoaded(plugin)) {
+                out.push_back(std::format("BoxPool{}: {} resolved", generation,
+                    perGeneration[generation]));
+            } else if (generation == 1 || perGeneration.contains(generation)) {
+                out.push_back(std::format("BoxPool{}: not installed", generation));
+            }
+        }
+
+        // Per biped slot. Several tokens on one slot is the NORMAL state from
+        // v1.6.4 and is not called out as a problem.
+        std::map<int, std::array<int, 4>> perSlot;  // slot -> {total, active, reserved, free}
+        int dormant = 0;
+        for (const auto& token : pool) {
+            const int slot = TokenSlot(token);
+            auto& row = perSlot[slot];
+            ++row[0];
+            if (FindBox(token) >= 0) {
+                ++row[1];
+            } else if (TokenReservedByPublish(token)) {
+                ++row[2];
+            } else {
+                ++row[3];
+            }
+        }
+        for (const auto& b : g_boxes) {
+            dormant += b.tokenState != TokenState::Resolved ? 1 : 0;
+        }
+        for (const auto& [slot, row] : perSlot) {
+            out.push_back(std::format("slot {}: total {} / active {} / reserved {} / free {}", slot,
+                row[0], row[1], row[2], row[3]));
+        }
+
+        out.push_back(std::format("non-pool CEF tokens: publish 8, npc-persist 8 ({}){}",
+            tokenid::kNpcPlugin, NpcEspLoaded() ? "" : " - NOT LOADED, so 0 of each"));
+        int invalid = 0;
+        for (const auto& b : g_boxes) {
+            invalid += (b.tokenState != TokenState::Resolved &&
+                        b.tokenState != TokenState::PoolMissing) ? 1 : 0;
+        }
+        out.push_back(std::format("box definitions: {} (resolved {} / dormant {} / invalid {})",
+            g_boxes.size(), g_boxes.size() - dormant, dormant - invalid, invalid));
+
+        // One row per token. `now` is what the inventory shows; `pre-CEF` is the
+        // name before a box label was stamped on it - NOT "the ESP default",
+        // because a translated copy of the plugin is the load-order winner and
+        // its name is what CEF saw first.
+        out.push_back("token / carrierKey / slot / state / boxId / gen / now / pre-CEF");
+        for (const auto& token : pool) {
+            auto* armo = ResolveArmo(token);
+            const int slot = SlotNumberOf(armo);
+            std::uint32_t local = 0;
+            std::string plugin;
+            policy::ParseColonId(token, local, plugin);
+            const int generation = policy::EqualsCI(plugin, tokenid::kCorePlugin)
+                ? 0 : tokenid::BoxPoolGeneration(plugin);
+            const int box = FindBox(token);
+            const char* state = box >= 0 ? "active"
+                : (TokenReservedByPublish(token) ? "reserved" : "free");
+            const std::string boxId = box >= 0 ? g_boxes[static_cast<std::size_t>(box)].boxId : "-";
+            const char* nowName = armo ? armo->GetFullName() : nullptr;
+            std::string pre = nowName ? nowName : "?";
+            if (armo) {
+                if (const auto it = g_tokenDefaultNames.find(armo->GetFormID());
+                    it != g_tokenDefaultNames.end() && !it->second.empty()) {
+                    pre = it->second;
+                }
+            }
+            out.push_back(std::format("  {} / {} / {} / {} / {} / gen{} / {} / {}", token,
+                tokenid::CarrierKeyFor(token, slot), slot, state, boxId, generation,
+                nowName ? nowName : "?", pre));
+        }
+        return out;
+    }
+
+    void AuditTokenPools()
+    {
+        StoreLock lk;
+        int errors = 0;
+        int warnings = 0;
+        const auto err = [&](const std::string& a_line) {
+            ++errors;
+            SKSE::log::error("audit: {}", a_line);
+        };
+        const auto warn = [&](const std::string& a_line) {
+            ++warnings;
+            SKSE::log::warn("audit: {}", a_line);
+        };
+        SKSE::log::info("audit: reading the box token pools");
+
+        // 1. The predicates, before anything that rests on them. An allowlist
+        //    edited in the wrong direction is invisible in normal play and
+        //    turns a publish token into a box token, which is the defect this
+        //    whole release exists to close (old plan C4 / M05).
+        for (const auto name : { tokenid::kNpcPlugin, tokenid::kAbilityGen1Plugin }) {
+            if (tokenid::IsBoxTokenPlugin(name)) {
+                err(std::format("IsBoxTokenPlugin('{}') is TRUE - that plugin does NOT define box "
+                                "tokens, and treating its records as box tokens is how a published "
+                                "costume's token becomes a box", name));
+            }
+            if (!tokenid::IsCefPlugin(name)) {
+                err(std::format("IsCefPlugin('{}') is FALSE - the broad test has been narrowed, "
+                                "and CEF's own records can now be captured as box CONTENT", name));
+            }
+        }
+        if (!tokenid::IsBoxTokenPlugin(tokenid::kCorePlugin) ||
+            !tokenid::IsBoxTokenPlugin(tokenid::BoxPoolPluginName(1))) {
+            err("IsBoxTokenPlugin is FALSE for the core plugin or BoxPool1 - no token can be "
+                "recognised at all");
+        }
+
+        // 2. Which generations are here, and is the run unbroken? A generation
+        //    above a gap is not used (PLAN §4.2), so the gap has to be named
+        //    rather than left as "my new pool did nothing".
+        int highestInstalled = 0;
+        std::vector<int> installed;
+        for (int generation = 1; generation <= 99; ++generation) {
+            const auto plugin = tokenid::BoxPoolPluginName(generation);
+            if (plugin.empty() || !PluginIsLoaded(plugin)) {
+                continue;
+            }
+            installed.push_back(generation);
+            highestInstalled = generation;
+        }
+        for (int generation = 1; generation <= highestInstalled; ++generation) {
+            if (std::find(installed.begin(), installed.end(), generation) == installed.end()) {
+                err(std::format("{} is loaded but {} is missing - a generation cannot be skipped, "
+                                "so nothing is allocated from the later one and any box on it is "
+                                "dormant",
+                    tokenid::BoxPoolPluginName(highestInstalled),
+                    tokenid::BoxPoolPluginName(generation)));
+            }
+        }
+
+        // 3. Masters, per plugin. BoxPoolN = Skyrim.esm + the core plugin, and
+        //    nothing else: a stray master is a plugin the user can remove and
+        //    take the whole pool down with (PLAN §1.3).
+        const auto checkMasters = [&](std::string_view a_plugin,
+                                      const std::vector<std::string>& a_want) {
+            const auto have = MastersOf(a_plugin);
+            if (have.size() != a_want.size()) {
+                err(std::format("{} has {} master(s), expected {}", a_plugin, have.size(),
+                    a_want.size()));
+                return;
+            }
+            for (std::size_t i = 0; i < have.size(); ++i) {
+                if (!policy::EqualsCI(have[i], a_want[i])) {
+                    err(std::format("{} master {} is '{}', expected '{}'", a_plugin, i, have[i],
+                        a_want[i]));
+                }
+            }
+        };
+        if (PluginIsLoaded(tokenid::kCorePlugin)) {
+            checkMasters(tokenid::kCorePlugin, { "Skyrim.esm" });
+        }
+        for (const int generation : installed) {
+            checkMasters(tokenid::BoxPoolPluginName(generation),
+                { "Skyrim.esm", std::string(tokenid::kCorePlugin) });
+        }
+
+        // 4. The tokens themselves. Generation 0 first, because every pool token
+        //    is checked against the generation-0 token on its slot - the BOD2
+        //    mask is inherited, and slot 31's is 31|41 rather than one bit.
+        std::unordered_map<int, std::uint32_t> gen0Mask;
+        std::unordered_map<std::string, std::string> byCarrierKey;  // key -> token
+        int gen0Count = 0;
+        std::unordered_map<int, int> perGeneration;
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        auto* marker = BoxTokenMarkerKeyword();
+        const auto pool = TokenPool();
+        for (const auto& token : pool) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                err(std::format("token '{}' does not parse", token));
+                continue;
+            }
+            const int generation = policy::EqualsCI(plugin, tokenid::kCorePlugin) ?
+                0 : tokenid::BoxPoolGeneration(plugin);
+            ++perGeneration[generation];
+            gen0Count += generation == 0 ? 1 : 0;
+
+            auto* armo = ResolveArmo(token);
+            if (!armo) {
+                err(std::format("token {} is in the pool but does not resolve", token));
+                continue;
+            }
+            if (marker && !armo->HasKeyword(marker)) {
+                err(std::format("token {} has no {}", token, kBoxTokenMarkerEdid));
+                continue;
+            }
+            const auto mask = static_cast<std::uint32_t>(armo->GetSlotMask());
+            const int slot = SlotNumberOf(armo);
+            if (mask == 0) {
+                err(std::format("token {} has an empty BOD2 (mask {:08X})", token, mask));
+            } else if (slot < 30 || slot > 61) {
+                err(std::format("token {} sits on biped slot {} (mask {:08X}), outside 30-61",
+                    token, slot, mask));
+            }
+            if (armo->armorAddons.size() != 1) {
+                err(std::format("token {} references {} ARMA (want exactly 1, mask {:08X})", token,
+                    armo->armorAddons.size(), mask));
+            } else if (auto* addon = armo->armorAddons.front(); addon) {
+                const auto addonMask =
+                    static_cast<std::uint32_t>(addon->bipedModelData.bipedObjectSlots.underlying());
+                if (addonMask != mask) {
+                    err(std::format("token {} BOD2 {:08X} does not match its ARMA's {:08X}", token,
+                        mask, addonMask));
+                }
+            }
+            if (generation == 0) {
+                gen0Mask[slot] = mask;
+            } else if (const auto it = gen0Mask.find(slot); it == gen0Mask.end()) {
+                err(std::format("token {} is on biped slot {} (mask {:08X}), which no generation-0 "
+                                "token occupies", token, slot, mask));
+            } else if (it->second != mask) {
+                err(std::format("token {} BOD2 {:08X} differs from generation 0's {:08X} for biped "
+                                "slot {}", token, mask, it->second, slot));
+            }
+
+            const auto carrierKey = tokenid::CarrierKeyFor(token, slot);
+            if (carrierKey.empty()) {
+                err(std::format("token {} has no carrier key (mask {:08X})", token, mask));
+            } else if (const auto [it, fresh] = byCarrierKey.emplace(carrierKey, token); !fresh) {
+                err(std::format("tokens {} and {} both claim the carrier key {} - they would "
+                                "overwrite each other's meshes", it->second, token, carrierKey));
+            }
+
+            // The tuple, not the bare local id (gaps P6). Every pool plugin and
+            // CostumeFW_NPC.esp number their records from 0x800, so comparing
+            // local ids alone reports a collision between every token and a
+            // publish token that is simply a different record in another file.
+            if (dh && armo->GetFile(0) &&
+                policy::EqualsCI(FilenameOf(armo->GetFile(0)), tokenid::kNpcPlugin)) {
+                err(std::format("token {} is DEFINED by {} - a publish or NPC-persist token has "
+                                "been admitted to the box pool", token, tokenid::kNpcPlugin));
+            }
+        }
+
+        // The other direction of the same question.
+        if (NpcEspLoaded()) {
+            for (int slot = 0; slot < 8; ++slot) {
+                for (auto* armo : { PubTokenArmo(slot), NprTokenArmo(slot) }) {
+                    if (!armo || !armo->GetFile(0)) {
+                        continue;
+                    }
+                    if (tokenid::IsBoxTokenPlugin(FilenameOf(armo->GetFile(0)))) {
+                        err(std::format("{} is treated as a box token plugin - its publish and "
+                                        "NPC-persist tokens would be handed out as boxes",
+                            FilenameOf(armo->GetFile(0))));
+                    }
+                }
+            }
+        }
+
+        // 5. Counts. Generation 0 is a fixed 27 and a drift there means the core
+        //    plugin is not the one that shipped; a pool generation's size is
+        //    whatever it holds, so it is reported rather than judged.
+        constexpr int kGen0TokenCount = 27;
+        if (gen0Count != kGen0TokenCount) {
+            warn(std::format("generation 0 holds {} token(s), expected {} - is {} the one that "
+                             "shipped with this version?",
+                gen0Count, kGen0TokenCount, tokenid::kCorePlugin));
+        }
+        for (const auto& [generation, count] : std::map<int, int>(perGeneration.begin(),
+                 perGeneration.end())) {
+            SKSE::log::info("audit: {} - {} token(s)",
+                generation == 0 ? std::string(tokenid::kCorePlugin)
+                                : tokenid::BoxPoolPluginName(generation),
+                count);
+        }
+
+        // 6. Ownership. A box holding a token that a published costume also
+        //    names is legal (PLAN §5.1 rule 3 - the box wins) but it is also the
+        //    one state where unpublish refuses, so it is worth a line before the
+        //    user finds out by clicking.
+        for (const auto& b : g_boxes) {
+            if (TokenReservedByPublish(b.token) && !b.token.empty()) {
+                warn(std::format("box '{}' holds {}, which a published costume also names - that "
+                                 "costume cannot be unpublished until this box frees it",
+                    b.label.empty() ? b.boxId : b.label, b.token));
+            }
+            if (b.tokenState != TokenState::Resolved) {
+                warn(std::format("box '{}' token {} is {} - the definition is kept and quarantined",
+                    b.label.empty() ? b.boxId : b.label, b.token,
+                    TokenStateReason(b.tokenState)));
+            }
+        }
+
+        const auto stats = BoxTokenPoolStats();
+        SKSE::log::info("audit: {} token(s) total, {} in boxes, {} reserved by publish, {} free; "
+                        "{} box definition(s)",
+            stats.total, stats.inBoxes, stats.reserved, stats.free, stats.definitions);
+        SKSE::log::info("audit: enchantment passthrough {}",
+            abilities::Ready() ? "ready" : ("OFF - " + abilities::DisabledReason()));
+        if (errors == 0 && warnings == 0) {
+            SKSE::log::info("audit: no problems found");
+        } else {
+            SKSE::log::warn("audit: {} error(s), {} warning(s) - see the lines above", errors,
+                warnings);
+        }
     }
 
     TokenPoolStats BoxTokenPoolStats()
@@ -4017,7 +4380,7 @@ namespace CostumeFW
                 return nullptr;
             }
             for (auto* kw : dh->GetFormArray<RE::BGSKeyword>()) {
-                if (kw && kw->formEditorID == "CFW_BoxTokenMarker") {
+                if (kw && kw->formEditorID == kBoxTokenMarkerEdid) {
                     s_marker = kw;
                     return s_marker;
                 }
@@ -6026,7 +6389,7 @@ namespace CostumeFW
         // touch, so F10 cannot recur and a miss here costs nothing but a stale
         // name in the inventory. Kept because that name SHOULD go back - not
         // because anything depends on it.
-        std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;
+        std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;  // fwd above
 
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box)
         {

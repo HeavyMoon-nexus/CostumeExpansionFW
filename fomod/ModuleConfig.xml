@@ -27,6 +27,27 @@
   <installSteps order="Explicit">
 
     <!-- ============================================================ -->
+    <installStep name="What is in the core install">
+      <optionalFileGroups order="Explicit">
+        <group name="Always installed" type="SelectAll">
+          <plugins order="Explicit">
+
+            <plugin name="CEF and its box tokens">
+              <description>The DLL, CostumeFW.esp and CostumeFW_BoxPool1.esp.
+
+Both plugins are light (ESL) and take no load-order slot.
+
+CostumeFW_BoxPool1.esp is new in 1.6.4 and is not optional. It carries three more box tokens for each biped slot, which is what lets one slot hold more than one box. It also carries the invisible physics carrier meshes those tokens need, which is most of the file count in this install.
+
+Do not remove it once you have made a box on one of its tokens. That box goes dormant without it - it is not deleted, and it comes back when you put the plugin back, but until then it cannot be worn or edited.</description>
+              <typeDescriptor><type name="Required" /></typeDescriptor>
+            </plugin>
+
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+
     <installStep name="Before you install">
       <optionalFileGroups order="Explicit">
 
@@ -138,7 +159,9 @@ Leave it off if you only dress your own character.</description>
             <plugin name="Enchantment passthrough (adds one full plugin)">
               <description>Keeps a costume's enchantments, armor rating and tempering working while the costume is in a box. This is on by default in CEF's settings, and from 1.6.3 it needs CostumeFW_Abilities.esp.
 
-That plugin is NOT light (ESL). It takes one of your 254 load-order slots. It has to be a full plugin: the abilities live at fixed form IDs that your saves point at, and the light form-ID range is too small to hold enough of them.
+That plugin is NOT light (ESL). It takes one of your 254 load-order slots, and it is the only CEF plugin that does - CostumeFW.esp, CostumeFW_BoxPool1.esp and CostumeFW_NPC.esp are all light and cost none.
+
+It has to be a full plugin: the abilities live at fixed form IDs that your saves point at, and the flag cannot be changed later without changing how every one of them is addressed. If CEF ever needs more than it holds, the next one (CostumeFW_Abilities2.esp) is light and costs no slot.
 
 If you would rather not spend the slot, untick this. CEF will then turn enchantment passthrough off and say so, rather than falling back to the old method - the old method is what put stuck bonuses on people's characters, and quietly using it again would be worse than not doing it at all. Your costumes still look exactly the same; they just stop carrying stats.
 

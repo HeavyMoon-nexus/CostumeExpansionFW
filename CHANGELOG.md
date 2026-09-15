@@ -1,5 +1,85 @@
 # Changelog
 
+## v1.6.4 (unreleased)
+
+A biped slot used to mean one box. There were 27 of them, one per slot, and if
+you wanted two different skirts set up at once you could not have them - slot 52
+was already spoken for. A slot can hold four boxes now, so 108 in all.
+
+That needs a second plugin, `CostumeFW_BoxPool1.esp`, and it ships in the core
+install rather than as an option. It is light (ESL) and costs no load-order
+slot. Do not remove it once you have made a box on one of its tokens: that box
+goes dormant without it. It is not deleted and it comes back when the plugin
+does, but until then it cannot be worn or edited.
+
+**Publishing a costume to NPCs no longer gives its box token away.** It holds it
+in reserve, so unpublishing puts the costume back on the slot it came from. That
+was not true before: publishing freed the slot, the new-box picker offered it
+again, and if you took it, unpublishing landed the costume on whatever token was
+free. A different biped slot hides different parts of your body, so the outfit
+came back behaving differently, and nothing said so. If you did that on 1.6.2 or
+1.6.3, the update finds those costumes and gives each one another token on the
+same slot - same slot, so it hides what it always did.
+
+**Going back to 1.6.3 or earlier is a manual step.** The first time 1.6.4 reads
+your settings it keeps a copy of them as they were, at
+`SKSE\Plugins\CEF_settings.pre164.json`, and the same for the ability registry
+at `CEF_abilities.pre164.json`. CEF never reads either one. If you want to go
+back, copy them over `CEF_settings.json` and `CEF_abilities.json` by hand.
+Boxes made on `CostumeFW_BoxPool1.esp` do not exist in those copies, because
+they could not have.
+
+The SkyUI MCM is still here and still works, with one gap: a biped slot holding
+more than one box gets no MCM page. Its pages are keyed by the slot number, so a
+slot with two boxes names neither of them, and a page that quietly edited the
+wrong box would be worse than no page. Use SMF for those. The MCM is still on
+its way out; I have named 1.6.3 and then 1.6.4 for that and both slipped, so I
+am not naming a version this time.
+
+### Added
+
+- A slot can hold several boxes. The SMF box list shows the token's name beside
+  a box when its slot has company, so two rows on slot 52 are telling apart.
+- `cef tokens` in the console: every box token, which plugin it came from, what
+  it is doing (active, reserved by a published costume, or free), which box has
+  it, and both its current inventory name and the name it had before a box label
+  was stamped on it. Per generation and per biped slot first, then one row each.
+- A startup check writes what it found to the log: which pools are installed,
+  whether the generations run unbroken, whether any two tokens would build their
+  physics carrier under the same name, and whether any box is holding a token a
+  published costume also wants. It only looks - it changes nothing.
+- The ability pool can be extended. It was a single plugin of 1,024 abilities
+  with no way to add more; a second one (`CostumeFW_Abilities2.esp`) is light and
+  costs no load-order slot. `cef abilities` now reports free space per plugin and
+  which ability the next costume would take.
+
+### Fixed
+
+- **A published wig stopped hiding the NPC's own hair.** A wig box occupies both
+  the hair slot and the long-hair slot; the published copy only took the first,
+  so the NPC's real hair came through it.
+- **A box's tooltip could show another box's contents.** With LoreBox installed,
+  hovering a token asked for the contents of its biped SLOT, which from this
+  version can name several boxes. It asks per token now. Nothing to reinstall:
+  the keywords that shipped are still the same keywords.
+- Renaming a box no longer affects which tokens CEF thinks are free. Membership
+  is a hidden keyword now rather than the token's displayed name, which also
+  means a translated copy of `CostumeFW.esp` can no longer stop you making new
+  boxes - that would have happened to anyone running one.
+- A hand-edited or damaged `CEF_settings.json` can no longer produce boxes on
+  something that is not a box token. A definition whose token does not resolve
+  is kept and quarantined with the reason, rather than dropped or half-loaded.
+- If a load drops most of your boxes at once, CEF now refuses the load instead
+  of writing the result back. The file on disk is left exactly as it was.
+
+### Changed
+
+- `CEF_abilities.json` records which plugin each ability came from instead of a
+  number. Existing registries convert on first load; see the note about going
+  back, above.
+- The MCM's Persist page still runs out of room past 11 entries. That is SkyUI's
+  option buffer rather than a CEF limit, and SMF has no such limit.
+
 ## v1.6.3 (2026-09-15)
 
 Quit Skyrim while wearing a box and the bonus that box was giving you could

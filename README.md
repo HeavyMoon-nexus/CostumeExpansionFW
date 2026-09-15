@@ -29,11 +29,15 @@ worn gear.
 - [SKSE64](https://skse.silverlock.org/)
 - [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
 - [RaceMenu](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee — required for body-morph follow and the SkyUI MCM SDK)
-- SkyUI (MCM) — **1.6.2.1 is the last release with an MCM.** From 1.6.3 the UI is
-  [SKSE Menu Framework](https://www.nexusmods.com/skyrimspecialedition/mods/120352)
-  only; see "Which UI" below
+- SkyUI (MCM) — optional, and on its way out. The MCM is still here in 1.6.4 and
+  still works; see "Which UI" below for what it no longer reaches
+- [SKSE Menu Framework](https://www.nexusmods.com/skyrimspecialedition/mods/120352)
+  — the main UI
 - `CostumeFW.esp` (ships with the mod — ESL-flagged, no load-order slot; box
   tokens, persist head-part pool, MCM quest)
+- `CostumeFW_BoxPool1.esp` (ships with the mod from 1.6.4 — ESL-flagged, no
+  load-order slot; three more box tokens per biped slot, so a slot can hold
+  several boxes)
 - *(optional)* [Faster HDT-SMP (FSMP)](https://www.nexusmods.com/skyrimspecialedition/mods/57339)
   — custom-bone SMP cloth physics on injected content (3.5.0 tested)
 
@@ -61,11 +65,19 @@ stamp) identify the build in reports.
 ## Which UI
 
 CEF has two menus that read the same settings: the SkyUI MCM and the SKSE Menu
-Framework (SMF) section, both named "Costume Expansion FW". **The MCM is going
-away in 1.6.3** — 1.6.2.1 is its last release. It is also already behind: NPC
-distribution, the capture blacklist (**Blocked**), the **Recovery** page, box
-renaming, the per-item passthrough toggles and the verbose-logging switch exist
-only in SMF. Use SMF unless you have a reason not to. On VR, SMF needs
+Framework (SMF) section, both named "Costume Expansion FW". **Use SMF.** The MCM
+is behind and will be removed; earlier notes named 1.6.3 and then 1.6.4 for that
+and both slipped, so this no longer names a version.
+
+What the MCM does not reach: NPC distribution, the capture blacklist
+(**Blocked**), the **Recovery** page, box renaming, the per-item passthrough
+toggles, the verbose-logging switch, and from 1.6.4 **any biped slot that holds
+more than one box**. Its pages are keyed by slot, so a slot with two boxes names
+neither of them; those slots get no MCM page at all rather than a page that
+edits the wrong box. The Persist page also runs out of room past 11 entries
+(SkyUI's option buffer) — SMF has no such limit.
+
+On VR, SMF needs
 [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
 
 Nothing about your setup is tied to either menu: boxes, presets and settings
@@ -148,6 +160,15 @@ Save, then remove the mod.
   rebuilds their physics repeatedly at load and the retained allocations balloon memory).
 - Content must be weighted to bones present on your live skeleton (standard XPMSSE). Content
   built for a different/extended skeleton may show parts statically (logged as a remap).
+- **Published costumes and NPC-persist items use the PLAYER's race for their carrier.**
+  A costume that ships separate meshes per race is built from the player-race
+  variant, so it can look wrong on an NPC of another race. Boxes on your own
+  character are not affected.
+- **The ability pool is append-only.** A costume whose enchantment changes takes
+  a new ability and keeps the old one, because a save may still refer to it. A
+  piece that is re-enchanted or tempered often therefore costs more than one.
+  `cef abilities` shows how many are left per plugin; installing the next
+  `CostumeFW_Abilities` plugin adds more.
 
 ## Non-English text in the menu
 

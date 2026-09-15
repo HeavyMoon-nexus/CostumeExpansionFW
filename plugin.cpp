@@ -396,6 +396,13 @@ namespace
                 LogRegistryRollCall("data-loaded");
                 MirrorSettingsForSupport();
                 CostumeFW::ReapplyNpcBindings();
+                // Last, and after the boxes are in: it reads the pools AND the
+                // definitions, and it only observes (PLAN §9.3). Nothing
+                // branches on the result - a support log that says which
+                // generations are installed and whether they hold together is
+                // the whole point, and an audit that also acted would be a
+                // second thing to be wrong.
+                CostumeFW::AuditTokenPools();
             });
             break;
         case SKSE::MessagingInterface::kPostLoadGame:

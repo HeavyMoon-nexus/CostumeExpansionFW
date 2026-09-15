@@ -465,6 +465,21 @@ namespace CostumeFW
         int definitions{ 0 };  // box definitions, pool members or not
     };
     TokenPoolStats BoxTokenPoolStats();
+
+    // Read the pools and the box definitions and say, in the log, whether they
+    // hold together (PLAN §9.3). Call once at kDataLoaded, after LoadBoxes.
+    //
+    // It OBSERVES. It writes no settings, repoints no form and disables
+    // nothing: an audit that acted on a wrong reading would be two faults
+    // instead of one, and the package-time verifiers are where a bad plugin is
+    // supposed to be stopped. What it adds is the case they cannot see - the
+    // load order the user actually has.
+    void AuditTokenPools();
+
+    // `cef tokens`: every box token, what it is doing, and what it is called -
+    // per generation, per biped slot, then one row each (PLAN §9.1). Returns the
+    // lines; the console command prints them and the log keeps a copy.
+    std::vector<std::string> TokenDiagLines();
     std::string NextFreeToken();  // first free slot-token ("" if none) - legacy auto-assign
 
     // The biped slot number (30-61) a token ARMO occupies, 0 if none/unresolved.
