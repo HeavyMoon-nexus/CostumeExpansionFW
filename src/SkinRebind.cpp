@@ -2726,12 +2726,29 @@ namespace CostumeFW
             }
             bool anyRealBody = false;  // set if a shown content wants the real body under it
             for (auto& it : a_state.items) {
-                // master off -> hide; else persist (tokenForm 0) always shows, a
-                // box/publish item shows only while its token is worn by THIS actor.
+                // master off -> hide; else persist always shows, a box/publish
+                // item shows only while its token is worn by THIS actor.
+                //
+                // The persist class is "registered without a token at all" -
+                // tokenId EMPTY - and NOT "tokenForm is 0". Those were the same
+                // thing until a box token could fail to resolve. From v1.6.4 a
+                // box can sit on a pool plugin the user has uninstalled, and
+                // such a box's contents carry a real tokenId with tokenForm 0 -
+                // so reading the 0 as "persist" showed a QUARANTINED box's
+                // costume unconditionally. In-game 2026-09-15 with BoxPool1
+                // removed: the costume went on at every load, Wear could not
+                // take it off (WearBoxToken needs the token this gate had
+                // stopped consulting, and returns false without it), and only
+                // the master switch cleared it. The log said it plainly -
+                // "tokenForm=00000000 show=true".
+                //
+                // Same code in 1.6.2.2, but the only way there was to hand-edit
+                // an invalid token into the settings; v1.6.4 made "uninstall a
+                // plugin" reach it.
                 bool show = false;
                 if (a_cefOn) {
-                    show = (it.tokenForm == 0);
-                    if (!show) {
+                    show = it.tokenId.empty();  // persist
+                    if (!show && it.tokenForm != 0) {
                         show = (actor->GetWornArmor(it.tokenForm) != nullptr);
                         if (show) {
                             WarnIfTokenRaceGap(it.tokenForm, actor);

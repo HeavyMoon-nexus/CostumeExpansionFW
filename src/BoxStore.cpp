@@ -1989,8 +1989,20 @@ namespace CostumeFW
 
         // Register every box content for worn-gated injection (no inject yet) and
         // write each box's aggregate armor/weight onto its token.
+        //
+        // A quarantined box registers NOTHING. Its token cannot be worn, so the
+        // gate that decides whether its contents show can never say yes on
+        // purpose - and registering them anyway is what let a pool-missing box
+        // reach the persist branch (see the tokenId/tokenForm note in
+        // SkinRebind). The definition is still kept and still listed; it simply
+        // stops putting anything on the player until its plugin is back.
         int contentCount = 0;
+        int quarantinedSkipped = 0;
         for (const auto& b : g_boxes) {
+            if (!BoxTokenUsable(b)) {
+                quarantinedSkipped += static_cast<int>(b.contents.size());
+                continue;
+            }
             for (const auto& c : b.contents) {
                 if (RegisterBoxById(c, b.token)) {
                     ++contentCount;
@@ -2007,6 +2019,12 @@ namespace CostumeFW
         // character starts with nothing shown.
         SKSE::log::info("settings: loaded {} box(es) ({} content), {} persist (catalog), enabled={}",
             g_boxes.size(), contentCount, g_persist.size(), g_cefEnabled);
+        if (quarantinedSkipped > 0) {
+            SKSE::log::info(
+                "settings: {} content(s) not registered - they belong to quarantined box(es), "
+                "whose definitions are kept but put nothing on the player",
+                quarantinedSkipped);
+        }
         // Point each token ARMA at its current carrier revision (carriers.json).
         // No refresh here: tokens haven't equipped yet at load time.
         ApplyCarrierOverridesImpl(false);

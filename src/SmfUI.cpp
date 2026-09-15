@@ -620,11 +620,37 @@ namespace CostumeFW::SmfUI
                 // read "Box 55: Costume Box 55" twice over.
                 const std::string shared = boxesPerSlot[slot] > 1 ?
                     std::format("  [{}]", CarrierKeyForToken(token)) : std::string{};
-                const std::string header = std::format("Box {}: {}{} - {} item(s){}###cfwbox{}",
-                    slot, headTitle, shared, b.contents.size(), worn ? "  [WORN]" : "", scope);
+                // A quarantined box has no slot to print. TokenSlot answers 0
+                // for a token it cannot resolve, and "Box 0:" reads as a box
+                // that broke rather than one whose plugin is not installed -
+                // worse, every quarantined box lands on that same 0 and they
+                // start looking like a shared slot (in-game 2026-09-15: three
+                // of them, complete with the carrier-key suffix this list adds
+                // when a slot has company). It also collides with the real
+                // slot-0 case the B14/B22 tests look for.
+                const bool usable = BoxTokenUsable(b);
+                const std::string where = usable ? std::format("Box {}", slot) : "Box -";
+                const std::string why =
+                    usable ? std::string{} : std::format("  [{}]", TokenStateReason(b.tokenState));
+                const std::string header = std::format("{}: {}{}{} - {} item(s){}###cfwbox{}",
+                    where, headTitle, shared, why, b.contents.size(),
+                    worn ? "  [WORN]" : "", scope);
                 if (!ImGui::TreeNode(header.c_str())) {
                     continue;
                 }
+                if (!usable) {
+                    ImGui::TextWrapped(
+                        "This box's token is not available (%s), so it is quarantined: the "
+                        "definition and its contents are kept, but it puts nothing on you and "
+                        "cannot be worn. Reinstall the plugin it came from, or use the Recovery "
+                        "page to re-point or remove it.",
+                        TokenStateReason(b.tokenState));
+                    ImGui::Spacing();
+                }
+                // Everything that needs a live token is off while quarantined.
+                // Delete and Rename stay: Delete is the escape hatch, Rename
+                // touches only the definition.
+                ImGui::BeginDisabled(!usable);
 
                 bool w = worn;
                 if (auto pend = s_pendingWear.find(token); pend != s_pendingWear.end()) {
@@ -710,6 +736,8 @@ namespace CostumeFW::SmfUI
                     }
                     ImGui::EndCombo();
                 }
+                ImGui::EndDisabled();  // Wear / Distribute / Armor type / Preset
+
                 char* exportName = EditBuffer("exp:" + scope, {});
                 ImGui::InputText(std::format("##expn{}", scope).c_str(), exportName, 64);
                 ImGui::SameLine();
@@ -735,6 +763,9 @@ namespace CostumeFW::SmfUI
 
                 ImGui::Text("Stats: %s", BoxStatsSummary(i).c_str());
 
+                // Capturing INTO a quarantined box would take a real item off
+                // the player and hand it to a box that cannot show it.
+                ImGui::BeginDisabled(!usable);
                 if (ImGui::BeginCombo(std::format("+ Add worn item##aw{}", scope).c_str(), "(pick)")) {
                     static std::vector<WornItem> s_worn;  // snapshot on combo open
                     if (ImGui::IsWindowAppearing()) {
@@ -760,6 +791,8 @@ namespace CostumeFW::SmfUI
                     ImGui::EndCombo();
                 }
 
+                ImGui::EndDisabled();  // + Add worn item / + Add from inventory
+
                 ImGui::SeparatorText(std::format("Contents ({})", b.contents.size()).c_str());
                 std::string& selected = s_selContent[scope];
                 for (const auto& c : b.contents) {
@@ -777,12 +810,19 @@ namespace CostumeFW::SmfUI
                 ImGui::Spacing();
                 const bool npcReady = NpcEspLoaded();
                 const auto publishPopup = std::format("Publish box for NPC?###pubp{}", scope);
-                ImGui::BeginDisabled(!npcReady);
+                // A quarantined box cannot be published either: the snapshot
+                // would name a token this load order cannot resolve.
+                ImGui::BeginDisabled(!npcReady || !usable);
                 if (ImGui::Button(std::format("Publish for NPC##pub{}", scope).c_str()))
                     ImGui::OpenPopup(publishPopup.c_str());
                 ImGui::EndDisabled();
-                if (!npcReady && ImGui::IsItemHovered(ImGui::ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Requires the CostumeFW_NPC.esp add-on.");
+                if (ImGui::IsItemHovered(ImGui::ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    if (!usable) {
+                        ImGui::SetTooltip("This box is quarantined - its token is not available.");
+                    } else if (!npcReady) {
+                        ImGui::SetTooltip("Requires the CostumeFW_NPC.esp add-on.");
+                    }
+                }
                 ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal(publishPopup.c_str())) {
                     // "%s" and not the label in the format string: a box label is
