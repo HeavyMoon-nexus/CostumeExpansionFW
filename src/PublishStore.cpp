@@ -761,10 +761,12 @@ namespace CostumeFW
         }
     }
 
-    bool PublishBox(int a_boxIndex)
+    bool PublishBox(const std::string& a_boxId)
     {
         if (!NpcEspLoaded()) return false;
-        const auto box = BoxAt(a_boxIndex);
+        const int boxIndex = FindBoxById(a_boxId);
+        if (boxIndex < 0) return false;  // deleted, or published, between click and confirm
+        const auto box = BoxAt(boxIndex);
         if (box.token.empty() || box.contents.empty()) return false;
         int slot = -1;
         for (int i = 0; i < kPoolSize; ++i) if (!PubBySlot(i)) { slot = i; break; }

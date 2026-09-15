@@ -3377,6 +3377,34 @@ namespace CostumeFW
             }
             out.push_back(t);
         }
+        // §5.2's candidate order - (slot, GENERATION, local id) - not the pool's
+        // own (slot, colon-id). Within a slot the colon-id sorts on the local id
+        // first, and generation 0 numbers the low slots ABOVE BoxPool1 (slot 30
+        // is 000A01, slot 31 is 000913, against the pool's 000800-000846), so on
+        // slots 30-43 a pool token came out ahead of the core one.
+        //
+        // That is what the MCM's picker hands the user: it keeps the FIRST free
+        // token per empty slot (I5), so it was offering a BoxPool1 token while
+        // the core token for the same slot sat free - and a box on a pool token
+        // goes dormant if that pool is ever removed, which a box on generation 0
+        // cannot. Silently picking the more fragile of two equally free options,
+        // and only on some slots.
+        //
+        // FreeTokenOnSlot already re-sorted exactly this way for exactly this
+        // reason, and AutoPickToken ranks generation-ascending too; only the raw
+        // list every caller reads was still in pool order. Both of those re-rank
+        // what they get, so this is purely a better default for the ones that do
+        // not: the MCM picker, and SMF's list.
+        std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+            const auto key = [](const std::string& t) {
+                std::uint32_t local = 0;
+                std::string plugin;
+                // Parses by construction: TokenPool built these ids with MakeColonId.
+                (void)policy::ParseColonId(t, local, plugin);
+                return std::tuple{ TokenSlot(t), tokenid::BoxPoolGeneration(plugin), local };
+            };
+            return key(a) < key(b);
+        });
         return out;
     }
 

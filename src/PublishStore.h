@@ -157,7 +157,12 @@ namespace CostumeFW
     void ParsePublishJson(const nlohmann::json& a_doc);
     void SaveGlobalSettings();
 
-    bool PublishBox(int a_boxIndex);
+    // By boxId, not by list position. The caller is a UI row whose click and
+    // whose confirmation are separated by a modal and a task hop, and a box
+    // list that shifts in between would publish - freeze and remove - a
+    // DIFFERENT box. boxId is what v1.6.4 introduced so nothing has to be
+    // addressed by where it currently sits.
+    bool PublishBox(const std::string& a_boxId);
     bool SetPubHidden(int a_slot, bool a_hidden);
     // Take a published costume's token and ability back off everyone wearing it.
     //

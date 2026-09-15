@@ -637,6 +637,21 @@ namespace CostumeFW::SmfUI
                 if (ImGui::Checkbox(std::format("Wear (show contents)##w{}", scope).c_str(), &w)) {
                     const bool want = w;
                     s_pendingWear[token] = want;
+                    // Predict the engine's own slot exclusivity. Two boxes can
+                    // share a biped slot from v1.6.4, and equipping one unequips
+                    // the other - but nothing happens until the menu closes and
+                    // the equip queue runs, so until then the OTHER box is still
+                    // honestly worn and shows a tick of its own. Both boxes
+                    // ticked is therefore correct, and reads as a bug the first
+                    // time anyone uses the feature this release is named for.
+                    // The UI already knows the outcome; say it now.
+                    if (want) {
+                        for (std::size_t j = 0; j < boxes.size(); ++j) {
+                            if (slots[j] == slot && boxes[j].token != token) {
+                                s_pendingWear[boxes[j].token] = false;
+                            }
+                        }
+                    }
                     SKSE::GetTaskInterface()->AddTask([token, want] { WearBoxToken(token, want); });
                 }
                 ImGui::SameLine();
@@ -770,12 +785,18 @@ namespace CostumeFW::SmfUI
                     ImGui::SetTooltip("Requires the CostumeFW_NPC.esp add-on.");
                 ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal(publishPopup.c_str())) {
+                    // "%s" and not the label in the format string: a box label is
+                    // user text and CAN hold printf tokens (this very test run has
+                    // one named "100%s cotton %n %p a"). Same trap as F01 in the
+                    // console printer.
                     ImGui::TextWrapped(
-                        "Freeze this box's contents and settings into a distributable NPC token? "
-                        "The source box will be removed and its normal token slot freed.");
+                        "Freeze '%s' - its contents and settings - into a distributable NPC token? "
+                        "The source box will be removed and its normal token slot freed.",
+                        headTitle.c_str());
                     if (ImGui::Button("Publish")) {
-                        const int index = i;
-                        SKSE::GetTaskInterface()->AddTask([index] { PublishBox(index); });
+                        // boxId, not the loop index: see PublishBox's declaration.
+                        const std::string boxId = scope;
+                        SKSE::GetTaskInterface()->AddTask([boxId] { PublishBox(boxId); });
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();
@@ -791,8 +812,13 @@ namespace CostumeFW::SmfUI
                 // tiny default width -> a skinny vertical window (in-game 2026-07-12).
                 ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal(popupId.c_str())) {
+                    // Name it. Two boxes on one biped slot both head their row
+                    // "Box 55: ...", and this modal covers the list that told
+                    // them apart - so an unnamed confirmation asks the user to
+                    // approve destroying something it will not identify.
                     ImGui::TextWrapped(
-                        "Delete this box? Captured items are returned to you; the slot token frees up.");
+                        "Delete '%s'? Captured items are returned to you; the slot token frees up.",
+                        headTitle.c_str());
                     if (ImGui::Button("Delete")) {
                         SKSE::GetTaskInterface()->AddTask([token] {
                             WearBoxToken(token, false);
