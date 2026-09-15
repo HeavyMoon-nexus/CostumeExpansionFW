@@ -55,6 +55,20 @@ am not naming a version this time.
 
 ### Fixed
 
+- **A box whose plugin you removed put its costume on you, and nothing could
+  take it off.** Take out `CostumeFW_BoxPool1.esp` while a box sits on one of
+  its tokens and that box goes dormant, which is right - but its outfit went on
+  anyway, at every load, and none of CEF's own controls would remove it. Only
+  turning CEF off entirely did. A persist item is marked by having no token at
+  all, and a box whose token cannot be found looked exactly the same from the
+  inside, so it was treated as one. A dormant box now puts nothing on you, and
+  the box list says which box is dormant and why instead of listing it under
+  slot 0 with every control still live.
+
+  **This one is worth knowing about if you are on 1.6.2.2.** The same fault is
+  in it. You cannot reach it by uninstalling anything there - there was only the
+  one plugin and it is required - but a hand-edited `CEF_settings.json` with a
+  token that does not resolve gets you the same stuck costume.
 - **A published wig stopped hiding the NPC's own hair.** A wig box occupies both
   the hair slot and the long-hair slot; the published copy only took the first,
   so the NPC's real hair came through it.
