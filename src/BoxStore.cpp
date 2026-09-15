@@ -3391,7 +3391,7 @@ namespace CostumeFW
         // and only on some slots.
         //
         // FreeTokenOnSlot already re-sorted exactly this way for exactly this
-        // reason, and AutoPickToken ranks generation-ascending too; only the raw
+        // reason, and NextFreeToken ranks generation-ascending too; only the raw
         // list every caller reads was still in pool order. Both of those re-rank
         // what they get, so this is purely a better default for the ones that do
         // not: the MCM picker, and SMF's list.
