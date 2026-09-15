@@ -1549,6 +1549,19 @@ namespace CostumeFW
                             "it is rewritten on the next settings change)",
                 kSettingsBakPath);
         }
+        // The read handle goes NOW, before anything below can write. This
+        // function writes from inside its own body - the v1.2.1 id heal and the
+        // legacy migration both call WriteJson - and WriteFileAtomic replaces the
+        // file with MoveFileEx(MOVEFILE_REPLACE_EXISTING), which needs DELETE
+        // access on the destination. MSVC opens an ifstream without
+        // FILE_SHARE_DELETE, so while this stream lives that rename fails with
+        // ERROR_ACCESS_DENIED (5) and the write is lost.
+        //
+        // v1.6.4 made that path the normal one for everybody: a box with no
+        // boxId sets `healed`, so the FIRST load after the upgrade is exactly
+        // when the settings are written from in here. Before, `healed` was a rare
+        // repair and the failure went unnoticed.
+        f.close();
         // --- CoreMissing: judge nothing, change nothing (v1.6.4) -------------
         // Every question this function asks about a token - is it an ARMO, does
         // its plugin define box tokens - is answered against the loaded plugins.
@@ -3461,6 +3474,8 @@ namespace CostumeFW
         return tokenid::CarrierKeyFor(a_token, TokenSlot(a_token));
     }
 
+    const RE::TESFile* LoadedFile(std::string_view a_name);  // fwd (defined below)
+
     // The master files a loaded plugin declares, in order. Empty when the
     // plugin is not loaded - which the caller has already established, so an
     // empty answer here means "no masters", the thing the ability pools are
@@ -3471,10 +3486,7 @@ namespace CostumeFW
         if (!dh) {
             return {};
         }
-        const RE::TESFile* file = dh->LookupLoadedModByName(a_plugin);
-        if (!file) {
-            file = dh->LookupLoadedLightModByName(a_plugin);
-        }
+        const RE::TESFile* file = LoadedFile(a_plugin);
         if (!file) {
             return {};
         }
@@ -3491,11 +3503,38 @@ namespace CostumeFW
         return out;
     }
 
-    bool PluginIsLoaded(std::string_view a_name)
+    // The loaded TESFile for a plugin name, or nullptr.
+    //
+    // NOT LookupLoadedModByName/LookupLoadedLightModByName, which is what this
+    // used to be. Those take their loop bound from GetLoadedModCount() and
+    // GetLoadedLightModCount(), and BOTH of those return a std::uint8_t. The
+    // regular list tops out at 255 so its cast is harmless, but the light list
+    // holds up to 4096 - so with 256+ ESLs installed the light count wraps and
+    // the lookup scans only (count & 0xFF) of them, answering "not loaded" for
+    // every light plugin past that point. Measured on the owner's load order:
+    // 523 ESLs, 523 & 0xFF = 11 scanned, and CostumeFW.esp sits at light index
+    // 426. CEF's own plugins are all ESL, so the whole store went inert (the
+    // CoreMissing guard read "core is missing" and left every box unread) while
+    // CostumeFW_Abilities.esp - the one full plugin - resolved fine.
+    //
+    // LookupModByName walks the data handler's file list, which is neither split
+    // nor counted through a byte, and compileIndex == 0xFF is how a file that is
+    // present but not loaded says so. This is the same pair CommonLibSSE itself
+    // uses in TESDataHandler::LookupFormID, VR branch included, which is why
+    // form resolution by colon-id kept working throughout.
+    const RE::TESFile* LoadedFile(std::string_view a_name)
     {
         auto* dh = RE::TESDataHandler::GetSingleton();
-        return dh && (dh->LookupLoadedModByName(a_name) != nullptr ||
-                         dh->LookupLoadedLightModByName(a_name) != nullptr);
+        if (!dh) {
+            return nullptr;
+        }
+        const RE::TESFile* file = dh->LookupModByName(a_name);
+        return (file && file->compileIndex != 0xFF) ? file : nullptr;
+    }
+
+    bool PluginIsLoaded(std::string_view a_name)
+    {
+        return LoadedFile(a_name) != nullptr;
     }
 
     TokenState ClassifyBoxToken(const std::string& a_colonId)
@@ -3626,7 +3665,9 @@ namespace CostumeFW
             const int slot = SlotNumberOf(armo);
             std::uint32_t local = 0;
             std::string plugin;
-            policy::ParseColonId(token, local, plugin);
+            // Cannot fail - TokenPool built every one of these ids itself, with
+            // MakeColonId. Discarded explicitly rather than silently ([[nodiscard]]).
+            (void)policy::ParseColonId(token, local, plugin);
             const int generation = policy::EqualsCI(plugin, tokenid::kCorePlugin)
                 ? 0 : tokenid::BoxPoolGeneration(plugin);
             const int box = FindBox(token);
@@ -3733,9 +3774,9 @@ namespace CostumeFW
                 { "Skyrim.esm", std::string(tokenid::kCorePlugin) });
         }
 
-        // 4. The tokens themselves. Generation 0 first, because every pool token
-        //    is checked against the generation-0 token on its slot - the BOD2
-        //    mask is inherited, and slot 31's is 31|41 rather than one bit.
+        // 4. The tokens themselves. Every pool token is checked against the
+        //    generation-0 token on its slot - the BOD2 mask is inherited, and
+        //    slot 31's is 31|41 rather than one bit.
         std::unordered_map<int, std::uint32_t> gen0Mask;
         std::unordered_map<std::string, std::string> byCarrierKey;  // key -> token
         int gen0Count = 0;
@@ -3743,6 +3784,27 @@ namespace CostumeFW
         auto* dh = RE::TESDataHandler::GetSingleton();
         auto* marker = BoxTokenMarkerKeyword();
         const auto pool = TokenPool();
+        // The whole generation-0 map BEFORE any pool token is judged against it.
+        // Filling it in the same pass made the check depend on the pool's order,
+        // and TokenPool sorts by (slot, colon-id) - so within a slot the local id
+        // decides, and generation 0 holds the LOW slots under its HIGH ids
+        // (slot 34 is 000A07, 37 is 000A0D, 38 is 000A0F) while BoxPool1 numbers
+        // those same slots from 000800 up. Every pool token on slots 30-43 was
+        // therefore read before its generation-0 counterpart existed in the map
+        // and reported as sitting on a slot "which no generation-0 token
+        // occupies" - 36 of 81 tokens, all of them false, including the slot
+        // 31|41 wig mask this check exists to protect.
+        for (const auto& token : pool) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin) ||
+                !policy::EqualsCI(plugin, tokenid::kCorePlugin)) {
+                continue;
+            }
+            if (auto* armo = ResolveArmo(token)) {
+                gen0Mask[SlotNumberOf(armo)] = static_cast<std::uint32_t>(armo->GetSlotMask());
+            }
+        }
         for (const auto& token : pool) {
             std::uint32_t local = 0;
             std::string plugin;
@@ -3784,7 +3846,7 @@ namespace CostumeFW
                 }
             }
             if (generation == 0) {
-                gen0Mask[slot] = mask;
+                // Already in gen0Mask - the pre-pass above put it there.
             } else if (const auto it = gen0Mask.find(slot); it == gen0Mask.end()) {
                 err(std::format("token {} is on biped slot {} (mask {:08X}), which no generation-0 "
                                 "token occupies", token, slot, mask));
@@ -4388,15 +4450,6 @@ namespace CostumeFW
             return nullptr;
         }
 
-        // Is this plugin loaded right now?
-        //
-        // BOTH collections have to be asked. LookupLoadedModByName walks only the
-        // regular files; an ESL-flagged plugin lives in the small-file collection
-        // and LookupLoadedLightModByName is what reaches it. CostumeFW.esp is
-        // ESL, CostumeFW_NPC.esp is ESL, and every CostumeFW_BoxPoolN.esp will be
-        // - so asking the regular collection alone answers "not loaded" for all
-        // of CEF's own plugins. Combined with the no-touch rule below, that would
-        // have meant CEF silently refusing to load anybody's boxes, forever.
         // Is the plugin that defines generation 0 present at all? Everything the
         // box store does assumes it, so when it is absent the answer is not
         // "every box is broken" - it is "CEF cannot judge anything right now",

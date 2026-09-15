@@ -7,6 +7,7 @@
 #include "Preset.h"
 #include "PublishStore.h"
 #include "SkinRebind.h"
+#include "TokenIdentity.h"  // the core plugin's official name, spelled once
 #include "UiOps.h"
 
 #include "RE/T/TESDataHandler.h"
@@ -465,8 +466,9 @@ namespace CostumeFW::SmfUI
             }
 
             ImGui::SeparatorText("Dependencies");
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            const bool espOk = dh && dh->LookupModByName("CostumeFW.esp") != nullptr;
+            // The same predicate the box store judges by, so this panel cannot
+            // say OK while the store is refusing to read anything (or vice versa).
+            const bool espOk = PluginIsLoaded(tokenid::kCorePlugin);
             ImGui::Text("RaceMenu / skee (body morph): %s",
                 BodyMorph::Available() ? "OK" : "MISSING");
             ImGui::Text("CostumeFW.esp: %s", espOk ? "OK" : "MISSING");
