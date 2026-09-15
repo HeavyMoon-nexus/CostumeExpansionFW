@@ -77,6 +77,13 @@ namespace CostumeFW::abilities
     };
     [[nodiscard]] Usage PoolUsage();
 
+    // The plugin that would ADD capacity: the generation after the highest
+    // installed one. Named rather than described because the spelling is not
+    // guessable - generation 1 is CostumeFW_Abilities.esp with NO number, so
+    // "the next one" invites CostumeFW_Abilities1.esp, which is the one
+    // spelling that is explicitly not valid (see TokenIdentity.h).
+    [[nodiscard]] std::string NextPoolPluginName();
+
     // One effect a content contributes: either a LIVE source Effect (full
     // fidelity - magnitude, area, duration and the conditions that gate it) or
     // a flat mgef+magnitude snapshot for the case where the original item is

@@ -978,8 +978,8 @@ namespace CostumeFW::abilities
                 SKSE::log::error(
                     "abilities: the pool is full ({} abilities across {} generation(s)). New "
                     "content keeps its looks and loses its stats; everything already allocated is "
-                    "unaffected. Install the next CostumeFW_Abilities plugin to add more.",
-                    u.total, g_generations.size());
+                    "unaffected. Install {} to add more.",
+                    u.total, g_generations.size(), NextPoolPluginName());
                 return nullptr;
             }
             const PoolKey key = *picked;
@@ -1222,6 +1222,14 @@ namespace CostumeFW::abilities
         RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
     }
 
+    std::string NextPoolPluginName()
+    {
+        // The generation AFTER the highest contiguous installed one. g_generations
+        // is that contiguous run (§4.2 allocates into nothing else), so its size
+        // is the highest generation and +1 is what would extend it.
+        return tokenid::AbilityPoolPluginName(static_cast<int>(g_generations.size()) + 1);
+    }
+
     Usage PoolUsage()
     {
         Usage u;
@@ -1383,13 +1391,15 @@ namespace CostumeFW::abilities
             const bool current = live != g_byContent.end() && live->second == key;
             const bool grant =
                 current && !e->invalid && !e->tombstone && want.contains(e->content);
-            const std::string key =
+            // Not "key": the loop already has one, and it is a PoolKey. This is
+            // the human-readable label the grant/revoke log line carries.
+            const std::string grantKey =
                 current ? "content:" + e->content
                         : std::format("content:{} (stale gen{})", e->content, e->generation);
             if (grant) {
-                GrantAbility(a_actor, spell, key);
+                GrantAbility(a_actor, spell, grantKey);
             } else {
-                RevokeAbility(a_actor, spell, key);
+                RevokeAbility(a_actor, spell, grantKey);
             }
         }
     }

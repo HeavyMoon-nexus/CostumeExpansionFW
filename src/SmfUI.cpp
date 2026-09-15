@@ -498,7 +498,8 @@ namespace CostumeFW::SmfUI
             if (abilities::Ready() && pool.free == 0) {
                 ImGui::TextWrapped("The pool is full. Costumes already registered are unaffected; "
                                    "a NEW one will look right and pass no stats through. "
-                                   "Installing the next CostumeFW_Abilities plugin adds more.");
+                                   "Installing %s adds more.",
+                    abilities::NextPoolPluginName().c_str());
             } else if (abilities::Ready() && pool.free <= 64) {
                 ImGui::TextWrapped("Running low. Each costume whose enchantment CHANGES takes a "
                                    "new slot and keeps the old one, so a piece that is re-enchanted "
