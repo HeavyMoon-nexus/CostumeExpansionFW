@@ -589,7 +589,6 @@ namespace CostumeFW
         }
 
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
-        bool PluginLoaded(std::string_view a_name);                    // fwd (defined below)
         bool CorePluginLoaded();                                       // fwd (defined below)
         std::string_view FilenameOf(const RE::TESFile* a_file);        // fwd (defined below)
         RE::BGSKeyword* BoxTokenMarkerKeyword();                       // fwd (defined below)
@@ -3452,6 +3451,13 @@ namespace CostumeFW
         return tokenid::CarrierKeyFor(a_token, TokenSlot(a_token));
     }
 
+    bool PluginIsLoaded(std::string_view a_name)
+    {
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        return dh && (dh->LookupLoadedModByName(a_name) != nullptr ||
+                         dh->LookupLoadedLightModByName(a_name) != nullptr);
+    }
+
     TokenState ClassifyBoxToken(const std::string& a_colonId)
     {
         StoreLock lk;
@@ -3463,7 +3469,7 @@ namespace CostumeFW
         if (!tokenid::IsBoxTokenPlugin(plugin)) {
             return TokenState::ForeignPlugin;
         }
-        if (!PluginLoaded(plugin)) {
+        if (!PluginIsLoaded(plugin)) {
             // A pool generation that is simply not installed right now. The box
             // is dormant, not broken: put the plugin back and it returns with
             // the same boxId, token and carrier.
@@ -4028,20 +4034,13 @@ namespace CostumeFW
         // - so asking the regular collection alone answers "not loaded" for all
         // of CEF's own plugins. Combined with the no-touch rule below, that would
         // have meant CEF silently refusing to load anybody's boxes, forever.
-        bool PluginLoaded(std::string_view a_name)
-        {
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            return dh && (dh->LookupLoadedModByName(a_name) != nullptr ||
-                             dh->LookupLoadedLightModByName(a_name) != nullptr);
-        }
-
         // Is the plugin that defines generation 0 present at all? Everything the
         // box store does assumes it, so when it is absent the answer is not
         // "every box is broken" - it is "CEF cannot judge anything right now",
         // and the settings must be left exactly as they are.
         bool CorePluginLoaded()
         {
-            return PluginLoaded(tokenid::kCorePlugin);
+            return PluginIsLoaded(tokenid::kCorePlugin);
         }
 
         RE::EffectSetting* ResolveMgef(const std::string& a_colonId)

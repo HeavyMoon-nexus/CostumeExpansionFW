@@ -69,6 +69,10 @@ internal static class Program
                 return BuildBoxPool(int.Parse(args[1]), args[2], args[3], perSlot);
             } catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
         }
+        if (args.Length >= 3 && args[0] == "--verify-abilities") {
+            try { return VerifyAbilityPool(int.Parse(args[1]), args[2]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
         if (args.Length >= 3 && args[0] == "--verify-pool") {
             try { return VerifyBoxPool(args[1], args[2]); }
             catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
@@ -689,6 +693,100 @@ internal static class Program
         Console.WriteLine("verify pool " + generation + ": " + armors.Count + " ARMO + " +
                           addons.Count + " ARMA, ESL, HEDR " + kHeaderVersion +
                           ", masters/marker/BOD2-vs-gen0/races/carrier-keys/KID OK");
+        return 0;
+    }
+
+    // --- v1.6.4 ability pool generations -----------------------------------
+    // tools/make_ability_pool.py writes these; this says whether what it wrote
+    // is what the runtime will accept. The two halves that matter are the ones
+    // a mistake makes invisible until a save is already pointing into the file:
+    // the ESL flag (generation 1 is NOT ESL and can never become one; every
+    // later generation must be, or it burns a load-order slot for nothing), and
+    // a CONTIGUOUS run of local ids from 0x800 - because the runtime measures a
+    // generation's size by walking until an id stops resolving, so a gap at
+    // 0x8xx silently shortens the pool to that point.
+    private static int VerifyAbilityPool(int generation, string path)
+    {
+        if (generation < 1) {
+            Console.Error.WriteLine("generation must be >= 1");
+            return 1;
+        }
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing ability pool: " + path);
+            return 1;
+        }
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+
+        var wantName = generation == 1 ? "CostumeFW_Abilities.esp"
+                                       : "CostumeFW_Abilities" + generation + ".esp";
+        if (!Path.GetFileName(path).Equals(wantName, StringComparison.OrdinalIgnoreCase))
+            errors.Add("generation " + generation + " must be named " + wantName + ", got " +
+                       Path.GetFileName(path));
+
+        var esl = (mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) != 0;
+        if (generation == 1 && esl)
+            errors.Add("generation 1 shipped WITHOUT the ESL flag and cannot gain it - the flag " +
+                       "changes how every form in the file is addressed");
+        if (generation >= 2 && !esl)
+            errors.Add("generation " + generation + " must carry the ESL flag");
+
+        if (Math.Abs(mod.ModHeader.Stats.Version - kHeaderVersion) > 0.001f)
+            errors.Add("HEDR version must be " + kHeaderVersion + ", got " +
+                       mod.ModHeader.Stats.Version);
+
+        var masters = mod.ModHeader.MasterReferences.Select(x => x.Master.FileName.String).ToList();
+        if (masters.Count != 1 || !masters[0].Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+            errors.Add("masters must be [Skyrim.esm], got [" + string.Join(", ", masters) + "]");
+
+        var spells = mod.Spells.ToList();
+        var others = mod.EnumerateMajorRecords()
+            .Where(x => x.FormKey.ModKey == mod.ModKey)
+            .Count() - spells.Count;
+        if (others != 0)
+            errors.Add("the pool must hold SPEL records only, found " + others + " other record(s)");
+
+        var wantCount = generation == 1 ? 1024 : 2048;
+        if (spells.Count != wantCount)
+            errors.Add("generation " + generation + " must hold " + wantCount + " abilities, got " +
+                       spells.Count);
+
+        var ids = spells.Select(x => x.FormKey.ID).OrderBy(x => x).ToList();
+        for (var i = 0; i < ids.Count; i++) {
+            var want = (uint)(0x800 + i);
+            if (ids[i] != want) {
+                errors.Add("local ids must run contiguously from 000800; expected " +
+                           want.ToString("X6") + " at position " + i + ", got " +
+                           ids[i].ToString("X6"));
+                break;
+            }
+        }
+        if (ids.Count > 0 && ids[ids.Count - 1] > 0xFFF)
+            errors.Add("local id " + ids[ids.Count - 1].ToString("X6") +
+                       " is outside the light range 800-FFF");
+
+        foreach (var spell in spells) {
+            var want = "CFW_Ability_" + (spell.FormKey.ID - 0x800).ToString("0000");
+            if (spell.EditorID != want)
+                errors.Add(spell.FormKey.ID.ToString("X6") + " EditorID is '" + spell.EditorID +
+                           "', expected '" + want + "'");
+            if (spell.Type != SpellType.Ability)
+                errors.Add(want + " is not an Ability spell");
+            if (spell.CastType != CastType.ConstantEffect)
+                errors.Add(want + " is not constant-effect");
+            if (spell.TargetType != TargetType.Self)
+                errors.Add(want + " does not target self");
+            if (spell.Effects.Count != 0)
+                errors.Add(want + " ships with " + spell.Effects.Count + " effect(s) - the pool " +
+                           "is empty by design and CEF fills it at kDataLoaded");
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify abilities " + generation + ": " + spells.Count +
+                          " SPEL, " + (esl ? "ESL" : "non-ESL") + ", HEDR " + kHeaderVersion +
+                          ", Skyrim.esm-only, ids/EDID/type/empty-effects OK");
         return 0;
     }
 

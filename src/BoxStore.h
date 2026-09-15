@@ -95,6 +95,13 @@ namespace CostumeFW
     // costume can stop being published (PLAN §5.4).
     [[nodiscard]] TokenState ClassifyBoxToken(const std::string& a_colonId);
 
+    // Is a plugin in this load order? Checks BOTH the normal and the light-mod
+    // lists. CommonLibSSE's LookupLoadedModByName walks GetLoadedMods(), which
+    // is normal plugins ONLY - and CEF's own plugins are nearly all ESL, so
+    // asking it alone answers "no" for every one of them and every guard built
+    // on it fires forever.
+    [[nodiscard]] bool PluginIsLoaded(std::string_view a_name);
+
     // A logical box id derived from a seed string, stable across runs and
     // builds: the same seed always gives the same id, so a migration that is
     // interrupted before its save cannot hand one box two identities. Boxes

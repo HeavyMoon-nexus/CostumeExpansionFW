@@ -491,10 +491,13 @@ namespace CostumeFW::SmfUI
             // not doing anything either, because a save may still name it.
             ImGui::Text("Slots: %d in use, %d kept for old saves, %d free of %d", pool.used,
                 pool.tombstoned, pool.free, pool.total);
-            if (pool.free == 0) {
+            // Guarded on Ready: with no pool installed at all the counts are
+            // zero, and "the pool is full" is the wrong half of the truth.
+            if (abilities::Ready() && pool.free == 0) {
                 ImGui::TextWrapped("The pool is full. Costumes already registered are unaffected; "
-                                   "a NEW one will look right and pass no stats through.");
-            } else if (pool.free <= 64) {
+                                   "a NEW one will look right and pass no stats through. "
+                                   "Installing the next CostumeFW_Abilities plugin adds more.");
+            } else if (abilities::Ready() && pool.free <= 64) {
                 ImGui::TextWrapped("Running low. Each costume whose enchantment CHANGES takes a "
                                    "new slot and keeps the old one, so a piece that is re-enchanted "
                                    "or tempered often costs more than one.");
