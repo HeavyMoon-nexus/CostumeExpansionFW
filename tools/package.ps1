@@ -42,8 +42,12 @@ if ($LASTEXITCODE -ne 0) {
 # custom race. Also checks the carrier keys are unique and the KID ini names
 # every token, because a duplicate key means two boxes overwriting each other's
 # meshes and a missing KID line means a tooltip that never appears.
+# The meshes root is passed too, so the carrier assets each token needs (17
+# files apiece) are counted before anything is archived. A token whose files did
+# not make it is a box that renders nothing and says nothing.
 & dotnet run --project (Join-Path $PSScriptRoot 'espmerge\espmerge.csproj') --no-restore -- `
-    --verify-pool "$repo\package_assets\CostumeFW_BoxPool1.esp" "$mod\CostumeFW.esp"
+    --verify-pool "$repo\package_assets\CostumeFW_BoxPool1.esp" "$mod\CostumeFW.esp" `
+    "$repo\package_assets\meshes"
 if ($LASTEXITCODE -ne 0) {
     throw "espmerge --verify-pool FAILED (exit $LASTEXITCODE) on CostumeFW_BoxPool1.esp - nothing staged."
 }

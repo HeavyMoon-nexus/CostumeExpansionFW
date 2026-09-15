@@ -74,7 +74,9 @@ internal static class Program
             catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
         }
         if (args.Length >= 3 && args[0] == "--verify-pool") {
-            try { return VerifyBoxPool(args[1], args[2]); }
+            // Optional 4th arg: the meshes root to check the carrier files under
+            // (package_assets/meshes). Without it the asset check is skipped.
+            try { return VerifyBoxPool(args[1], args[2], args.Length > 3 ? args[3] : null); }
             catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
         }
         if (args.Length >= 3 && args[0] == "--build-npc") {
@@ -559,7 +561,7 @@ internal static class Program
         return VerifyBoxPool(outPath, corePath);
     }
 
-    private static int VerifyBoxPool(string path, string corePath)
+    private static int VerifyBoxPool(string path, string corePath, string meshRoot = null)
     {
         if (!File.Exists(path)) {
             Console.Error.WriteLine("missing pool plugin: " + path);
@@ -613,6 +615,20 @@ internal static class Program
         var coreBySlot = core.Armors
             .Where(x => IsBoxTokenEdid(x.EditorID))
             .ToDictionary(x => int.Parse(x.EditorID.Substring(kBoxTokenEdidPrefix.Length)));
+
+        // P4. A pool generation carries CostumeFW.esp as a master, so it CAN
+        // override the core's records, and a later generation could override an
+        // earlier one. Neither is ever right: a save points at a record by
+        // (plugin, id), and a pool that redefines somebody else's record changes
+        // what that id means for everyone who has the file. Every record here has
+        // to be this plugin's own.
+        foreach (var rec in mod.EnumerateMajorRecords()) {
+            if (rec.FormKey.ModKey != mod.ModKey) {
+                errors.Add("overrides " + rec.FormKey.ModKey.FileName + " record " +
+                           rec.FormKey.ID.ToString("X6") + " (" + rec.EditorID +
+                           ") - a pool defines its own records and nobody else's");
+            }
+        }
 
         var carrierKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var armor in armors) {
@@ -686,6 +702,39 @@ internal static class Program
                            armor.FormKey.ID.ToString("X") + "~" + Path.GetFileName(path);
                 if (!lines.Contains(want)) errors.Add("KID ini is missing: " + want);
             }
+        }
+
+        // P6. The carrier assets each token needs: the base NIF, eight rotation
+        // NIFs and eight rotation XMLs, all named after the carrier key. The
+        // pool ARMA points straight at _carrier_r0.nif, so a token whose files
+        // are missing from the archive is a box that renders nothing and says
+        // nothing - and the file list is long enough (17 per token) that a
+        // partial copy is easy to miss by eye.
+        if (meshRoot != null) {
+            var carrierDir = Path.Combine(meshRoot, "CostumeFW");
+            var xmlDir = Path.Combine(carrierDir, "XML");
+            var missing = 0;
+            string firstMissing = null;
+            foreach (var armor in armors) {
+                var key = CarrierKey(generation, armor.FormKey.ID);
+                var want = new List<string> { Path.Combine(carrierDir, key + "_carrier.nif") };
+                for (var r = 0; r < 8; r++) {
+                    want.Add(Path.Combine(carrierDir, key + "_carrier_r" + r + ".nif"));
+                    want.Add(Path.Combine(xmlDir, key + "_physics_r" + r + ".xml"));
+                }
+                foreach (var f in want) {
+                    if (!File.Exists(f)) {
+                        missing++;
+                        firstMissing ??= f;
+                    }
+                }
+            }
+            if (missing != 0)
+                errors.Add(missing + " carrier asset(s) missing under " + meshRoot +
+                           ", first: " + firstMissing);
+            else
+                Console.WriteLine("  carrier assets: " + (armors.Count * 17) +
+                                  " file(s) present under " + meshRoot);
         }
 
         foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
