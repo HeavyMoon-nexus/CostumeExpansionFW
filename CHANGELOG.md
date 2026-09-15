@@ -77,6 +77,12 @@ am not naming a version this time.
 - `CEF_abilities.json` records which plugin each ability came from instead of a
   number. Existing registries convert on first load; see the note about going
   back, above.
+
+  **Nothing to re-capture.** The conversion changes the file's shape, not what
+  is in it. Your boxes keep their contents and each piece keeps the ability it
+  already had. What a piece is worth has been re-read from your stored original
+  on every save load since 1.6.1, so a costume captured on an older version
+  needs nothing done to it.
 - The MCM's Persist page still runs out of room past 11 entries. That is SkyUI's
   option buffer rather than a CEF limit, and SMF has no such limit.
 
