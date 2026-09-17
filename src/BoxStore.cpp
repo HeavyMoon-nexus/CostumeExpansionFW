@@ -2212,12 +2212,31 @@ namespace CostumeFW
     void ReapplyBoxes()
     {
         StoreLock lk;
+        int quarantined = 0;
         for (const auto& b : g_boxes) {
+            // Same gate as LoadBoxes, and it has to be: this runs on EVERY save
+            // load, so without it the quarantine lasted exactly as long as the
+            // three seconds between reading the settings and the first
+            // kPostLoadGame pass. In-game 2026-09-17, with all 20 tokens
+            // unresolvable: "0 content(s) registered" at load, "54 content(s)
+            // registered" right after this function. Nothing reached the player
+            // there only because an unresolvable token is never worn - the state
+            // was still the one the load had just refused to produce, and a
+            // second path that does not read tokenState is how the dormant box
+            // put its costume on in the first place (7032ecc).
+            if (!BoxTokenUsable(b)) {
+                quarantined += static_cast<int>(b.contents.size());
+                continue;
+            }
             for (const auto& c : b.contents) {
                 RegisterBoxById(c, b.token);
             }
             SetTokenStats(b);  // token fields revert on load - re-apply
             ApplyBoxLabelToToken(b);  // inventory name too (rename feature)
+        }
+        if (quarantined > 0) {
+            SKSE::log::info("settings: {} content(s) left unregistered - quarantined box(es)",
+                quarantined);
         }
         // Persist actives are per-save: the co-save restore (which precedes this
         // kPostLoadGame pass) already re-registered them (M2, CEF_STATE_SCOPE.md §3).
@@ -6315,6 +6334,8 @@ namespace CostumeFW
             }
         }
         int idx = FindBox(token);
+        bool madeBox = false;   // this call created the definition
+        bool tookContent = false;  // this call put the content in it
         if (idx < 0) {
             BoxDefInfo fresh;
             fresh.boxId = NewBoxId();  // issued once; survives rename and publish
@@ -6322,6 +6343,7 @@ namespace CostumeFW
             fresh.token = token;
             g_boxes.push_back(std::move(fresh));
             idx = static_cast<int>(g_boxes.size()) - 1;
+            madeBox = true;
         } else if (!a_label.empty()) {
             g_boxes[idx].label = a_label;
         }
@@ -6337,6 +6359,7 @@ namespace CostumeFW
                 return false;
             }
             box.contents.push_back(content);  // caller registers + reconciles
+            tookContent = true;
         }
 
         // The settings are the record of what just happened. If they did not
@@ -6345,15 +6368,28 @@ namespace CostumeFW
         // the item while failing to record where it went is the one outcome
         // worth refusing (F05).
         const bool saved = WriteJson();
-        SetTokenStats(g_boxes[idx]);  // write armor/weight onto the token now
         if (!saved) {
+            // Put memory back where the disk still is. Reporting failure kept
+            // the physical item with the player, but the definition went on
+            // holding the id - and the NEXT successful save wrote that id out,
+            // so the box claimed a piece its owner was still wearing (in-game
+            // 2026-09-17: box 43 listed 0D4FF7 whose custody row says
+            // "returned"). A capture that did not happen must leave nothing
+            // behind, including a box this call invented for it.
+            if (tookContent) {
+                g_boxes[idx].contents.pop_back();
+            }
+            if (madeBox) {
+                g_boxes.erase(g_boxes.begin() + idx);
+            }
             SKSE::log::error(
-                "boxes: AddBox label='{}' token='{}' content='{}' applied in memory but the "
-                "settings could NOT be saved - reporting failure so nothing is moved into "
+                "boxes: AddBox label='{}' token='{}' content='{}' could NOT save the settings - "
+                "reporting failure and rolling the definition back, so nothing is moved into "
                 "storage on the strength of it",
                 a_label, token, content);
             return false;
         }
+        SetTokenStats(g_boxes[idx]);  // write armor/weight onto the token now
         SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, token, content);
         return true;
     }
