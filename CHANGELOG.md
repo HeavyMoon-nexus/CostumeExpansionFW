@@ -69,6 +69,28 @@ am not naming a version this time.
   in it. You cannot reach it by uninstalling anything there - there was only the
   one plugin and it is required - but a hand-edited `CEF_settings.json` with a
   token that does not resolve gets you the same stuck costume.
+- **"Prepare for uninstall" left your NPCs dressed.** It gave back what your
+  boxes held, took the tokens off you and detached your own meshes, then
+  stopped. Every published costume stayed on the NPC wearing it, with its
+  token, its carrier and its ability spell, which is the last thing that
+  should be sitting in the save of a mod you are about to delete. It recalls
+  every published costume and clears every NPC persist assignment now. An NPC
+  it cannot reach while doing that - one who is unloaded, or no longer in the
+  save - is counted in the log, because the token in that inventory is out of
+  reach by definition.
+- **And it left the items inside published costumes in storage.** The same
+  cleanup gives back what a box holds and whichever persist items you have
+  switched on. A published costume is neither of those: publishing freezes the
+  box into a snapshot, so its pieces sat in CEF's hidden store with nothing
+  left to walk over them, while the notification told you it was safe to
+  remove the mod. They come back now. Where this save still has the original
+  you get the original, tempering and enchantment included; where it does not,
+  you get a plain copy.
+
+  **Both of these are in 1.6.0 through 1.6.2.2.** Publishing and NPC persist
+  arrived in 1.6.0 and the uninstall flow was never taught about either. If you
+  are removing CEF on one of those versions, unpublish your costumes back into
+  their boxes first and then run the cleanup, which does know about boxes.
 - **A published wig stopped hiding the NPC's own hair.** A wig box occupies both
   the hair slot and the long-hair slot; the published copy only took the first,
   so the NPC's real hair came through it.
