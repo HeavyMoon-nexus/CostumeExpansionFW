@@ -1340,6 +1340,38 @@ namespace CostumeFW
         // bindings) and remove every npc-persist assignment; unresolvable
         // assignments (actor unloaded/gone) are dropped so nothing rides the
         // next co-save of a mod the user is about to delete.
+        //
+        // The published costumes' CONTENTS, before the NPC gate below. Both
+        // cleanup twins return what a BOX holds and what persist has active,
+        // and a published costume is neither: publishing moves the box into a
+        // frozen snapshot, so its items are in the hidden store with nothing
+        // left iterating over them. The dialog says "Return all captured items"
+        // and the notification says "safe to uninstall"; for anyone with a
+        // published costume both were false, and deleting the mod on the
+        // strength of them lost the items (in-game 2026-09-17: 14 still held
+        // after the run). Shipped that way since publish existed - main's
+        // UninstallCleanup has no publish arm either - so this is not a 1.6.4
+        // regression, just a hole 1.6.4 is the first version to look into.
+        //
+        // Above the NpcEspLoaded gate on purpose: a snapshot is plain data read
+        // from CEF_settings.json (SharedBySlot walks g_published and resolves no
+        // form), so it outlives the NPC add-on being uninstalled - and that user
+        // needs their items back more than most, not less. Fabricate fallback to
+        // match the box and persist loops: a plain copy beats nothing when the
+        // original is gone, and no content id is in both a box and a snapshot
+        // for it to hand back twice.
+        int returned = 0;
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            if (const auto* snap = PubBySlot(slot)) {
+                for (const auto& id : snap->contents) {
+                    returned += ReturnStoredItem(id, true) ? 1 : 0;
+                }
+            }
+        }
+        if (returned) {
+            SKSE::log::info("uninstall cleanup: returned {} item(s) from published costume(s)",
+                returned);
+        }
         if (!NpcEspLoaded()) {
             return;
         }
