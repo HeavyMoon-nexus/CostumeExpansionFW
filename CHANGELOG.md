@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.6.4 (unreleased)
+## v1.6.4 (2026-09-18)
 
 A biped slot used to mean one box. There were 27 of them, one per slot, and if
 you wanted two different skirts set up at once you could not have them - slot 52
