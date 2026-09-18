@@ -1,0 +1,39 @@
+Covers 1.6.2.1, 1.6.2.2 and 1.6.3 as well - those went to GitHub only. Full write-up with the reasoning is in the articles.
+
+Note - one installer now, instead of three downloads (main, NPC add-on, VR)
+Note - CostumeFW_BoxPool1.esp is part of the core install and not optional. ESL, no load-order slot. Do not remove it once a box sits on one of its tokens
+Note - CostumeFW_Abilities.esp is optional, but stat passthrough needs it. Normal ESP, so it costs one plugin slot
+Note - bonuses left over from before 1.6.3 are still in your save. CEF shows what it thinks they are on load; "cef abilities legacy" prints it again. Clearing one is manual - see the article
+Note - the MCM still works, except that a slot holding more than one box gets no MCM page. No version named for its removal this time
+
+Added - an equipment slot can hold four boxes instead of one, 108 in all
+Added - stat passthrough rebuilt on pre-made spells, so a bonus can be taken back off after a restart
+Added - CEF reports when a captured original has gone missing from storage
+Added - the ability pool can be extended with a second plugin
+Added - "cef av" - what CEF is currently doing to your actor values
+Added - "cef tokens" - every box token, its plugin, and what is using it
+Added - a startup check that writes what it found to the log
+Added - the last two runs' logs are kept
+
+Fixed - a bonus from a worn box could stay on your character permanently after quitting
+Fixed - two pieces carrying the same enchantment were worth one
+Fixed - a box whose plugin you removed put its costume on you and nothing could take it off (also in 1.6.2)
+Fixed - "Prepare for uninstall" left published costumes on NPCs (also in 1.6.2)
+Fixed - "Prepare for uninstall" left the items inside published costumes in storage (also in 1.6.2)
+Fixed - a box name containing "%s" or "%n" could crash the game
+Fixed - a published costume did not count as owning the items in it
+Fixed - disabling a costume's mod made its conditional enchantments unconditional
+Fixed - unpublishing could put a costume back on the head slot. Publishing reserves its slot now
+Fixed - a published wig stopped hiding the NPC's own hair
+Fixed - reloading settings left NPCs stripped of their costumes
+Fixed - a blocked item still showed on NPCs
+Fixed - renaming a box changed which tokens CEF thought were free
+Fixed - a box's tooltip could show another box's contents
+Fixed - a damaged CEF_settings.json could produce boxes on things that are not box tokens
+Fixed - a load that drops most of your boxes is now refused instead of written back
+Fixed - a preset with a wrong field type could take the game down
+Fixed - the Recovery page cost frames while it was open
+
+Changed - the Recovery page says what last happened to each row, and disables Recover where it cannot work
+Changed - recovering an item says whether you got the original or a plain copy
+Changed - CEF_abilities.json records which plugin each ability came from. Converts on first load; nothing to re-capture

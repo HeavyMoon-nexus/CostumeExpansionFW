@@ -1,0 +1,265 @@
+[center][size=6][b]What is in CEF 1.6.4[/b][/size][/center]
+[center][size=4]Everything between 1.6.2 and 1.6.4, and why each of it happened[/size][/center]
+
+[line]
+
+The file page changelog says what changed. This says why, for the parts where the reason
+is worth knowing.
+
+If you are coming from 1.6.2, this release brings four versions at once. 1.6.2.1, 1.6.2.2
+and 1.6.3 went to GitHub only and never went up here, so everything in them is in this
+package.
+
+[size=5][b]Before you install[/b][/size]
+
+[b]One installer, instead of three downloads.[/b] The main mod, the NPC add-on and the VR
+build were separate files. They are all in this one and it asks what you want.
+
+[b]Two plugins come with this, and they are not the same kind of thing.[/b]
+CostumeFW_BoxPool1.esp is part of the core install and is not optional: it carries the
+extra box tokens that let one equipment slot hold more than one box. It is ESL, so it
+costs no load-order slot. Do not remove it once a box sits on one of its tokens - that box
+goes dormant, which is to say it keeps its contents and its name but cannot be worn or
+edited until the plugin comes back.
+
+CostumeFW_Abilities.esp is optional, but stat passthrough needs it. It is a normal ESP
+rather than an ESL, so it does cost one of your 254 plugin slots. Leave it unticked and
+your costumes look exactly the same; they just carry no stats, and CEF says so instead of
+pretending. The reason it cannot be an ESL is below.
+
+[b]Bonuses left over from before 1.6.3 are still in your save.[/b] This release stops new
+ones happening. It cannot clean up what is already there, because CEF cannot tell its own
+leftovers from a bonus another mod applied on purpose, and guessing wrong would take away
+something you meant to have.
+
+It will tell you what it thinks they are. Load a save made before 1.6.3 and CEF adds up
+what the old mechanism would have been applying and shows it; [b]cef abilities legacy[/b]
+prints the same again with the explanation. Values from conditional enchantments are
+listed separately, because whether one of those was applying depends on what you were
+doing at the moment you saved.
+
+To clear one: take every box off, read [b]player.getavinfo health[/b] - or whatever the
+box fortifies - and look at the number next to Perm. If it is not zero,
+[b]player.modav health -<that number>[/b] cancels it. An NPC wearing a published costume
+collects the same leftovers and they are much harder to notice.
+
+[b]The MCM is still here[/b] and still works, with one gap: an equipment slot holding more
+than one box gets no MCM page. Its pages are keyed by the slot number, so a slot with two
+boxes names neither of them, and a page that quietly edited the wrong box would be worse
+than no page. Use SMF for those. The MCM is still on its way out; I named 1.6.3 and then
+1.6.4 for that and both slipped, so I am not naming a version this time. On VR, SKSE Menu
+Framework needs [url=https://www.nexusmods.com/skyrimspecialedition/mods/183466]ImGui VR
+Helper[/url].
+
+[line]
+
+[size=5][b]The stuck bonus, and why the spells are pre-made now[/b][/size]
+
+Quit Skyrim while wearing a box and the bonus that box was giving you could stay on your
+character permanently. It happened once per session, every session, and it added up. The
++180 Fortify Health that started this work was three sessions of one box.
+
+Fixing it meant replacing how enchantment passthrough works rather than patching it. The
+old mechanism built a spell while the game was running. A spell built that way does not
+exist on the next launch, so your save drops the active effect that named it without ever
+ending it, and the number it added stays with nothing able to take it back off. No amount
+of care inside that approach avoids this - the spell has to still be there when the save
+is read.
+
+So the spells are pre-made. CostumeFW_Abilities.esp ships 1,024 empty ones and CEF fills
+them in from a small file it keeps next to your settings, before your save is loaded. That
+ordering is the whole fix, and it is also why that plugin cannot be an ESL: your save
+points at fixed form IDs in it, and the light range cannot hold enough of them.
+
+[b]Two pieces with the same enchantment were worth one.[/b] A box holding two Imperial
+cuirasses, a heavy one and a light one carrying the same +40 Fortify Health, gave you +40.
+CEF put both effects in one spell, and two entirely identical effects inside one spell
+collapse into one.
+
+This was measured rather than assumed. Two pieces with Resist Fire 40 behave the same way,
+so it is not about Health. Two effects of the same kind with different magnitudes both
+apply - Fortify Alteration 22 and 20 read 42. Two identical effects in different spells
+both apply. So what the engine keys on is the whole content of an effect, within one
+spell. Each piece has its own ability now, so nothing shares a spell and there is nothing
+left to collapse.
+
+[b]The pool can be extended.[/b] It was a single plugin of 1,024 abilities with no way to
+add more. A second one is ESL and costs no load-order slot, and [b]cef abilities[/b] now
+reports free space per plugin and which ability the next costume would take. Nothing to
+re-capture when you add one: what a piece is worth has been re-read from your stored
+original on every save load since 1.6.1, so a costume captured on an older version needs
+nothing done to it.
+
+[line]
+
+[size=5][b]One slot, several boxes[/b][/size]
+
+There were 27 box tokens, one per equipment slot, and if you wanted two different skirts
+set up at once you could not have them - the slot was already spoken for. A slot holds
+four boxes now, 108 in all. The SMF box list shows the token's name beside a box when its
+slot has company, so two rows on the same slot are telling apart.
+
+This is what CostumeFW_BoxPool1.esp is for, and why it ships in the core install rather
+than as an option.
+
+[line]
+
+[size=5][b]Prepare for uninstall did not finish the job[/b][/size]
+
+Two faults, both of them in 1.6.2 and in every version back to 1.6.0.
+
+[b]It left your NPCs dressed.[/b] It gave back what your boxes held, took the tokens off
+you and detached your own meshes, then stopped. Every published costume stayed on the NPC
+wearing it, with its token, its carrier and its ability spell, which is the last thing
+that should be sitting in the save of a mod you are about to delete. It recalls every
+published costume and clears every NPC persist assignment now.
+
+[b]And it left the items inside published costumes in storage.[/b] The same cleanup gives
+back what a box holds and whichever persist items you have switched on. A published
+costume is neither of those: publishing freezes the box into a snapshot, so its pieces sat
+in CEF's hidden store with nothing left to walk over them, while the notification told you
+it was safe to remove the mod. They come back now - the original where this save still has
+it, tempering and enchantment included, and a plain copy where it does not.
+
+If you are removing CEF on 1.6.2, unpublish your costumes back into their boxes first and
+then run the cleanup, which does know about boxes.
+
+[line]
+
+[size=5][b]Publishing[/b][/size]
+
+[b]A published costume did not count as owning the items in it.[/b] Publishing removes the
+box it came from, and CEF then treated those items as belonging to nobody. You could
+capture the same item into a second box, and since only one holder can display an item,
+taking either one off stopped the other showing. Unpublishing ignored whether the items
+actually went back into the box and deleted the costume anyway, so a piece that could not
+be restored took the record of what the costume was with it. Unpublishing now checks the
+whole restore before it dissolves the costume.
+
+[b]Unpublishing could put a costume back on the head slot without saying so.[/b]
+Publishing freed the slot the box was on, and if another box took that slot meanwhile the
+costume had to come back somewhere else. CEF picked the lowest free slot, which is the
+head, and equipping it made the head disappear. The first fix stopped automatic picks
+landing on head or hair unless nothing else was free, and made CEF say so when a costume
+came back somewhere new. This release removes the case instead: publishing holds the slot
+in reserve rather than giving it away, so unpublishing puts the costume back where it came
+from. If you published on 1.6.2 or 1.6.3 and then took the freed slot, the update finds
+those costumes and gives each one another token on the same slot, so the outfit comes back
+hiding what it always did.
+
+[b]Disabling a costume's mod made its conditional enchantments unconditional.[/b] A "while
+sneaking" bonus would sit on you while standing. CEF reads a captured piece's enchantment
+from the stored original where it can, because that carries the conditions and the
+duration, and the flat fallback carries neither. Publishing had the same defect on its own
+side: a published costume rebuilt its stats from a frozen list that held only the effect
+and its magnitude. Both build their stats the way a normal box does now.
+
+[b]A published wig stopped hiding the NPC's own hair.[/b] A wig box occupies both the hair
+slot and the long-hair slot, and the published copy only took the first, so the NPC's real
+hair came through it.
+
+[line]
+
+[size=5][b]Costumes that would not come off[/b][/size]
+
+[b]A box whose plugin you removed put its costume on you, and nothing could take it
+off.[/b] None of CEF's own controls would remove it; only turning CEF off entirely did. A
+persist item is marked by having no token at all, and a box whose token cannot be found
+looked exactly the same from the inside, so it was treated as one. A dormant box now puts
+nothing on you, and the box list says which box is dormant and why.
+
+This one is in 1.6.2 as well. You cannot reach it there by uninstalling anything, since
+1.6.2 has one plugin and it is required, but a hand-edited CEF_settings.json with a token
+that does not resolve gets you the same stuck costume.
+
+Two related guards came with it. A damaged CEF_settings.json can no longer produce boxes
+on things that are not box tokens - a definition whose token does not resolve is kept and
+quarantined with the reason, rather than dropped or half-loaded. And if a load would drop
+most of your boxes at once, CEF refuses the load instead of writing the result back; the
+file on disk is left exactly as it was. That one is there because a bad load used to be
+able to make itself permanent.
+
+[line]
+
+[size=5][b]Crashes[/b][/size]
+
+[b]A box name containing a percent sign could crash the game.[/b] Console output treated
+the name as a format string, so "%s" or "%n" in a box label, a shape name or an NPC name
+made it read arguments that were never there. Listing your boxes was enough to hit it.
+
+[b]A preset with a wrong field type could take the game down.[/b] A hand-edited or
+truncated preset file is now refused with a reason instead of trusted.
+
+[line]
+
+[size=5][b]NPCs[/b][/size]
+
+[b]Reloading settings left NPCs stripped of their costumes.[/b] Anything that rebuilds
+CEF's state unregisters every actor first, and only the player was being put back. This
+did not need the settings file at all: adding one entry to the blocked list runs the same
+rebuild, so blocking an unrelated item undressed an NPC standing in front of you.
+
+[b]A blocked item still showed on NPCs.[/b] The blocked list is enforced where CEF
+registers an item for display, and the NPC path was going straight to the model instead.
+The item was also refused for the physics carrier, so what was drawn and what physics was
+built from disagreed.
+
+[line]
+
+[size=5][b]Knowing what happened[/b][/size]
+
+[b]CEF tells you when a captured original is gone.[/b] Disable a costume's plugin for a
+single session and save, and Skyrim strips that plugin's items out of every container,
+storage included. The box definition survives and the costume still displays; what is gone
+is the captured original with its tempering and its player enchantment, and there was
+nothing anywhere to tell you. Your save now carries a list of what storage held when it
+was written and compares it on the next load: an item that has left is named in the log,
+marked "lost" on the Recovery page, and reported on screen. It cannot be undone, but you
+find out when it happens instead of months later from numbers that are wrong.
+
+[b]The Recovery page says more about each row.[/b] Every row shows what last happened to
+it, so a "lost" item stays marked after the session that found it. A row a box still holds
+says when storage does not have it, and taking that one out of the box can only give you a
+plain copy. A row whose plugin is not loaded says so and its Recover button is disabled
+rather than offered, because recovery gives up before it reaches storage for an item it
+cannot resolve. Recovering now also says which one you got, the captured original or a
+plain copy. The page no longer costs frames while it is open.
+
+[b]Three console commands.[/b] [b]cef av[/b] prints the actor values CEF is currently
+changing and what each box contributes, which is the thing to read before deciding a
+number looks wrong. [b]cef tokens[/b] lists every box token: which plugin it came from,
+whether it is in use, reserved by a published costume or free, and which box has it.
+[b]cef abilities[/b] reports the pool's free space.
+
+[b]A startup check[/b] writes what it found to the log - which pools are installed,
+whether any two boxes would build their physics carrier under the same name, whether any
+box is holding a token a published costume also wants. It only looks; it changes nothing.
+
+[b]The last two runs' logs are kept[/b] next to the current one, so a problem you noticed
+after restarting is still there to read.
+
+[line]
+
+[size=5][b]Smaller things[/b][/size]
+
+[b]Renaming a box no longer affects which tokens CEF thinks are free.[/b] Membership is a
+hidden keyword now rather than the token's displayed name, which also means a translated
+copy of CostumeFW.esp can no longer stop you making new boxes - that would have happened
+to anyone running one.
+
+[b]A box's tooltip could show another box's contents.[/b] With LoreBox installed, hovering
+a token asked for the contents of its equipment slot, which from this version can name
+several boxes. It asks per token now. Nothing to reinstall: the keywords that shipped are
+still the same keywords.
+
+[b]CEF_abilities.json records which plugin each ability came from[/b] instead of a number.
+Existing registries convert on first load. The conversion changes the file's shape, not
+what is in it: your boxes keep their contents and each piece keeps the ability it already
+had.
+
+Going back to 1.6.3 or earlier is a manual step. The first time 1.6.4 reads your settings
+it keeps a copy of them as they were, at SKSE\Plugins\CEF_settings.pre164.json, and the
+same for the ability registry at CEF_abilities.pre164.json. CEF never reads either one. If
+you want to go back, copy them over CEF_settings.json and CEF_abilities.json by hand.
+Boxes made on CostumeFW_BoxPool1.esp do not exist in those copies, because they could not
+have.
