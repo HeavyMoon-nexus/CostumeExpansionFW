@@ -39,7 +39,24 @@ $dirs = 'fomod', 'core', 'vr', 'npc', 'ench', 'canceled'
 foreach ($d in $dirs) { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
 
 # --- fomod/ ---------------------------------------------------------------
-Copy-Item "$repo\fomod\info.xml" "$stage\fomod\"
+# info.xml's <Version> is STAMPED from -Version rather than copied, because the
+# tracked copy had said 1.6.3 since the FOMOD was written and nothing made it
+# move: 1.6.3 shipped correct by coincidence and 1.6.4 would have gone out
+# labelled 1.6.3 in every mod manager. The archive name already comes from
+# -Version, so this makes the two agree by construction instead of by anyone
+# remembering. Fails loud if the tag is not where it is expected - a silent
+# no-op replace would ship the wrong number just as quietly.
+$infoXml = Get-Content -Raw -LiteralPath "$repo\fomod\info.xml"
+$stamped = $infoXml -replace '<Version\b[^>]*>[^<]*</Version>',
+    "<Version MachineVersion=`"$Version`">$Version</Version>"
+if ($stamped -eq $infoXml) {
+    throw "fomod\info.xml: no <Version> element to stamp - refusing to package an unlabelled FOMOD."
+}
+# .NET rather than Set-Content: PowerShell 5.1's -Encoding UTF8 always writes a
+# BOM, and the tracked info.xml has none. Stamping a version is no reason to
+# change the file's encoding underneath a FOMOD installer.
+[System.IO.File]::WriteAllText("$stage\fomod\info.xml", $stamped,
+    (New-Object System.Text.UTF8Encoding $false))
 Copy-Item "$repo\fomod\ModuleConfig.xml" "$stage\fomod\"
 
 # --- core/ (package.ps1's manifest, minus SKSE/Plugins/*.dll) --------------
