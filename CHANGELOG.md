@@ -65,10 +65,11 @@ am not naming a version this time.
   the box list says which box is dormant and why instead of listing it under
   slot 0 with every control still live.
 
-  **This one is worth knowing about if you are on 1.6.2.2.** The same fault is
-  in it. You cannot reach it by uninstalling anything there - there was only the
-  one plugin and it is required - but a hand-edited `CEF_settings.json` with a
-  token that does not resolve gets you the same stuck costume.
+  **This one is worth knowing about if you are on 1.6.2**, the version on Nexus.
+  The same fault is in it. You cannot reach it by uninstalling anything there -
+  there was only the one plugin and it is required - but a hand-edited
+  `CEF_settings.json` with a token that does not resolve gets you the same stuck
+  costume.
 - **"Prepare for uninstall" left your NPCs dressed.** It gave back what your
   boxes held, took the tokens off you and detached your own meshes, then
   stopped. Every published costume stayed on the NPC wearing it, with its
@@ -87,10 +88,11 @@ am not naming a version this time.
   you get the original, tempering and enchantment included; where it does not,
   you get a plain copy.
 
-  **Both of these are in 1.6.0 through 1.6.2.2.** Publishing and NPC persist
-  arrived in 1.6.0 and the uninstall flow was never taught about either. If you
-  are removing CEF on one of those versions, unpublish your costumes back into
-  their boxes first and then run the cleanup, which does know about boxes.
+  **Both of these are in 1.6.2**, the version on Nexus, and in every version
+  back to 1.6.0. Publishing and NPC persist arrived in 1.6.0 and the uninstall
+  flow was never taught about either. If you are removing CEF on one of those,
+  unpublish your costumes back into their boxes first and then run the cleanup,
+  which does know about boxes.
 - **A published wig stopped hiding the NPC's own hair.** A wig box occupies both
   the hair slot and the long-hair slot; the published copy only took the first,
   so the NPC's real hair came through it.
