@@ -29,6 +29,18 @@ removed its enchantment and left the token's armour, weight and keywords on a
 piece of gear you were still wearing, so an invisible costume went on defending
 you. Both come back when you turn it on again.
 
+**The MCM can work a shared biped slot again.** 1.6.4 gave a slot four boxes and
+left the MCM keyed by slot, so a slot holding more than one box got no page at
+all and you were sent to SMF. Its pages are keyed by the box itself now, and a
+box on a shared slot is named by its label so the list reads properly. The
+new-box picker offers those slots too. The page list stops at 122 boxes - a
+Papyrus limit, not a CEF one - and the Boxes page says so if you ever reach it.
+
+**The MCM's Persist page stops running out of room.** A catalog row costs five of
+SkyUI's option positions, so a long catalog ran off the end of the page and its
+last rows came out with no controls. It shows sixteen at a time now, with Prev
+and Next.
+
 ### Added
 
 - **`CEF_NOINJECT.txt`.** Put an empty file of that name in `SKSE\Plugins` and

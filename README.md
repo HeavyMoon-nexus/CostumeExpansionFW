@@ -85,12 +85,15 @@ and both slipped, so this no longer names a version.
 
 What the MCM does not reach: NPC distribution, the capture blacklist
 (**Blocked**), the **Recovery** page, box renaming, the per-item passthrough
-toggles, the verbose-logging switch, and from 1.6.4 **any biped slot that holds
-more than one box**. Its pages are keyed by slot, so a slot with two boxes names
-neither of them; those slots get no MCM page at all rather than a page that
-edits the wrong box. The Persist page also runs out of room once the catalog
-grows past roughly a dozen entries, which is SkyUI's option buffer rather than a
-CEF limit — SMF has no such limit.
+toggles, and the verbose-logging switch.
+
+Two things it could not do in 1.6.4 and can now: a biped slot holding more than
+one box gets a page per box again (its pages are keyed by the box, not the slot,
+so a shared slot names each box by its label), and the Persist catalog is shown
+a screen at a time instead of running out of SkyUI option positions and handing
+the last rows no controls. The page list itself stops at 122 boxes, which is a
+Papyrus array limit; past that the Boxes page says how many have no page and SMF
+has them all.
 
 On VR, SMF needs
 [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
@@ -177,17 +180,11 @@ strips NPC persist assignments, removes all box tokens from your inventory, deta
 injected meshes, **and disables CEF persistently** (`enabled=false` in the settings —
 reloading or playing on will not re-apply anything). Save, then remove the mod.
 
-Two things it does not cover in 1.6.4:
-
-- **Persist entries that are off for this save.** The cleanup hands back box contents and
-  the persist items this save is showing. A catalog entry you turned off with "Active on
-  this save" keeps its original in storage so you can turn it back on, and the cleanup
-  does not reach it. Turn those back on before you run it, or remove them from the
-  catalog one at a time (the single-row remove hands the original back; "Remove all
-  persist" does not).
-- **Anything in storage that no box, persist entry, published costume or NPC owns.** That
-  normally comes back by itself on the next load; if you are deleting the mod, there is no
-  next load. `cef store` lists what is in there, and `cef recover <id>` hands one back.
+It empties the hidden storage: the persist entries this save has switched off, anything
+left over from a rollback, and the second and later copies of a stack all come back too.
+The one thing it cannot return is an item whose costume plugin is switched off — that item
+is not there to be handed over — so it counts those and tells you to turn the plugin back
+on and run it again rather than saying "safe to uninstall".
 
 **"Re-enable from Main" is not an undo.** It turns CEF back on, but your items are already
 back in your inventory. The box definitions still list them, so taking one out of a box
