@@ -50,6 +50,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -6041,6 +6042,73 @@ namespace CostumeFW
         return out;
     }
 
+    namespace
+    {
+        // What one pass over the hidden store moved out of it.
+        struct StoreDrain
+        {
+            int stacks{ 0 };      // stacks moved
+            int count{ 0 };       // items, stack counts added up
+            int leftover{ 0 };    // stacks the cap left behind
+            std::string firstId;  // the first one moved, for the singular notification
+        };
+
+        // Move every stack the held set does not account for out of the store and
+        // into the player's hands. Container move, not fabricate: the original
+        // travels back WITH its instance data (tempering, a player enchantment),
+        // and nothing is ever created, so a pass that runs twice cannot duplicate.
+        //
+        // Two callers with opposite settings, one walk: the load-time sweep passes
+        // everything a definition names as held and a cap of 64, uninstall passes
+        // an EMPTY held set and no cap - "take the rest" - after the definitions
+        // have already had their turn. Sharing the walk is the point: the filter
+        // that decides what is held is the one thing here that must not differ
+        // between them.
+        StoreDrain MoveStoreToPlayer(RE::TESObjectREFR* a_store, RE::PlayerCharacter* a_player,
+            const std::unordered_set<std::uint32_t>& a_held, int a_cap,
+            const char* a_custodyEvent, const char* a_tag)
+        {
+            StoreDrain out;
+            struct Stack
+            {
+                RE::TESBoundObject* obj{ nullptr };
+                std::string id;
+                std::int32_t count{ 0 };
+            };
+            std::vector<Stack> loose;
+            auto inv = a_store->GetInventory([&a_held](RE::TESBoundObject& a_obj) {
+                // CEF's own tokens are never contents; they can legitimately sit here.
+                return !a_held.contains(a_obj.GetFormID()) && !IsCefToken(a_obj.GetFormID());
+            });
+            for (auto& [obj, data] : inv) {
+                const auto& [count, entry] = data;
+                if (!obj || count <= 0) {
+                    continue;
+                }
+                loose.push_back({ obj, MakeColonId(obj), count });
+            }
+            for (const auto& s : loose) {
+                if (out.count >= a_cap) {
+                    out.leftover = static_cast<int>(loose.size()) - out.stacks;
+                    SKSE::log::warn("{}: cap reached - {} more item(s) wait for the next load",
+                        a_tag, out.leftover);
+                    break;
+                }
+                a_store->RemoveItem(s.obj, s.count, RE::ITEM_REMOVE_REASON::kStoreInContainer,
+                    nullptr, a_player);
+                SKSE::log::info("{}: returned {}x '{}' ({}) - held by nothing",
+                    a_tag, s.count, ItemDisplayName(s.id), s.id);
+                RecordCustody(s.id, a_custodyEvent);
+                if (out.stacks == 0) {
+                    out.firstId = s.id;
+                }
+                out.count += s.count;
+                ++out.stacks;
+            }
+            return out;
+        }
+    }
+
     int SweepOrphanedStoredItems()
     {
         StoreLock lk;
@@ -6078,60 +6146,104 @@ namespace CostumeFW
             return 0;
         }
         const auto held = BuildHeldFormIds();
-
-        struct Orphan
-        {
-            RE::TESBoundObject* obj{ nullptr };
-            std::string id;
-            std::int32_t count{ 0 };
-        };
-        std::vector<Orphan> orphans;
-        auto inv = store->GetInventory([&held](RE::TESBoundObject& a_obj) {
-            // CEF's own tokens are never contents; they can legitimately sit here.
-            return !held.contains(a_obj.GetFormID()) && !IsCefToken(a_obj.GetFormID());
-        });
-        for (auto& [obj, data] : inv) {
-            const auto& [count, entry] = data;
-            if (!obj || count <= 0) {
-                continue;
-            }
-            orphans.push_back({ obj, MakeColonId(obj), count });
-        }
-        if (orphans.empty()) {
+        const StoreDrain drain =
+            MoveStoreToPlayer(store, player, held, kSweepCap, "returned-orphan", "sweep");
+        if (drain.stacks == 0) {
             SKSE::log::info("sweep: nothing orphaned ({} held id(s))", held.size());
             return 0;
         }
-        int returned = 0;
-        int items = 0;
-        for (const auto& o : orphans) {
-            if (returned >= kSweepCap) {
-                SKSE::log::warn("sweep: cap reached - {} more item(s) wait for the next load",
-                    static_cast<int>(orphans.size()) - items);
-                break;
-            }
-            // Container move, not fabricate: the original travels back WITH its
-            // instance data (tempering, a player enchantment).
-            store->RemoveItem(o.obj, o.count, RE::ITEM_REMOVE_REASON::kStoreInContainer,
-                nullptr, player);
-            SKSE::log::info("sweep: returned {}x '{}' ({}) - held by nothing",
-                o.count, ItemDisplayName(o.id), o.id);
-            RecordCustody(o.id, "returned-orphan");
-            returned += o.count;
-            ++items;
-        }
         WriteJson(false);  // persist the custody log; no box changed, so no manifest
-        if (items == 1) {
+        if (drain.stacks == 1) {
             RE::DebugNotification(
-                ("CostumeFW: returned " + ItemDisplayName(orphans.front().id) +
+                ("CostumeFW: returned " + ItemDisplayName(drain.firstId) +
                     " - it was left in storage")
                     .c_str());
-        } else if (items > 1) {
+        } else {
             RE::DebugNotification(
-                ("CostumeFW: returned " + std::to_string(items) +
+                ("CostumeFW: returned " + std::to_string(drain.stacks) +
                     " items left in storage")
                     .c_str());
         }
-        return returned;
+        return drain.count;
+    }
+
+    UninstallReturnReport UninstallReturnAll()
+    {
+        StoreLock lk;
+        // Uninstall's return pass, in three parts, and the ORDER is the design.
+        //
+        // (a) Everything a definition names, store-first with the fabricate
+        //     fallback the two cleanup twins have always used. This has to come
+        //     first: run the store-emptying pass (b) ahead of it and every box
+        //     content would be gone from the store by the time (a) looked, so
+        //     (a) would fabricate a second copy of each one.
+        // (b) Whatever is still in there. No fabricate, so nothing can be
+        //     duplicated - this pass only ever hands back items that physically
+        //     exist. It is the net under (a): the persist entries this save has
+        //     switched off, the orphans of a save rollback (the load-time sweep
+        //     would get those, but somebody uninstalling has no next load), and
+        //     the second and later copies in a stack, since ReturnStoredItem
+        //     hands back one at a time.
+        // (c) What could not be returned at all: a content id whose plugin is
+        //     turned off is not in the container to be moved and does not
+        //     resolve to a form, so the honest thing is to count it and say so
+        //     rather than finish with "safe to uninstall".
+        UninstallReturnReport rep{};
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            SKSE::log::warn("uninstall: no player - nothing returned");
+            return rep;
+        }
+        // Snapshot the ids before handing anything back: the moves below fire the
+        // container-changed hook, and nothing should be iterating a live box list
+        // while that runs.
+        std::vector<std::string> boxContents;
+        for (const auto& b : g_boxes) {
+            boxContents.insert(boxContents.end(), b.contents.begin(), b.contents.end());
+        }
+        const auto catalog = PersistContents();
+        const auto actives = ActivePersistIds();
+        const std::unordered_set<std::string> activeSet(actives.begin(), actives.end());
+
+        const auto give = [&rep](const std::string& a_id, bool a_fabricate) {
+            bool recreated = false;
+            if (ReturnStoredItem(a_id, a_fabricate, &recreated)) {
+                recreated ? ++rep.recreated : ++rep.returned;
+            }
+        };
+        for (const auto& c : boxContents) {
+            give(c, true);
+        }
+        // The whole catalog, not just this save's active set - that difference is
+        // what left the originals of switched-off persist entries in the store
+        // (Codex #4). Fabricate only for the active ones: an entry this save is
+        // not using has nothing to replace, and minting a copy of it on the way
+        // out would hand the user an item they never had on this character.
+        for (const auto& c : catalog) {
+            give(c, activeSet.contains(c));
+        }
+        UninstallNpcCleanup();  // published costumes' contents, recall, npc-persist
+
+        auto* sform = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+        if (auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr) {
+            // Held set EMPTY and no cap: everything left goes back. The sweep's
+            // 64-item cap exists because it can finish the job on the next load;
+            // here there is no next load.
+            const StoreDrain drain = MoveStoreToPlayer(store, player, {},
+                std::numeric_limits<int>::max(), "returned-uninstall", "uninstall");
+            rep.drained = drain.count;
+        }
+        for (const auto& id : StoreContentIdsForSave()) {
+            if (ResolveFormId(id) == 0) {
+                ++rep.unreadable;
+            }
+        }
+        WriteJson(false);  // the custody rows above
+        SKSE::log::info(
+            "uninstall: returned {} original(s), recreated {}, emptied {} more item(s) out of "
+            "the store, {} could not be read",
+            rep.returned, rep.recreated, rep.drained, rep.unreadable);
+        return rep;
     }
 
     int BoxCount()

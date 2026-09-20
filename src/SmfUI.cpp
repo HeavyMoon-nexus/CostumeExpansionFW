@@ -518,27 +518,39 @@ namespace CostumeFW::SmfUI
                     "the mod.");
                 if (ImGui::Button("Proceed")) {
                     SKSE::GetTaskInterface()->AddTask([] {
-                        // MCM UninstallCleanup twin: box contents + ACTIVE persist
-                        // return with the fabricate fallback; defs stay in the json.
+                        // Everything that comes BACK is one call now: box
+                        // contents, the whole persist catalog (not just this
+                        // save's active set), the published costumes, and then
+                        // the store emptied of whatever those three missed. The
+                        // defs stay in the json - re-enabling from this page
+                        // restores them.
+                        const UninstallReturnReport rep = UninstallReturnAll();
+                        // Tokens AFTER the returns: the recall inside them puts
+                        // publish tokens back into the player's hands, so a loop
+                        // that ran first would leave those behind.
                         const int n = BoxCount();
                         for (int i = 0; i < n; ++i) {
-                            const BoxDefInfo b = BoxAt(i);
-                            for (const auto& c : b.contents) {
-                                ReturnStoredItem(c, true);
-                            }
-                            GiveOrRemoveToken(b.token, false);  // unequip + remove all copies
+                            GiveOrRemoveToken(BoxAt(i).token, false);  // unequip + remove all copies
                         }
-                        for (const auto& id : PersistActiveIds()) {
-                            ReturnStoredItem(id, true);
-                        }
-                        UninstallNpcCleanup();  // NPC arm: recall published + strip persist
                         DetachAll();
                         SetCefEnabled(false);  // persist the OFF state (no re-apply on reload)
                         Reconcile();
                         ApplyBoxAbilities();
                         ApplyCarrierOverrides(false);
-                        RE::DebugNotification(
-                            "CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall");
+                        // "Safe to uninstall" is a claim, so it is only made when
+                        // it is true. An unreadable id is a costume plugin that is
+                        // switched off: its captured original is still in the save
+                        // and deleting CEF now takes it with it.
+                        if (rep.unreadable > 0) {
+                            RE::DebugNotification(
+                                ("CostumeFW: " + std::to_string(rep.unreadable) +
+                                    " item(s) could NOT be returned - a costume plugin is turned "
+                                    "off. Turn it back on and run this again before deleting the mod.")
+                                    .c_str());
+                        } else {
+                            RE::DebugNotification(
+                                "CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall");
+                        }
                     });
                     ImGui::CloseCurrentPopup();
                 }

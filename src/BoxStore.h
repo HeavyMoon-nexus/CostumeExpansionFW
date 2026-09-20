@@ -795,6 +795,30 @@ namespace CostumeFW
     // and NPC-persist state its held set reads).
     int SweepOrphanedStoredItems();
 
+    // What one uninstall return pass did. `unreadable` is the one that changes
+    // what the user should do next: it counts content ids that no longer resolve
+    // to a form, which on the way out of the game means a costume plugin is
+    // switched off and its captured originals cannot be handed back at all.
+    struct UninstallReturnReport
+    {
+        int returned{ 0 };    // captured originals handed back out of the store
+        int recreated{ 0 };   // plain copies, because nothing was stored to return
+        int drained{ 0 };     // items the store-emptying pass found on top of those
+        int unreadable{ 0 };  // ids whose plugin is not loaded - returned nothing
+    };
+
+    // Hand back EVERYTHING the hidden store holds, for "prepare for uninstall".
+    // Three passes in a fixed order - definitions first (store-first, fabricate
+    // fallback), then the store emptied of whatever is left (no fabricate, so it
+    // cannot duplicate what the first pass just handed over), then a count of
+    // what could not be read. Also runs the NPC arm (UninstallNpcCleanup): the
+    // published costumes' contents, the recall, and the npc-persist assignments.
+    //
+    // Does NOT remove tokens, detach or disable - the caller owns that half, and
+    // the token loop has to run after this one so the recall has somewhere to put
+    // the publish tokens it takes back.
+    UninstallReturnReport UninstallReturnAll();
+
     // Take every synthesized ability back off the player and mark them stale (call
     // on game load, before the boxes of the loaded save are applied). The forms are
     // KEPT: a save restores an ability by form id, so a form we forget is one that
