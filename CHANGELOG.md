@@ -66,6 +66,16 @@ and Next.
   your inventory. The MCM has said so at that moment for a long time; SMF, which
   is the main UI now, did it silently. Bulk removals stay quiet, as they do in
   the MCM.
+- **A "copy id" button in SMF.** Every console command takes a colon id, plugin
+  names carry spaces and brackets, and the game console cannot be copied out of -
+  so the id had to be read off one screen and typed into another. It sits on the
+  Item data fold (box contents and persist entries alike) and on the Recovery
+  dialog, where `cef recover` needs it exactly.
+- **`cef morph <id> off` said it worked when the id named nothing.** Turning the
+  setting off does not require the item to be in a box - a leftover entry on a
+  box you deleted has to stay clearable - so a mistyped plugin name erased
+  nothing and answered "body morph off for … (re-injected)" all the same. It
+  now says the item does not exist.
 - **A published costume's look was only frozen one way.** Turning one of the
   five appearance settings ON for a published costume was refused; turning the
   same one OFF went through, did nothing, and came back on its own at unpublish,
