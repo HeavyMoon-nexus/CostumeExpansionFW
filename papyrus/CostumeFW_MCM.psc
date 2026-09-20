@@ -29,7 +29,6 @@ string[] _persistRemoveContents
 string[] _persistWornIdsCache
 int[]    _persistActiveOpts   ; per-catalog-entry "active on this save" toggle (M2)
 int[]    _persistMorphOpts    ; per-catalog-entry body-morph toggle
-int[]    _persistHideBodyOpts ; per-catalog-entry hide-bundled-body toggle
 int[]    _persistUncatOpts    ; active-but-not-in-catalog [deactivate] rows (M2)
 string[] _persistUncatIds
 
@@ -120,7 +119,6 @@ function SetupConfig()
     _persistWornIdsCache   = new string[1]
     _persistActiveOpts     = new int[1]
     _persistMorphOpts      = new int[1]
-    _persistHideBodyOpts   = new int[1]
     _persistUncatOpts      = new int[1]
     _persistUncatIds       = new string[1]
     _equipOpts     = new int[1]
@@ -417,7 +415,6 @@ function ResetPersistPage()
         AddTextOption("(none - use + Add worn item)", "", OPTION_FLAG_DISABLED)
         _persistActiveOpts     = new int[1]
         _persistMorphOpts      = new int[1]
-        _persistHideBodyOpts   = new int[1]
         _persistGenderOpts     = new int[1]
         _persistRemoveOpts     = new int[1]
         _persistHideOpts       = new int[1]
@@ -425,7 +422,6 @@ function ResetPersistPage()
     else
         _persistActiveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistMorphOpts      = Utility.CreateIntArray(contents.Length, -1)
-        _persistHideBodyOpts   = Utility.CreateIntArray(contents.Length, -1)
         _persistGenderOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistRemoveOpts     = Utility.CreateIntArray(contents.Length, -1)
         _persistHideOpts       = Utility.CreateIntArray(contents.Length, -1)
