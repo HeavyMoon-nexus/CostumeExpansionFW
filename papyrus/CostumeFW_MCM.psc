@@ -478,12 +478,18 @@ function ResetPersistPage()
         _persistRemoveContents = new string[1]
     else
         if pageCount > 1
+            ; No '<' in an option label. SkyUI renders these as HTML, so a literal
+            ; '<' opens a tag and swallows the rest of the string: "  < Prev" came
+            ; out as a BLANK row that still answered clicks, which is worse than
+            ; missing - the way back was there and invisible. Found on the persist
+            ; catalog 2026-09-21; the box page below had the same two labels and
+            ; had simply never been seen, since it takes 41 contents in one box.
             AddTextOption("  Page " + (_persistPage + 1) + " / " + pageCount, "", OPTION_FLAG_DISABLED)
             if _persistPage > 0
-                _persistPrevOpt = AddTextOption("  < Prev", "")
+                _persistPrevOpt = AddTextOption("  Prev page", "")
             endIf
             if _persistPage < pageCount - 1
-                _persistNextOpt = AddTextOption("  Next >", "")
+                _persistNextOpt = AddTextOption("  Next page", "")
             endIf
         endIf
         _persistActiveOpts     = Utility.CreateIntArray(shown, -1)
@@ -699,10 +705,10 @@ function ResetSingleBoxPage(int a_idx)
     if pageCount > 1
         AddTextOption("  Page " + (_contentPage + 1) + " / " + pageCount, "", OPTION_FLAG_DISABLED)
         if _contentPage > 0
-            _contentPrevOpt = AddTextOption("  < Prev", "")
+            _contentPrevOpt = AddTextOption("  Prev page", "")
         endIf
         if _contentPage < pageCount - 1
-            _contentNextOpt = AddTextOption("  Next >", "")
+            _contentNextOpt = AddTextOption("  Next page", "")
         endIf
     endIf
     if total == 0
