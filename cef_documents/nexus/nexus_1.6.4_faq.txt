@@ -19,7 +19,9 @@
 
 Do I have to install CostumeFW_Abilities.esp?
 
-No. The installer asks, and unticking it is a supported answer. Ticking it installs two plugins, CostumeFW_Abilities.esp and CostumeFW_Abilities2.esp. Your costumes look exactly the same either way. What you lose is their enchantment effects. The armor rating (including tempering), weight, armor class and allowed keywords written onto a box token use a different path and still work. CEF turns the enchantment feature off and tells you it is off, rather than going back to the old method.
+No, as long as you have never used it. The option comes up already ticked and unticking it is a supported answer; leaving it ticked installs two plugins, CostumeFW_Abilities.esp and CostumeFW_Abilities2.esp. Your costumes look exactly the same either way. What you lose is their enchantment effects. The armor rating (including tempering), weight, armor class and allowed keywords written onto a box token use a different path and still work. CEF turns the enchantment feature off and tells you it is off, rather than going back to the old method.
+
+Once CostumeFW_Abilities.esp is active in your load order, the installer stops offering the choice and locks the option on. Unticking it there would remove a plugin your saves point into, and the bonuses it holds would have nothing left to take them off.
 
 Why is there a new plugin? Couldn't these records go in CostumeFW.esp?
 
@@ -41,7 +43,7 @@ If the slot matters more to you than the feature, untick it in the installer.
 
 Can I install CostumeFW_Abilities.esp later?
 
-If you skipped it and have never used it, yes. Re-run the installer, tick Enchantment passthrough, and enable the plugins it installs. If you used it before and it is now missing, this is not an optional later install: restore the plugin before loading or saving. Once CEF has allocated an ability and a save has used it, keep both the plugin and CEF_abilities.json from then on.
+If you skipped it and have never used it, yes. Re-run the installer and leave Enchantment passthrough ticked, which is how it comes up, then enable the plugins it installs. If you used it before and it is now missing, this is not an optional later install: restore the plugin before loading or saving. Once CEF has allocated an ability and a save has used it, keep both the plugin and CEF_abilities.json from then on.
 
 I'm updating from 1.6.2 or earlier. What do I have to do?
 

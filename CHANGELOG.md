@@ -48,10 +48,12 @@ am not naming a version this time.
   whether the generations run unbroken, whether any two tokens would build their
   physics carrier under the same name, and whether any box is holding a token a
   published costume also wants. It only looks - it changes nothing.
-- The ability pool can be extended. It was a single plugin of 1,024 abilities
-  with no way to add more; a second one (`CostumeFW_Abilities2.esp`) is light and
-  costs no load-order slot. `cef abilities` now reports free space per plugin and
-  which ability the next costume would take.
+- The ability pool can be extended, and the extension ships with it. It was a
+  single plugin of 1,024 abilities with no way to add more. The enchantment
+  option now installs two, `CostumeFW_Abilities.esp` and
+  `CostumeFW_Abilities2.esp`, for 3,072 in all; the second one is light and costs
+  no load-order slot. `cef abilities` reports free space per plugin and which
+  ability the next costume would take, and the Main page shows the total.
 
 ### Fixed
 
@@ -96,6 +98,14 @@ am not naming a version this time.
 - **A published wig stopped hiding the NPC's own hair.** A wig box occupies both
   the hair slot and the long-hair slot; the published copy only took the first,
   so the NPC's real hair came through it.
+- **Recalling a published costume piled its tokens up in your inventory.**
+  Taking a costume back off the NPCs wearing it moves their copies of the
+  publish token to you, and nothing took them out again. Publishing hands you
+  one copy to give away with, so a costume recalled from three followers left
+  four, and each round added more. They read "Costume (unpublished)" once the
+  slot is free again, which is the name the token carries when no costume is on
+  it. Recall keeps the one copy you are meant to have now, and none at all when
+  the slot is empty or you are preparing to uninstall.
 - **A box's tooltip could show another box's contents.** With LoreBox installed,
   hovering a token asked for the contents of its biped SLOT, which from this
   version can name several boxes. It asks per token now. Nothing to reinstall:
@@ -121,8 +131,17 @@ am not naming a version this time.
   already had. What a piece is worth has been re-read from your stored original
   on every save load since 1.6.1, so a costume captured on an older version
   needs nothing done to it.
-- The MCM's Persist page still runs out of room past 11 entries. That is SkyUI's
-  option buffer rather than a CEF limit, and SMF has no such limit.
+- The MCM's Persist page still runs out of room once the catalog grows past
+  roughly a dozen entries. That is SkyUI's option buffer rather than a CEF
+  limit, and SMF has no such limit.
+
+- **Turning CEF off with `CEF_DISABLE.txt` or `bEnabled=0` says what it costs.**
+  Inert includes not writing CEF's data into your saves, so saving while it is on
+  loses the hidden storage, this save's persist items and any NPC costume
+  bindings. The log line now says so, and so do the ini, the readme and the
+  installer. That switch is for opening a save and checking it loads; to keep
+  playing with the costumes off, set `"enabled": false` in `CEF_settings.json`
+  instead, which leaves the save data alone.
 
 ## v1.6.3 (2026-09-15)
 

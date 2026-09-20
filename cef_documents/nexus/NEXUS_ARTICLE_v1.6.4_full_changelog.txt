@@ -15,7 +15,7 @@ package.
 [b]One installer, instead of three downloads.[/b] The main mod, the NPC add-on and the VR
 build were separate files. They are all in this one and it asks what you want.
 
-[b]Two plugins come with this, and they are not the same kind of thing.[/b]
+[b]The plugins that come with this are not the same kind of thing.[/b]
 CostumeFW_BoxPool1.esp is part of the core install and is not optional: it carries the
 extra box tokens that let one equipment slot hold more than one box. It is ESL, so it
 costs no load-order slot. Do not remove it once a box sits on one of its tokens - that box
@@ -23,9 +23,13 @@ goes dormant, which is to say it keeps its contents and its name but cannot be w
 edited until the plugin comes back.
 
 CostumeFW_Abilities.esp is optional, but stat passthrough needs it. It is a normal ESP
-rather than an ESL, so it does cost one of your 254 plugin slots. Leave it unticked and
-your costumes look exactly the same; they just carry no stats, and CEF says so instead of
-pretending. The reason it cannot be an ESL is below.
+rather than an ESL, so it does cost one of your 254 plugin slots. That option installs a
+second file with it, CostumeFW_Abilities2.esp, which is ESL and costs nothing; the two
+hold 3,072 abilities between them. The option comes up ticked; untick it and your
+costumes look exactly the same, they just carry no stats, and CEF says so instead of
+pretending. Once the plugin is in your load order and has been used the installer locks
+the option on, because removing it would strand the bonuses your saves point at. Why the
+first one cannot be an ESL, and the second one can, is below.
 
 [b]Bonuses left over from before 1.6.3 are still in your save.[/b] This release stops new
 ones happening. It cannot clean up what is already there, because CEF cannot tell its own
@@ -71,6 +75,11 @@ them in from a small file it keeps next to your settings, before your save is lo
 ordering is the whole fix, and it is also why that plugin cannot be an ESL: your save
 points at fixed form IDs in it, and the light range cannot hold enough of them.
 
+CostumeFW_Abilities2.esp is ESL, and that is not a contradiction. The range limit only
+mattered while there was one pool and it had to hold everything. More capacity comes from
+adding a plugin now, so a later pool only has to hold what the one before it ran out of,
+and can be light.
+
 [b]Two pieces with the same enchantment were worth one.[/b] A box holding two Imperial
 cuirasses, a heavy one and a light one carrying the same +40 Fortify Health, gave you +40.
 CEF put both effects in one spell, and two entirely identical effects inside one spell
@@ -83,12 +92,16 @@ both apply. So what the engine keys on is the whole content of an effect, within
 spell. Each piece has its own ability now, so nothing shares a spell and there is nothing
 left to collapse.
 
-[b]The pool can be extended.[/b] It was a single plugin of 1,024 abilities with no way to
-add more. A second one is ESL and costs no load-order slot, and [b]cef abilities[/b] now
-reports free space per plugin and which ability the next costume would take. Nothing to
-re-capture when you add one: what a piece is worth has been re-read from your stored
-original on every save load since 1.6.1, so a costume captured on an older version needs
-nothing done to it.
+[b]The pool can be extended, and the extension is in the download.[/b] It was a single
+plugin of 1,024 abilities with no way to add more. The stat passthrough option installs
+two now, 3,072 abilities in all, and the second is ESL so it costs no load-order slot.
+[b]cef abilities[/b] reports free space per plugin and which ability the next costume
+would take, and the SMF Main page shows the total. A costume takes one the first time you
+capture it and another whenever its enchantment changes value, so re-enchanting the same
+piece costs more than one; taking it out of a box and putting it back costs nothing.
+Nothing to re-capture when you add a pool: what a piece is worth has been re-read from
+your stored original on every save load since 1.6.1, so a costume captured on an older
+version needs nothing done to it.
 
 [line]
 
@@ -237,6 +250,25 @@ box is holding a token a published costume also wants. It only looks; it changes
 
 [b]The last two runs' logs are kept[/b] next to the current one, so a problem you noticed
 after restarting is still there to read.
+
+[line]
+
+[size=5][b]Turning CEF off[/b][/size]
+
+There are two switches and they do different jobs. CEF_DISABLE.txt in SKSE\Plugins, and
+bEnabled=0 in CostumeExpansionFW.ini, make the DLL inert: no hooks, no load-time work,
+nothing that can crash. Inert also means it writes nothing into your saves. Save in that
+state and the save comes back without what was in CEF's hidden storage, without the
+persist items it was showing, and without the bindings that say which NPCs are wearing
+published costumes. It is there to open a save, confirm it loads, and quit to desktop.
+The log line you get while it is inert says so now.
+
+To play with the costumes off and the save data intact, set "enabled": false in
+CEF_settings.json instead. That stops the injection, the ability spells and the token
+handout, and leaves everything else running, including what CEF writes into the save. You
+can edit that file without launching the game. A box token you are still wearing keeps its
+armor rating, weight and keywords while it is off; take the token off if you want those
+gone too.
 
 [line]
 
