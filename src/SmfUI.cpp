@@ -353,6 +353,25 @@ namespace CostumeFW::SmfUI
             });
         }
 
+        // The colon id, and a way to take it with you.
+        //
+        // Every console command takes one of these, and it is the one thing in
+        // this UI that cannot be retyped reliably: plugin names carry spaces,
+        // brackets and case ('[Zynx][MTM] TavernClothes.esp'), and the game's
+        // console cannot be copied out of, so the id has to be read off one
+        // screen and typed into another. Two runs of batch 8 were lost to a
+        // single missing space, each time answering something true but
+        // misleading about an id that named nothing.
+        void CopyableId(const std::string& a_id, const std::string& a_uiKey)
+        {
+            ImGui::TextDisabled("%s", a_id.c_str());  // never as a format string (F01)
+            ImGui::SameLine();
+            if (ImGui::SmallButton(std::format("copy id##cid{}", a_uiKey).c_str())) {
+                ImGui::SetClipboardText(a_id.c_str());
+                s_status = "copied: " + a_id;
+            }
+        }
+
         // Selected-content editor (right-panel twin of the MCM box page).
         // "Item data" fold: per-content passthrough toggles. a_full = box
         // contents (all three channels); persist gets enchant only - weight and
@@ -362,6 +381,7 @@ namespace CostumeFW::SmfUI
             if (!ImGui::CollapsingHeader(std::format("Item data##itd{}", a_uiKey).c_str())) {
                 return;
             }
+            CopyableId(a_id, a_uiKey);
             ImGui::TextDisabled("%s", ContentStatsSummary(a_id).c_str());
             bool en = StatEnchantOn(a_id);
             if (ImGui::Checkbox(std::format("Enchantments##ien{}", a_uiKey).c_str(), &en)) {
@@ -1818,7 +1838,7 @@ namespace CostumeFW::SmfUI
                 ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
                 if (ImGui::BeginPopupModal("Recover this item?###cfwrec")) {
                     ImGui::TextWrapped("%s", e.name.c_str());
-                    ImGui::TextDisabled("%s", e.id.c_str());
+                    CopyableId(e.id, "rec");  // `cef recover <id>` needs it verbatim
                     ImGui::TextWrapped(
                         "If this item is no longer in storage, CEF recreates it without its "
                         "tempering or player enchantment. Only do this for a piece you have "
