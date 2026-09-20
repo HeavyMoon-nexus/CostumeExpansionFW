@@ -1,5 +1,67 @@
 # Changelog
 
+## v1.6.4.1 (unreleased)
+
+**A costume whose meshes are in Skyrim LE format is no longer shown.** CEF's
+physics carrier has refused that geometry since July - the SSE engine divides by
+zero loading an LE shape that carries an SSE skin partition - but nothing
+refused it anywhere else, so an LE costume could be captured, worn and injected
+with only the carrier build complaining. It is now caught when you add it, with
+the mod named, and a costume you already have is kept exactly where it is and
+simply not injected. **If a costume that looked fine on 1.6.4 stops appearing on
+this version, that is this change**: run SSE NIF Optimizer over the mod it came
+from and it comes back. Diagnostics lists every one of them, and nothing is
+deleted at any point. Head parts are unaffected: SSE uses that geometry for
+faces on purpose, and only a file that is LE *format* counts.
+
+**"Prepare for uninstall" empties the hidden storage now.** It used to return
+what a box holds, what persist has switched on for this save, and what published
+costumes hold - and leave everything else behind to be deleted with the mod: the
+originals of persist entries this save has switched off, items left over from a
+save rollback, and the second and later copies of anything stacked. It also
+finishes honestly. If a costume plugin is turned off, its captured originals
+cannot be handed back at all, and the run used to say "safe to uninstall"
+regardless; it now says how many could not be returned and asks you to turn that
+plugin back on and run it again.
+
+**Turning CEF off takes the armour rating with it.** Off hid the costume and
+removed its enchantment and left the token's armour, weight and keywords on a
+piece of gear you were still wearing, so an invisible costume went on defending
+you. Both come back when you turn it on again.
+
+### Added
+
+- **`CEF_NOINJECT.txt`.** Put an empty file of that name in `SKSE\Plugins` and
+  CEF loads normally but injects nothing - the same thing as the Main page
+  toggle, and nothing is written to your save data. Delete it and your costumes
+  are back, with the toggle as you left it. This is the switch to reach for when
+  you want to play without CEF's costumes for a while; `CEF_DISABLE.txt` is the
+  one for a save that will not open, and saving while THAT one is on costs you
+  CEF's data. The ini, the readme and the log all point here now.
+- Diagnostics lists any costume held back for being an LE-format mesh, with the
+  reason.
+
+### Fixed
+
+- **Removing one item in SMF now says whether you got the original.** If this
+  save has no stored original CEF hands you a plain copy, without the tempering
+  or the enchantment the original carried, and the difference does not show in
+  your inventory. The MCM has said so at that moment for a long time; SMF, which
+  is the main UI now, did it silently. Bulk removals stay quiet, as they do in
+  the MCM.
+- **A published costume's look was only frozen one way.** Turning one of the
+  five appearance settings ON for a published costume was refused; turning the
+  same one OFF went through, did nothing, and came back on its own at unpublish,
+  because the snapshot is what renders. NPC persist assignments answer the same
+  way now - they freeze their settings when the NPC is assigned, so editing them
+  meanwhile did nothing and said nothing. Re-assign the NPC to change one.
+- **An NPC could stay undressed if you toggled CEF off and on.** When a
+  published or persist costume comes off its wearer, CEF re-equips it about
+  thirty seconds later. That was abandoned outright if the master switch
+  happened to be off when the moment came, so a quick off-and-on left the NPC
+  undressed until the next time they changed clothes or you loaded a save. It
+  waits now.
+
 ## v1.6.4 (2026-09-18)
 
 A biped slot used to mean one box. There were 27 of them, one per slot, and if
