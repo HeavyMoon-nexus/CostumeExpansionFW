@@ -40,6 +40,11 @@ you. Both come back when you turn it on again.
   CEF's data. The ini, the readme and the log all point here now.
 - Diagnostics lists any costume held back for being an LE-format mesh, with the
   reason.
+- **A warning when an item is more than CEF is showing.** Some armors are built
+  from several pieces on different slots - a dress whose skirt and top are
+  separate, a helmet with its own hair-hiding part. CEF shows one of them and
+  always has; now it says so when you capture the item, naming the slots it is
+  showing and the ones it is leaving out.
 
 ### Fixed
 
@@ -55,6 +60,11 @@ you. Both come back when you turn it on again.
   because the snapshot is what renders. NPC persist assignments answer the same
   way now - they freeze their settings when the NPC is assigned, so editing them
   meanwhile did nothing and said nothing. Re-assign the NPC to change one.
+- **The MCM's "prepare for uninstall" now does what SMF's does.** They were two
+  separate implementations of one flow and had drifted: the MCM's returned box
+  contents and the persist entries active on that save, then said "safe to
+  uninstall" while published costumes were still on their NPCs. Both buttons run
+  the same thing now, so everything above applies to either.
 - **An NPC could stay undressed if you toggled CEF off and on.** When a
   published or persist costume comes off its wearer, CEF re-equips it about
   thirty seconds later. That was abandoned outright if the master switch
