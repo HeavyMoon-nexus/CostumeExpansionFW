@@ -66,6 +66,13 @@ and Next.
   your inventory. The MCM has said so at that moment for a long time; SMF, which
   is the main UI now, did it silently. Bulk removals stay quiet, as they do in
   the MCM.
+- **The MCM's "back a page" button was invisible.** SkyUI draws an option's text
+  as HTML, so the `<` in "< Prev" opened a tag and swallowed the label - the row
+  was there and answered clicks, it just had nothing written on it, so the way
+  back looked missing. "Next >" was unaffected. It says "Prev page" and "Next
+  page" now. The box page's own content pagination had carried the same two
+  labels since it shipped; it takes 41 items in one box to draw them, so it had
+  never been seen.
 - **A "copy id" button in SMF.** Every console command takes a colon id, plugin
   names carry spaces and brackets, and the game console cannot be copied out of -
   so the id had to be read off one screen and typed into another. It sits on the
