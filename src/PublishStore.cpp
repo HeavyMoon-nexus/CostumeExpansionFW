@@ -1071,6 +1071,33 @@ namespace CostumeFW
             return b.pubSlot == a_slot &&
                 std::find(settled.begin(), settled.end(), b.actorFormID) != settled.end();
         });
+        // Every copy taken off those actors went to the PLAYER - that is what
+        // the destination argument on the RemoveItem above does - and nothing
+        // took them out again. Publish hands the player one copy to give away
+        // with (PublishBox, and the gift menu is a supported way to dress an
+        // NPC), so recalling from three wearers left four in the inventory, and
+        // each publish/recall cycle added more. They all read "Costume
+        // (unpublished)" once the slot is freed, because the name is on the
+        // base form.
+        //
+        // Trim to the one that is meant to be there. Nothing is kept when the
+        // slot no longer holds a costume, or when this is the uninstall pass:
+        // there is then nothing left to hand out. UnpublishToBox strips the lot
+        // right after calling this and is unaffected either way.
+        //
+        // The removal fires the container-changed hook, which clears the
+        // player's holder binding even when a copy is kept. That is harmless:
+        // unpublish never counts the player's holder binding (see the comment
+        // there) and the next move re-creates it.
+        const std::int32_t keep = (!a_forgetUnreachable && PubBySlot(a_slot)) ? 1 : 0;
+        const auto counts = player->GetInventoryCounts();
+        const auto held = counts.find(token);
+        const std::int32_t spare = (held != counts.end() ? held->second : 0) - keep;
+        if (spare > 0) {
+            player->RemoveItem(token, spare, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+            SKSE::log::info("publish: slot {} - took {} spare token(s) back out of the player's "
+                            "inventory ({} kept)", a_slot, spare, keep);
+        }
         if (a_forgetUnreachable) {
             // Uninstall: the user is about to delete the mod, so a record that
             // would ride the next co-save is worse than a forgotten one.
