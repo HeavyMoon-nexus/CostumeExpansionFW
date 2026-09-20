@@ -2,27 +2,34 @@
 <!--
   Costume Expansion FW - FOMOD installer.
 
-  NOTE ON THE STRUCTURE: requiredInstallFiles is deliberately EMPTY. Files
-  listed there are installed no matter what the user picks, and the first step
-  can end the install ("stop, I still have box tokens on") - so the core files
-  have to be conditional on that answer too, or a cancelled install would still
-  drop a working mod on top of the one the user was told to fix first.
+  NOTE ON THE STRUCTURE: core/ is in requiredInstallFiles, so an installer
+  clicked straight through on its defaults lands a working 1.6.4.
 
-  WHAT THE FIRST STEP CANNOT DO: a FOMOD cannot read a save, cannot tell which
+  It used to be conditional, because the first step could end the install by
+  handing the user one text file instead of the mod ("stop, I still have box
+  tokens on"). That branch is gone. A FOMOD cannot refuse to install; the most
+  it can do is install nothing useful, and a mod manager told to REPLACE turns
+  "nothing useful" into the deletion of the working install the user was being
+  sent back to. The branch could not be made safe from in here, and what it was
+  protecting against is a save the user already has. Its warning is now a
+  notice on the update step, where reading it costs nobody an install.
+
+  WHAT THE INSTALLER CANNOT DO: it cannot read a save, cannot tell which
   version of CEF was installed before (CostumeFW.esp is in every version), and
-  cannot see what the player is wearing. The question is asked, not detected.
-  The real check is in the DLL, which knows the co-save version and what is
-  equipped, and refuses to start the new enchantment mechanism until the tokens
-  are off. This step exists to catch people BEFORE they break anything; the DLL
-  catches everyone, whatever they installed with.
+  cannot see what the player is wearing. Nothing in here is detection. The DLL
+  is what meets the problem: loading a pre-1.6.3 save, it adds up what the old
+  mechanism would have been applying, prints it, and repeats it on demand with
+  "cef abilities legacy". It reports. It does not refuse.
 -->
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
 
   <moduleName>Costume Expansion FW</moduleName>
 
-  <!-- Empty on purpose - see the note above. -->
-  <requiredInstallFiles />
+  <!-- Every install gets these - see the note above. -->
+  <requiredInstallFiles>
+    <folder source="core" destination="" priority="0" />
+  </requiredInstallFiles>
 
   <installSteps order="Explicit">
 
@@ -51,46 +58,22 @@ Do not remove it once you have made a box on one of its tokens. That box goes do
     <installStep name="Before you install">
       <optionalFileGroups order="Explicit">
 
-        <group name="Are you updating from 1.6.2 or earlier?" type="SelectExactlyOne">
-          <plugins order="Explicit">
-
-            <plugin name="Fresh install, or my box tokens are already off">
-              <description>Carry on with the install.
-
-1.6.3 changes how a costume's enchantments are given to you. The old way used a spell form that only existed while the game was running, so a bonus applied before you quit could not be taken back off on the next launch, and it stayed on your character. 1.6.3 fixes that, but it cannot clean up a bonus that is already stuck.
-
-If you are on a fresh install, or you have taken your box tokens off and saved, there is nothing to do here.</description>
-              <conditionFlags>
-                <flag name="proceed">yes</flag>
-              </conditionFlags>
-              <typeDescriptor><type name="Recommended" /></typeDescriptor>
-            </plugin>
-
-            <plugin name="Stop - I still have box tokens equipped">
-              <description>This installs one text file and nothing else. No esp, no DLL, nothing that runs.
-
-IMPORTANT: a FOMOD cannot refuse to install. The most it can do is install nothing useful. So if your mod manager asked whether to REPLACE your existing Costume Expansion FW, do not let it - install this as a new, separate mod, or the thing it replaces is the working install you are about to go back to.
-
-Do this first, in the version you have now:
-
-1. Run "cef av base".
-2. Take off every box token.
-3. Run "cef av diff". That lists what changed when the tokens came off, which is the part you want. ("cef av" on its own lists every actor value that anything is modifying, CEF's or not, so it cannot tell you which is which.)
-4. Save.
-5. Run this installer again.
-
-If a bonus is still there after the tokens are off, it is already stuck and 1.6.3 will not remove it. "player.getavinfo health" tells you the number, and "player.modav health -N" takes it back off by hand. Do that before you update, so you are not guessing later which mod put it there.</description>
-              <conditionFlags>
-                <flag name="proceed">no</flag>
-              </conditionFlags>
-              <typeDescriptor><type name="Optional" /></typeDescriptor>
-            </plugin>
-
-          </plugins>
-        </group>
-
         <group name="If you are updating" type="SelectAll">
           <plugins order="Explicit">
+
+            <plugin name="Overwriting the CEF you already have (1.6.4 or older)">
+              <description>Let your mod manager REPLACE it. Replace is the right answer for a CEF update: it clears the old mod out, puts this one in its place, and keeps its position in your mod order.
+
+Do not pick Merge, and do not install this alongside the old one under a second name. CEF builds physics carrier meshes into its own mod folder and keeps a hash file beside each one. If those hash files survive while this archive's empty placeholder meshes land on top of the built ones, CEF finds a matching hash, skips the rebuild, and those boxes come back with no physics and nothing said about it. Replace clears both together, so the next launch rebuilds them.
+
+Your boxes, presets and settings are not in the mod folder. They live in SKSE\Plugins\CEF_settings.json and in your save, and replacing the mod does not touch them.
+
+If you are coming from 1.6.2 or earlier, there is one thing worth doing first. Up to 1.6.2 a costume's stats were handed to you through a spell built while the game was running. That spell does not exist on the next launch, but the bonus it applied is written into your save with nothing left to take it back off. 1.6.3 changed the mechanism so it cannot happen again, and it cannot clean up what is already stuck.
+
+The clean fix is to go back to the version you have now, take every box token off, save, and then install this. If you have already updated, CEF adds up what it thinks the old mechanism was applying and shows it when the save loads; "cef abilities legacy" prints it again. To clear one by hand, read it with "player.getavinfo health" - or whichever value is wrong - and take it off with "player.modav health -N", using the number next to Perm. Subtract only what you can account for, because other mods' bonuses land in the same number.</description>
+              <typeDescriptor><type name="Required" /></typeDescriptor>
+            </plugin>
+
             <plugin name="Remove the old NPC add-on and VR patch first">
               <description>Up to 1.6.2 the NPC add-on and the VR build were separate downloads. They are both in this installer now.
 
@@ -107,11 +90,6 @@ Your boxes and settings are not in those mods and are not affected.</description
 
     <!-- ============================================================ -->
     <installStep name="Runtime">
-      <visible>
-        <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
-        </dependencies>
-      </visible>
       <optionalFileGroups order="Explicit">
         <group name="Which Skyrim are you on?" type="SelectExactlyOne">
           <plugins order="Explicit">
@@ -127,7 +105,7 @@ Your boxes and settings are not in those mods and are not affected.</description
 
 Everything is identical across SE, AE and VR, the DLL included - it is one binary that works out which engine loaded it. Picking this only adds README_VR.txt, so if you install for SE and later move to VR you are not missing a file.
 
-VR also needs SkyrimVRESL, and the in-game menu needs ImGui VR Helper. SkyUI VR on its own will not give you a CEF menu once the MCM is gone in 1.6.4.</description>
+VR also needs SkyrimVRESL, and the SMF menu needs ImGui VR Helper. SkyUI VR on its own gives you the older MCM, which no longer reaches everything: NPC distribution, the Blocked list, the Recovery page, box renaming and any biped slot holding more than one box are SMF only.</description>
               <conditionFlags><flag name="runtime">vr</flag></conditionFlags>
               <typeDescriptor><type name="Optional" /></typeDescriptor>
             </plugin>
@@ -139,11 +117,6 @@ VR also needs SkyrimVRESL, and the in-game menu needs ImGui VR Helper. SkyUI VR 
 
     <!-- ============================================================ -->
     <installStep name="Add-ons">
-      <visible>
-        <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
-        </dependencies>
-      </visible>
       <optionalFileGroups order="Explicit">
         <group name="Optional" type="SelectAny">
           <plugins order="Explicit">
@@ -156,16 +129,16 @@ Leave it off if you only dress your own character.</description>
               <typeDescriptor><type name="Optional" /></typeDescriptor>
             </plugin>
 
-            <plugin name="Enchantment passthrough (adds one full plugin)">
-              <description>Keeps a costume's enchantments, armor rating and tempering working while the costume is in a box. This is on by default in CEF's settings, and from 1.6.3 it needs CostumeFW_Abilities.esp.
+            <plugin name="Enchantment passthrough (one full plugin, one light)">
+              <description>Keeps a costume's enchantments, armor rating and tempering working while the costume is in a box. This is on by default in CEF's settings, and from 1.6.3 it needs CostumeFW_Abilities.esp. This option installs two files: that one and CostumeFW_Abilities2.esp.
 
-That plugin is NOT light (ESL). It takes one of your 254 load-order slots, and it is the only CEF plugin that does - CostumeFW.esp, CostumeFW_BoxPool1.esp and CostumeFW_NPC.esp are all light and cost none.
+CostumeFW_Abilities.esp is NOT light (ESL). It takes one of your 254 load-order slots, and it is the only CEF plugin that does - CostumeFW.esp, CostumeFW_BoxPool1.esp, CostumeFW_NPC.esp and CostumeFW_Abilities2.esp are all light and cost none.
 
-It has to be a full plugin: the abilities live at fixed form IDs that your saves point at, and the flag cannot be changed later without changing how every one of them is addressed. If CEF ever needs more than it holds, the next one (CostumeFW_Abilities2.esp) is light and costs no slot.
+It has to be a full plugin: the abilities live at fixed form IDs that your saves point at, and the flag cannot be changed later without changing how every one of them is addressed. That reasoning only applied to there being one pool, so the second one is light. Together they hold 3,072 abilities. A costume takes one the first time you capture it and another whenever its enchantment changes value, so heavy re-enchanting costs more than one; the Main page shows how many are left.
 
 If you would rather not spend the slot, untick this. CEF will then turn enchantment passthrough off and say so, rather than falling back to the old method - the old method is what put stuck bonuses on people's characters, and quietly using it again would be worse than not doing it at all. Your costumes still look exactly the same; they just stop carrying stats.
 
-Once you have used this, leave it installed. Your saves refer to those form IDs, and removing the plugin strands whatever was applied.</description>
+Once you have used this, leave it installed. Your saves refer to those form IDs, and removing the plugin strands whatever was applied. That is also why this option is ticked and locked when CostumeFW_Abilities.esp is already active in your load order: at that point unticking it is not a choice, it is a way to lose the bonuses you have.</description>
               <conditionFlags><flag name="ench">yes</flag></conditionFlags>
               <typeDescriptor>
                 <dependencyType>
@@ -198,25 +171,6 @@ Once you have used this, leave it installed. Your saves refer to those form IDs,
   <conditionalFileInstalls>
     <patterns>
 
-      <pattern>
-        <dependencies operator="And">
-          <flagDependency flag="proceed" value="no" />
-        </dependencies>
-        <files>
-          <file source="canceled\install_canceled.txt"
-                destination="install_canceled.txt" priority="0" />
-        </files>
-      </pattern>
-
-      <pattern>
-        <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
-        </dependencies>
-        <files>
-          <folder source="core" destination="" priority="0" />
-        </files>
-      </pattern>
-
       <!--
         There is no "se" pattern, and that is not an omission. CEF is ONE
         CommonLibSSE-NG binary for SE, AE and VR - it branches on
@@ -228,7 +182,6 @@ Once you have used this, leave it installed. Your saves refer to those form IDs,
       -->
       <pattern>
         <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
           <flagDependency flag="runtime" value="vr" />
         </dependencies>
         <files>
@@ -238,7 +191,6 @@ Once you have used this, leave it installed. Your saves refer to those form IDs,
 
       <pattern>
         <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
           <flagDependency flag="npc" value="yes" />
         </dependencies>
         <files>
@@ -248,7 +200,6 @@ Once you have used this, leave it installed. Your saves refer to those form IDs,
 
       <pattern>
         <dependencies operator="And">
-          <flagDependency flag="proceed" value="yes" />
           <flagDependency flag="ench" value="yes" />
         </dependencies>
         <files>

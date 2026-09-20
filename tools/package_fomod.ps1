@@ -17,15 +17,18 @@
 #   core/             everything common to every install, minus the DLL
 #   vr/               README_VR.txt (the DLL is NOT VR-specific - see below)
 #   npc/              CostumeFW_NPC.esp + its carriers + README_NPC.txt
-#   ench/             CostumeFW_Abilities.esp
-#   canceled/         install_canceled.txt
+#   ench/             CostumeFW_Abilities.esp + CostumeFW_Abilities2.esp
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$ModFolder = 'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW',
     # The ability pool. Non-ESL on purpose: saves point at fixed form IDs in it,
     # and the light range cannot hold enough of them.
     [string]$AbilitiesEsp = 'K:\dev\CostumeExpansionFW\package_assets\CostumeFW_Abilities.esp',
-    [int]$AbilityCount = 1024
+    [int]$AbilityCount = 1024,
+    # Generation 2. ESL on purpose - see make_ability_pool.py's header for why
+    # generation 1 is the one exception and every later one is light.
+    [string]$Abilities2Esp = 'K:\dev\CostumeExpansionFW\package_assets\CostumeFW_Abilities2.esp',
+    [int]$Ability2Count = 2048
 )
 $ErrorActionPreference = 'Stop'
 $mod = $ModFolder
@@ -35,7 +38,7 @@ $stage = Join-Path $env:TEMP "cef_fomod_$Version"
 $out = Join-Path $repo "dist\CostumeExpansionFW-$Version-FOMOD.7z"
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-$dirs = 'fomod', 'core', 'vr', 'npc', 'ench', 'canceled'
+$dirs = 'fomod', 'core', 'vr', 'npc', 'ench'
 foreach ($d in $dirs) { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
 
 # --- fomod/ ---------------------------------------------------------------
@@ -120,10 +123,21 @@ Copy-Item "$assetRoot\meshes\CostumeFW\XML\Pub*" "$stage\npc\meshes\CostumeFW\XM
 Copy-Item "$assetRoot\meshes\CostumeFW\XML\NpcPersist*" "$stage\npc\meshes\CostumeFW\XML"
 
 # --- ench/ ----------------------------------------------------------------
+# BOTH generations ship together. Generation 2 was built, verified and supported
+# at runtime for 1.6.4 but never staged, so the "the pool is full, install
+# CostumeFW_Abilities2.esp" guidance - which the DLL logs, the SMF Main page
+# prints and the installer's own description repeats - named a file nobody could
+# get. Shipping it costs nothing: it is ESL (no load-order slot), it holds empty
+# spells until something is allocated into it, and MeasureGenerations finds it by
+# itself. It moves the wall from 1,024 abilities to 3,072.
 if (-not (Test-Path $AbilitiesEsp)) {
     throw "ability pool not found: $AbilitiesEsp. 1.6.3 cannot ship without it - enchantment passthrough is on by default and has nowhere to put its abilities."
 }
 Copy-Item $AbilitiesEsp "$stage\ench\CostumeFW_Abilities.esp"
+if (-not (Test-Path $Abilities2Esp)) {
+    throw "generation 2 pool not found: $Abilities2Esp. Generate it with 'python tools/make_ability_pool.py --generation 2 --esl', or the full-pool guidance keeps naming a file that is not in the archive."
+}
+Copy-Item $Abilities2Esp "$stage\ench\CostumeFW_Abilities2.esp"
 
 # Count the SPEL records, approximately: scan for the record signature and drop
 # one for the GRUP header that carries the same four bytes. It is a "did you
@@ -135,7 +149,6 @@ $spel = ([regex]::Matches($text, 'SPEL')).Count - 1
 if ($spel -lt $AbilityCount) {
     throw "ability pool looks short: found about $spel SPEL records, expected $AbilityCount. A pool smaller than the DLL expects fails closed in game and nobody gets enchantment passthrough."
 }
-Write-Host "ability pool: about $spel SPEL records"
 
 # The pool MUST NOT be ESL-flagged. Its form IDs are what saves point at, and
 # the light range is both too small and addressed differently - flagging it
@@ -146,8 +159,24 @@ if ($flags -band 0x200) {
     throw "CostumeFW_Abilities.esp is ESL-flagged. It has to be a full plugin - see the design doc, section 2.2."
 }
 
-# --- canceled/ ------------------------------------------------------------
-Copy-Item "$repo\package_assets\install_canceled.txt" "$stage\canceled\"
+# Generation 2: the same two checks with the ESL one INVERTED. Generation 1 is a
+# full plugin because saves already point into it and the flag can never change;
+# every later generation must be light, or adding capacity would cost a
+# load-order slot each time and the whole "just ship the next one" plan fails.
+$bytes2 = [System.IO.File]::ReadAllBytes("$stage\ench\CostumeFW_Abilities2.esp")
+$spel2 = ([regex]::Matches([System.Text.Encoding]::ASCII.GetString($bytes2), 'SPEL')).Count - 1
+if ($spel2 -lt $Ability2Count) {
+    throw "generation 2 pool looks short: found about $spel2 SPEL records, expected $Ability2Count."
+}
+if (-not ([BitConverter]::ToUInt32($bytes2, 8) -band 0x200)) {
+    throw "CostumeFW_Abilities2.esp is NOT ESL-flagged. Generation 2 and up have to be light - regenerate it with --esl."
+}
+Write-Host "ability pools: about $spel (gen1, full) + $spel2 (gen2, ESL) SPEL records"
+
+# There is no canceled/ any more. The installer's first question used to be
+# able to end the install by staging one text file instead of the mod, and a
+# mod manager told to REPLACE turned that into deleting the install the user
+# was being sent back to. ModuleConfig.xml's header note has the rest.
 
 # --- sanity, same as package.ps1 ------------------------------------------
 $dll = Get-Item "$core\SKSE\Plugins\CostumeExpansionFW.dll"
