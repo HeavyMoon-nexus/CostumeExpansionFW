@@ -421,7 +421,20 @@ namespace CostumeFW::SmfUI
                 const std::string token = a_token;
                 const std::string id = a_id;
                 SKSE::GetTaskInterface()->AddTask([token, id] {
-                    UiOps::RemoveBoxContent(token, id, true);  // returns the captured item (store-first)
+                    // false = do not return it in there: the return happens here
+                    // so its ANSWER can be passed on. A recreated copy has no
+                    // tempering and no player enchantment, and the difference is
+                    // invisible in the inventory - the MCM has said so since the
+                    // custody pass, and this button was the one place that did
+                    // the same thing silently.
+                    if (!UiOps::RemoveBoxContent(token, id, false)) {
+                        return;
+                    }
+                    bool recreated = false;
+                    if (ReturnStoredItem(id, true, &recreated) && recreated) {
+                        RE::DebugNotification(
+                            "CostumeFW: returned as a new copy (none stored on this character)");
+                    }
                 });
                 a_selection.clear();
             }
@@ -1046,7 +1059,11 @@ namespace CostumeFW::SmfUI
                     const std::string rid = id;
                     const bool wasActive = act;
                     SKSE::GetTaskInterface()->AddTask([rid, wasActive] {
-                        ReturnStoredItem(rid, wasActive);
+                        bool recreated = false;
+                        if (ReturnStoredItem(rid, wasActive, &recreated) && recreated) {
+                            RE::DebugNotification(
+                                "CostumeFW: returned as a new copy (none stored on this character)");
+                        }
                         if (wasActive) {
                             UiOps::SetPersistActive(rid, false);
                         }
