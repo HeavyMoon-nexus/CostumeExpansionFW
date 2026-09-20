@@ -346,6 +346,15 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([] { UninstallNpcCleanup(); });
         }
 
+        // The WHOLE of it (W4). The MCM used to walk the boxes and the persist
+        // catalog in Papyrus and call the NPC arm above at the end - a second
+        // implementation of the same flow, which is how it spent a version
+        // without that call. Both UIs run this now.
+        void UninstallCleanupNative(RE::StaticFunctionTag*)
+        {
+            SKSE::GetTaskInterface()->AddTask([] { UninstallCleanup(); });
+        }
+
         // Box "distribute" flag (whether the token is given to the player).
         bool GetBoxEnabled(RE::StaticFunctionTag*, std::int32_t a_index)
         {
@@ -1024,6 +1033,7 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetBoxBySlot", kClass, GetBoxBySlot);
         a_vm->RegisterFunction("GetBoxesOnSlot", kClass, GetBoxesOnSlot);
         a_vm->RegisterFunction("UninstallNpcCleanup", kClass, UninstallNpcCleanupNative);
+        a_vm->RegisterFunction("UninstallCleanup", kClass, UninstallCleanupNative);
         a_vm->RegisterFunction("GetBoxEnabled", kClass, GetBoxEnabled);
         a_vm->RegisterFunction("SetBoxEnabled", kClass, SetBoxEnabledNative);
         a_vm->RegisterFunction("GetBoxArmorType", kClass, GetBoxArmorType);

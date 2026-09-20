@@ -1076,48 +1076,21 @@ int Function BoxIndexOfToken(string token)
     return -1
 endFunction
 
-; Clean-uninstall helper: return every captured item (box + persist) to the
-; player, unequip + remove all box tokens, detach all injected meshes, and
-; write enabled=false so a reload does NOT re-apply anything (review C: the
-; old behavior kept enabled=true, so playing on re-applied everything). Defs
-; stay in CEF_settings.json; re-enable from MCM Main to restore them.
+; Clean-uninstall: ONE implementation, and it is in the DLL. This used to walk
+; the boxes and the persist catalog here in Papyrus - a second implementation of
+; the same flow, which is how it spent a whole version without the NPC arm: it
+; returned box contents and active persist, said "safe to uninstall", and left
+; published costumes on NPCs and NPC persist attached. The native returns what
+; neither half ever did as well (the persist entries this save has switched off,
+; and whatever else is still in the hidden storage), and it does not claim "safe
+; to uninstall" when a costume plugin is switched off and its originals cannot
+; come back. SMF's button calls the same function.
+;
+; Defs stay in CEF_settings.json; re-enable from MCM Main to restore them.
+; The native queues itself onto the main thread, so the page reset below runs
+; while it works - same as SMF's button, and this page is rebuilt on entry.
 function UninstallCleanup()
-    Actor player = Game.GetPlayer()
-    int n = CFW_Native.GetBoxCount()
-    int i = 0
-    while i < n
-        string[] cont = CFW_Native.GetBoxContents(i)
-        int ci = 0
-        while ci < cont.Length
-            ReturnItem(CFW_Native.ResolveForm(cont[ci]), false)
-            ci += 1
-        endWhile
-        Form tkn = CFW_Native.GetBoxTokenForm(i)
-        if tkn
-            player.UnequipItem(tkn, false, true)
-            player.RemoveItem(tkn, 99, true)
-        endIf
-        i += 1
-    endWhile
-
-    string[] pc = CFW_Native.GetPersistContents()
-    int pi = 0
-    while pi < pc.Length
-        ; Active-set only (P1-4): same reasoning as Remove-all - do not fabricate
-        ; copies of entries this character never activated.
-        if CFW_Native.IsPersistActive(pc[pi])
-            ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
-        endIf
-        pi += 1
-    endWhile
-
-    ; X7 (v1.6.4): the NPC arm. SMF has always called this; this cleanup did not,
-    ; so it returned box contents and active persist, said "safe to uninstall",
-    ; and left published costumes on NPCs and NPC persist attached.
-    CFW_Native.UninstallNpcCleanup()
-    CFW_Native.Clear()  ; detach + unregister all injected meshes
-    CFW_Native.SetEnabled(false)  ; persist the OFF state (no re-apply on reload)
-    Debug.Notification("CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall.")
+    CFW_Native.UninstallCleanup()  ; returns, removes, detaches, disables, notifies
     ForcePageReset()
 endFunction
 

@@ -136,6 +136,14 @@ Int Function GetBoxesOnSlot(Int slot) Global Native
 ; strip NPC persist. Queued to the main thread; returns immediately.
 Function UninstallNpcCleanup() Global Native
 
+; ALL of 'prepare for uninstall', in one call: return every captured item
+; (box contents, the whole persist catalog, published costumes) and empty the
+; hidden storage, take every box token off and out of the inventory, detach,
+; turn CEF off, and notify - saying how many items could NOT be returned rather
+; than claiming "safe to uninstall" when a costume plugin is switched off.
+; Queued to the main thread; returns immediately. SMF calls the same function.
+Function UninstallCleanup() Global Native
+
 ; Box "distribute" flag: whether the token is given to / kept on the player.
 Bool Function GetBoxEnabled(Int index) Global Native
 

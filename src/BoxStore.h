@@ -827,6 +827,14 @@ namespace CostumeFW
     // the publish tokens it takes back.
     UninstallReturnReport UninstallReturnAll();
 
+    // The whole "prepare for uninstall" flow: UninstallReturnAll, then every box
+    // token off and out of the inventory, detach, master off, re-apply the trio,
+    // and one notification that only says "safe to uninstall" when it is. Both
+    // UIs call THIS - the MCM through CFW_Native.UninstallCleanup(), SMF
+    // directly - because two implementations of it drifted apart once already.
+    // Main thread.
+    void UninstallCleanup();
+
     // Take every synthesized ability back off the player and mark them stale (call
     // on game load, before the boxes of the loaded save are applied). The forms are
     // KEPT: a save restores an ability by form id, so a form we forget is one that

@@ -6311,6 +6311,52 @@ namespace CostumeFW
         return rep;
     }
 
+    void UninstallCleanup()
+    {
+        // ONE uninstall, called from both UIs. There used to be two: the MCM's
+        // was Papyrus and the SMF one was C++, and they drifted - the Papyrus one
+        // went a whole version without the NPC arm, so it recalled nothing,
+        // stripped no assignments, and still said "safe to uninstall". Whatever
+        // the next change here is, it now lands in one place.
+        //
+        // No StoreLock around the whole thing: every call below takes it for the
+        // stretch it needs, which is what the SMF version did, and holding it
+        // across the detach and the re-apply would be a new lock order nothing
+        // else uses.
+        const UninstallReturnReport rep = UninstallReturnAll();
+        // Tokens AFTER the returns - the recall inside them hands publish tokens
+        // back to the player, so a loop that ran first would leave those behind.
+        std::vector<std::string> tokens;
+        const int n = BoxCount();
+        tokens.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            tokens.push_back(BoxAt(i).token);
+        }
+        for (const auto& t : tokens) {
+            GiveOrRemoveToken(t, false);  // unequip + remove every copy
+        }
+        DetachAll();
+        SetCefEnabled(false);  // persist the OFF state (no re-apply on reload)
+        Reconcile();
+        ApplyBoxAbilities();
+        RestampAllTokens();
+        ApplyCarrierOverrides(false);
+        if (rep.unreadable > 0) {
+            // "Safe to uninstall" is a claim, so it is only made when it is true.
+            // An unreadable id is a costume plugin that is switched off: its
+            // captured original is still in the save, and deleting CEF now takes
+            // it along.
+            RE::DebugNotification(
+                ("CostumeFW: " + std::to_string(rep.unreadable) +
+                    " item(s) could NOT be returned - a costume plugin is turned off. Turn it "
+                    "back on and run this again before deleting the mod.")
+                    .c_str());
+        } else {
+            RE::DebugNotification(
+                "CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall");
+        }
+    }
+
     int BoxCount()
     {
         StoreLock lk;
