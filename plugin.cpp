@@ -1,7 +1,15 @@
-// CostumeExpansionFW - skin-rebind injection PoC.
-// Console commands (open ~ console, type):
-//   cef seed | cef inject <FormID:Plugin.esp> | cef detach <id> | cef clear | cef list
-// Real seed/config/co-save driven flow continues to replace this test driver.
+// CostumeExpansionFW - skin-rebind injection.
+//
+// Console commands: open ~ and type "cef" on its own for the current list.
+// Commands.cpp::HandleConsoleCommand is the only place that list exists; this
+// header used to carry a copy of it and drifted (it still advertised "cef seed",
+// which has not existed for several releases).
+//
+// The user-facing ones are tokens / abilities / av / store / list / recover /
+// shapes / hideshape / morph / persist / pub / npcpersist / repair / carriers.
+// There is deliberately no "cef enabled": the master switch lives on the SMF
+// Main page, in the MCM, and in CEF_settings.json's "enabled" - see Config.h for
+// why the settings-file switch and the INI's bEnabled are not the same thing.
 
 #include "logger.h"
 #include "AbilityPool.h"

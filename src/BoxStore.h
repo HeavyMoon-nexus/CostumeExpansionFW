@@ -446,9 +446,16 @@ namespace CostumeFW
     // degrades past ~128).
     std::vector<WornItem> InventoryArmors(const std::string& a_filter);
 
-    // The shipped slot-token pool (CostumeFW.esp ARMOs named "Costume Box*"),
-    // as colon-form ids, sorted by their biped slot number. FreeTokens = those not
-    // yet bound to a box def (for the MCM "new box" slot picker).
+    // Every box token the loaded pool plugins define, as colon-form ids, sorted
+    // by biped slot then colon-id. FreeTokens = those not bound to a box def and
+    // not held in reserve by a published costume (the "new box" picker).
+    //
+    // Membership is the CFW_BoxTokenMarker KEYWORD and nothing else - never the
+    // display name. A token's FULL is overwritten with its box's label while it
+    // is in use, and an xTranslator'd copy of the plugin renames it outright, so
+    // the "name starts with Costume Box" test this used to run dropped every
+    // renamed token out of the pool (F10) and emptied it for anyone running a
+    // translation. See TokenIdentity.h for the plugin-name side of the same rule.
     std::vector<std::string> TokenPool();
     std::vector<std::string> FreeTokens();
 

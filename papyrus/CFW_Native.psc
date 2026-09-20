@@ -81,8 +81,8 @@ String[] Function GetInventoryItemIds(String filter = "") Global Native
 ; this BEFORE moving the physical item.
 Bool Function CanResolveContent(String content) Global Native
 
-; Create a new empty box auto-assigning the next free pool token. False if the
-; shipped token pool (Costume Box 1..N) is exhausted.
+; Create a new empty box auto-assigning the next free pool token. False if every
+; token in every loaded pool generation is already taken.
 Bool Function NewBox(String label) Global Native
 
 ; In-game item name for a colon-form id (falls back to the id).
@@ -108,7 +108,12 @@ Bool Function SetBoxAbility(String token, String ability) Global Native
 String Function GetBoxStats(Int index) Global Native
 
 ; --- Slot-token model (per-slot boxes + distribute toggle) -------------------
-; Each box is bound to a fixed biped slot (44-60) via its "Costume Box <N>" token.
+; Each box holds one token ARMO, and that token sits on one biped slot. The 27
+; shipped tokens cover slots 30-38, 40, 42-49 and 52-60; CostumeFW_BoxPool1.esp
+; adds three more on each of those same slots, so from 1.6.4 a slot can hold up
+; to four boxes and is NOT a name for a box. Anything that means "this box" keys
+; on the box id. A token is recognised by the CFW_BoxTokenMarker keyword, never
+; by its display name (the name is overwritten with the box's label).
 
 ; Free (unused) slot-token colon-ids, slot-sorted - the "new box" slot picker.
 String[] Function GetFreeTokenIds() Global Native

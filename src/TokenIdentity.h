@@ -91,12 +91,23 @@ namespace CostumeFW::tokenid
     // biped slot number, which was unique only while one slot held one box.
     //
     //   generation 0    "Box55"        the shipped spelling, kept as an alias.
-    //                                  The 27 generation-0 ARMA still carry a
-    //                                  MOD2 pointing at Box55_carrier.nif, and
+    //                                  16 of the 27 generation-0 ARMA carry a
+    //                                  MOD2 pointing at Box<slot>_carrier.nif
+    //                                  (slots 30-38/40/42/43 directly; 44, 46,
+    //                                  53 and 58 through a separate legacy
+    //                                  *AA_Carrier addon left over from the twin
+    //                                  design). The other eleven point at the
+    //                                  empty boxtoken.nif placeholder - slot 55
+    //                                  among them, so do not read the name above
+    //                                  as an example of the fallback.
     //                                  ApplyCarrierOverridesImpl falls back to
-    //                                  that ESP default whenever carriers.json
-    //                                  has nothing for the box - renaming the
-    //                                  files would break the fallback.
+    //                                  whatever the ESP says whenever
+    //                                  carriers.json has nothing for the box, so
+    //                                  renaming these files would break the
+    //                                  sixteen that do point at a carrier. The
+    //                                  other eleven get their physics only once
+    //                                  a build has written carriers.json, which
+    //                                  is the same observable result either way.
     //   generation >= 1 "BP01_000800"  BP<generation, 2+ digits>_<local id, 6 hex>.
     //                                  The local id alone repeats in every
     //                                  generation, so the generation is in the key.
