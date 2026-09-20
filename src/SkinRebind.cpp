@@ -15,6 +15,7 @@
 #include "RE/B/BSLightingShaderMaterialBase.h"
 #include "RE/B/BSLightingShaderProperty.h"
 #include "RE/B/BSModelDB.h"
+#include "RE/B/BSResourceNiBinaryStream.h"  // NIF header through the resource system (BSA included)
 #include "RE/B/BSShaderMaterial.h"
 #include "RE/B/BSShaderProperty.h"
 #include "RE/B/BSTextureSet.h"
@@ -44,6 +45,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <format>
 #include <condition_variable>  // the one delayed-call timer thread
 #include <fstream>
 #include <map>
@@ -2400,6 +2402,196 @@ namespace CostumeFW
             return admitted.front();
         }
 
+        // ---- Legacy (LE / Oldrim) meshes ---------------------------------
+        //
+        // The carrier builder has refused NiTriShape / NiTriStrips geometry since
+        // the Box44 CTD (2026-07-03): the SSE skin-partition loader divides by
+        // zero on an LE shape that carries an SSE NiSkinPartition. Nothing refused
+        // it anywhere else, so an LE costume could be captured, listed, injected
+        // and worn, and only the carrier build ever said a word - which is the
+        // half of the pipeline the user is least likely to be looking at.
+        //
+        // What counts as evidence is deliberately narrow. SSE uses NiTriShape
+        // legitimately for facegen head parts (the optimizer's "head parts only"
+        // mode keeps them), so the block type ON ITS OWN proves nothing. An LE
+        // FILE is the conjunction: a BS version below 100 AND one of those
+        // geometry blocks. Both, or this would refuse meshes that work today.
+        //
+        // Read through the resource system, not the filesystem, so a mesh inside
+        // a BSA is read like any other. Header only: the block-type table is in
+        // the first few hundred bytes and nothing past it is needed. A file that
+        // cannot be read, or whose header does not parse, says nothing - the
+        // model loader is still there to fail in its own way.
+        constexpr const char* kNonSseGeo[] = {
+            "NiTriShape", "NiTriShapeData", "NiTriStrips", "NiTriStripsData"
+        };
+
+        struct NifHeaderReader
+        {
+            explicit NifHeaderReader(const char* a_full) :
+                stream(a_full)
+            {}
+
+            std::uint8_t u8()
+            {
+                char c = 0;
+                if (!good || taken >= kMaxHeader || !stream.read(&c, 1)) {
+                    good = false;
+                    return 0;
+                }
+                ++taken;
+                return static_cast<std::uint8_t>(c);
+            }
+            std::uint16_t u16()
+            {
+                const std::uint16_t lo = u8();
+                const std::uint16_t hi = u8();
+                return static_cast<std::uint16_t>(lo | (hi << 8));
+            }
+            std::uint32_t u32()
+            {
+                const std::uint32_t b0 = u8();
+                const std::uint32_t b1 = u8();
+                const std::uint32_t b2 = u8();
+                const std::uint32_t b3 = u8();
+                return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+            }
+            std::string chars(std::uint32_t a_len)
+            {
+                std::string out;
+                out.reserve(a_len);
+                for (std::uint32_t i = 0; i < a_len && good; ++i) {
+                    const char c = static_cast<char>(u8());
+                    if (c) {
+                        out += c;  // the length includes a trailing NUL in some fields
+                    }
+                }
+                return out;
+            }
+            void shortString() { chars(u8()); }
+
+            RE::BSResourceNiBinaryStream stream;
+            bool good{ true };
+            std::uint32_t taken{ 0 };
+            // A header this size is already absurd; the cap is what stops a
+            // corrupt length field from walking the whole file one byte at a time.
+            static constexpr std::uint32_t kMaxHeader = 1u << 16;
+        };
+
+        // "" = nothing to say. Non-empty = the sentence to show the user.
+        std::string LegacyNifReasonUncached(const std::string& a_rel)
+        {
+            // Reading an archived file is not scene work and the resource system
+            // is what the game's own streamers use, so this is not main-thread
+            // only - but the capture check reaches it from the Papyrus VM, so
+            // record where it runs. If that census ever grows a surprising line,
+            // this is the call that put it there.
+            Diag::NoteExecutionThread("LegacyNifReasonUncached");
+            const std::string full = "meshes\\" + a_rel;
+            NifHeaderReader r(full.c_str());
+            if (!r.stream.good()) {
+                return {};
+            }
+            std::string magic;
+            for (;;) {
+                const char c = static_cast<char>(r.u8());
+                if (!r.good || magic.size() > 128) {
+                    return {};
+                }
+                if (c == '\n') {
+                    break;
+                }
+                magic += c;
+            }
+            if (magic.rfind("Gamebryo File Format", 0) != 0) {
+                return {};
+            }
+            const std::uint32_t version = r.u32();
+            if (version < 0x14000003u) {
+                return {};  // older than 20.0.0.3: no endian byte, and nothing SSE loads
+            }
+            if (r.u8() != 1) {
+                return {};  // big-endian (console build) - not ours to judge
+            }
+            const std::uint32_t userVersion = r.u32();
+            r.u32();  // block count
+            std::uint32_t bsVersion = 0;
+            if (version == 0x14020007u && (userVersion == 11 || userVersion == 12)) {
+                bsVersion = r.u32();
+                r.shortString();  // author
+                if (bsVersion >= 130) {
+                    r.u32();
+                }
+                r.shortString();  // process script
+                r.shortString();  // export script
+                if (bsVersion == 130) {
+                    r.shortString();  // max filepath
+                }
+            }
+            if (bsVersion >= 100) {
+                return {};  // SSE format. NiTriShape in here is legitimate - see above.
+            }
+            const std::uint16_t types = r.u16();
+            if (!r.good || types == 0 || types > 4096) {
+                return {};
+            }
+            for (std::uint16_t i = 0; i < types; ++i) {
+                const std::uint32_t len = r.u32();
+                if (!r.good || len > 256) {
+                    return {};
+                }
+                const std::string name = r.chars(len);
+                for (const char* bad : kNonSseGeo) {
+                    if (name == bad) {
+                        return std::format(
+                            "legacy (LE) mesh - '{}' holds a {} block and is in Skyrim LE "
+                            "format (BS version {}). Run SSE NIF Optimizer over that mod and "
+                            "try again.",
+                            a_rel, bad, bsVersion);
+                    }
+                }
+            }
+            return {};
+        }
+
+        std::mutex g_legacyMutex;
+        // Path -> verdict, so a costume worn twenty times is parsed once.
+        std::unordered_map<std::string, std::string> g_legacyByPath;
+        // Content -> verdict, for the ones already in someone's settings: the UI
+        // needs a reason to show, and the log needs to say it once rather than on
+        // every re-equip.
+        std::unordered_map<std::string, std::string> g_legacyByContent;
+
+        std::string LegacyKey(std::uint32_t a_localID, const std::string& a_plugin)
+        {
+            return std::format("{:06X}:{}", a_localID, a_plugin);
+        }
+
+        std::string LegacyNifReasonFor(const std::string& a_modelPath)
+        {
+            const std::string rel = StripMeshesPrefix(a_modelPath);
+            {
+                std::scoped_lock lk(g_legacyMutex);
+                if (const auto it = g_legacyByPath.find(rel); it != g_legacyByPath.end()) {
+                    return it->second;
+                }
+            }
+            std::string reason = LegacyNifReasonUncached(rel);
+            std::scoped_lock lk(g_legacyMutex);
+            g_legacyByPath.insert_or_assign(rel, reason);
+            return reason;
+        }
+
+        // True the first time this content is refused, so the log carries one
+        // line per item per session instead of one per resolve.
+        bool NoteLegacyRefusal(std::uint32_t a_localID, const std::string& a_plugin,
+            const std::string& a_reason)
+        {
+            std::scoped_lock lk(g_legacyMutex);
+            return g_legacyByContent.insert_or_assign(LegacyKey(a_localID, a_plugin), a_reason)
+                .second;
+        }
+
         // Resolve an ARMA (or ARMO -> its race-matched admitted ARMA) to the
         // 3P + 1P models for the given wearer race. Every caller supplies one
         // immutable policy generation. If the requested sex has no model, falls
@@ -2495,6 +2687,16 @@ namespace CostumeFW
                     }
                     return false;
                 }
+            }
+            // The LE gate, at the one seam every path goes through: player and
+            // NPC injection, the carrier manifest, shape enumeration and the
+            // capture check all resolve their model right here.
+            if (const std::string legacy = LegacyNifReasonFor(nif3p); !legacy.empty()) {
+                if (NoteLegacyRefusal(a_localID, a_plugin, legacy)) {
+                    SKSE::log::warn("ResolveArma: {:X}:{} is not being injected - {}",
+                        a_localID, a_plugin, legacy);
+                }
+                return false;
             }
             a_out3p = ModelRef{ nif3p, m3 };
             const char* nif1p = m1->model.c_str();
@@ -3098,6 +3300,30 @@ namespace CostumeFW
         }
         a_nifOut = m3p.nifPath;
         return true;
+    }
+
+    std::string LegacyNifRefusal(const std::string& a_contentId)
+    {
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_contentId, localID, plugin)) {
+            return {};
+        }
+        std::scoped_lock lk(g_legacyMutex);
+        const auto it = g_legacyByContent.find(LegacyKey(localID, plugin));
+        return it == g_legacyByContent.end() ? std::string{} : it->second;
+    }
+
+    std::vector<std::string> LegacyNifRefusals()
+    {
+        std::scoped_lock lk(g_legacyMutex);
+        std::vector<std::string> out;
+        out.reserve(g_legacyByContent.size());
+        for (const auto& [id, why] : g_legacyByContent) {
+            out.push_back(id + " - " + why);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
     }
 
     bool CanResolveContent(const std::string& a_contentId)

@@ -2640,6 +2640,12 @@ namespace CostumeFW
             out.push_back(lines.empty() ? "(unavailable)" : lines.front().substr(6));
             out.push_back("full listing: console `cef store`");
         }
+        // Only when there are any: a section that is empty on every healthy
+        // setup is a section nobody reads on the one that is not.
+        if (const auto legacy = LegacyNifRefusals(); !legacy.empty()) {
+            out.push_back("# Legacy (LE) meshes - captured, kept, NOT injected");
+            out.insert(out.end(), legacy.begin(), legacy.end());
+        }
         const auto npc = NpcDiagLines();
         out.insert(out.end(), npc.begin(), npc.end());
         out.push_back("# Churn (this session)");
@@ -3137,7 +3143,14 @@ namespace CostumeFW
         if (!ResolveAdmittedModelPath(
                 a_id, EffectiveSexFor(a_id), *pol, nif)) {
             if (a_why) {
-                *a_why = "this item's mesh could not be resolved - not captured (see log)";
+                // The resolver refuses an LE mesh (the geometry the SSE skin-
+                // partition loader divides by zero on), and that is worth saying
+                // in full: it names a mod the user can fix and the tool that
+                // fixes it. Everything else keeps the pre-1.3.2 wording.
+                const std::string legacy = LegacyNifRefusal(a_id);
+                *a_why = legacy.empty()
+                    ? "this item's mesh could not be resolved - not captured (see log)"
+                    : legacy;
             }
             return false;
         }

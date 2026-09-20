@@ -71,6 +71,18 @@ namespace CostumeFW
     // Pure data reads; safe on the Papyrus VM thread.
     bool CanResolveContent(const std::string& a_contentId);
 
+    // Why a content is NOT being injected, when the reason is that its mesh is a
+    // Skyrim LE file. "" for everything else - including a content nobody has
+    // tried to resolve yet, since the verdict is recorded when the model is
+    // resolved. The carrier builder has refused this geometry since the Box44
+    // CTD; from 1.6.4.1 the model resolver refuses it too, so an LE costume is
+    // kept in the settings and simply not injected rather than risking the
+    // engine's skin-partition loader.
+    std::string LegacyNifRefusal(const std::string& a_contentId);
+
+    // Every such refusal this session, "<id> - <reason>", sorted. Diagnostics.
+    std::vector<std::string> LegacyNifRefusals();
+
     // Main thread only: resolve a content's ARMA model, load the NIF, and return its
     // skinned shapes (name + first dismember biped slot; -1 if not dismembered),
     // caching them for the MCM (BoxStore::ContentShapesFor). Empty on failure. Used
