@@ -315,7 +315,18 @@ namespace CostumeFW
                 std::this_thread::sleep_for(std::chrono::seconds(30));
                 SKSE::GetTaskInterface()->AddTask([a_actor, a_slot, a_attempt] {
                     auto* item = FindNpr(a_actor, a_slot);
-                    if (!item || item->restoreSuspended || !CefEnabled()) return;
+                    if (!item || item->restoreSuspended) return;
+                    // Master switch off: wait rather than give up. This used to
+                    // return, which ended the chain - flick CEF off and back on
+                    // inside the 30-second window and the NPC it was coming for
+                    // stayed undressed until the next equip event or load, with
+                    // nothing suspended and nothing shown to say so. The attempt
+                    // count does NOT advance: the three tries are for an equip
+                    // that will not take, and this is not one of them.
+                    if (!CefEnabled()) {
+                        ScheduleNprRestore(a_actor, a_slot, a_attempt);
+                        return;
+                    }
                     auto* actor = ResolveNprActor(*item);
                     auto* token = NprTokenArmo(a_slot);
                     auto* equip = RE::ActorEquipManager::GetSingleton();
