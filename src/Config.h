@@ -93,7 +93,7 @@ namespace CostumeFW
                     "here loses the hidden storage, this save's persist items and any NPC "
                     "costume bindings. Open the save, check it loads, then quit to desktop. "
                     "To play with the costumes off but the data intact, delete this file and "
-                    "set \"enabled\": false in CEF_settings.json instead.");
+                    "put an empty CEF_NOINJECT.txt in its place instead.");
                 return true;
             }
             // (2) ini bEnabled=0. Missing file / missing key = enabled (default on).
@@ -104,12 +104,52 @@ namespace CostumeFW
                     "here loses the hidden storage, this save's persist items and any NPC "
                     "costume bindings. Open the save, check it loads, then quit to desktop. "
                     "To play with the costumes off but the data intact, set bEnabled=1 and "
-                    "put \"enabled\": false in CEF_settings.json instead.");
+                    "put an empty CEF_NOINJECT.txt in SKSE\\Plugins instead.");
                 return true;
             }
             return false;
         }();
         return disabled;
+    }
+
+    // The OTHER switch, and the reason this one exists as a file at all.
+    //
+    // There have always been two ways to stop CEF and they are not the same
+    // thing. HardDisabled() above registers nothing, which is what makes it a
+    // recovery switch and also what makes saving in that state cost you the
+    // hidden storage, this save's persist items and every NPC costume binding.
+    // The gentle one - CEF_settings.json's "enabled": false - stops the
+    // injection, the abilities and the token hand-outs while the hooks, the
+    // co-save and the load-time bookkeeping all keep running, so the save data
+    // is untouched and the costumes come straight back.
+    //
+    // Until now the gentle one could only be reached by hand-editing json, and
+    // the dangerous one was a file you could drop in place. Somebody who cannot
+    // launch the game takes the switch they can reach, which was the wrong one.
+    // This is the same gentle switch with the same interface as the panic flag:
+    // create Data\SKSE\Plugins\CEF_NOINJECT.txt and CEF loads normally and
+    // injects nothing; delete it and it picks up where it left off.
+    //
+    // It OVERRIDES the stored setting rather than replacing it: CefEnabled()
+    // reads it, WriteJson never writes it, so the master toggle in the UI is
+    // still whatever the user last chose and is there again when the file goes.
+    // Read once per process, like the others.
+    inline bool NoInject()
+    {
+        static const bool on = [] {
+            if (!std::ifstream("Data\\SKSE\\Plugins\\CEF_NOINJECT.txt").good()) {
+                return false;
+            }
+            SKSE::log::warn(
+                "CEF is loaded but NOT INJECTING - CEF_NOINJECT.txt is present. Hooks, the "
+                "co-save and every load-time check are running as usual, so your save data is "
+                "safe and saving here is fine; costumes, enchantment abilities and box tokens "
+                "are simply not applied. Delete the file to turn them back on. (This is the "
+                "same thing as \"enabled\": false in CEF_settings.json, and it overrides it "
+                "without changing what is in the file.)");
+            return true;
+        }();
+        return on;
     }
 
     // Diagnostic lever for the persist-CTD investigation (BUGREPORT_2026-07-27,

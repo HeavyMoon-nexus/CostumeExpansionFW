@@ -3,6 +3,7 @@
 #include "SkinRebind.h"
 #include "PublishStore.h"
 #include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
+#include "Config.h"     // NoInject (the file form of the gentle master switch)
 #include "StoreLock.h"
 #include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
 #include "FormId.h"       // MakeColonId (shared with the ability pool)
@@ -2107,7 +2108,10 @@ namespace CostumeFW
     bool CefEnabled()
     {
         StoreLock lk;
-        return g_cefEnabled;
+        // CEF_NOINJECT.txt overrides the stored setting for the session without
+        // touching it: WriteJson keeps writing g_cefEnabled, so deleting the file
+        // restores whatever the user last chose (Config.h::NoInject).
+        return g_cefEnabled && !NoInject();
     }
 
     bool SetCefEnabled(bool a_on)
@@ -2475,7 +2479,10 @@ namespace CostumeFW
         StoreLock lk;
         std::vector<std::string> out;
         out.push_back("# Status");
-        out.push_back(std::string("CEF master: ") + (g_cefEnabled ? "enabled" : "DISABLED"));
+        out.push_back(std::string("CEF master: ") + (CefEnabled() ? "enabled" : "DISABLED") +
+                      (NoInject() ? " (CEF_NOINJECT.txt - the setting itself says " +
+                                        std::string(g_cefEnabled ? "enabled" : "disabled") + ")"
+                                  : ""));
         out.push_back(std::string("RaceMenu/skee body morph: ") +
                       (BodyMorph::Available() ? "acquired" : "NOT AVAILABLE"));
         out.push_back(std::string("FSMP (hdtSMP64.dll): ") +

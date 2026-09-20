@@ -3,6 +3,7 @@
 #include "AbilityPool.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "Config.h"  // NoInject - the checkbox is not the whole answer
 #include "Diag.h"
 #include "Preset.h"
 #include "PublishStore.h"
@@ -474,6 +475,14 @@ namespace CostumeFW::SmfUI
                     // as the Papyrus SetEnabled native - keep them in lockstep).
                     ApplyCarrierOverrides(false);
                 });
+            }
+            if (NoInject()) {
+                // Say it where the switch is. Otherwise the box reads "off",
+                // ticking it does nothing, and there is no way to find out why.
+                ImGui::TextWrapped(
+                    "CEF_NOINJECT.txt is in SKSE\\Plugins: nothing is injected while that file "
+                    "is there, whatever this box says. Delete it to put the costumes back. Your "
+                    "save data is unaffected either way - this is not the panic flag.");
             }
             if (ImGui::Button("Reload settings from disk##cfw")) {
                 SKSE::GetTaskInterface()->AddTask([] { ReloadSettingsFromDisk(); });
