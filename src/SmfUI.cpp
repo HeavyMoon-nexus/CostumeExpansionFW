@@ -469,7 +469,8 @@ namespace CostumeFW::SmfUI
                     SetCefEnabled(want);  // def + json
                     Reconcile();          // master off hides everything; on re-shows
                     ApplyBoxAbilities();
-                    // Persist head carriers follow the master switch (same trio
+                    RestampAllTokens();   // off zeroes the worn token's armor/weight/keywords
+                    // Persist head carriers follow the master switch (same four
                     // as the Papyrus SetEnabled native - keep them in lockstep).
                     ApplyCarrierOverrides(false);
                 });

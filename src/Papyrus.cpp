@@ -438,6 +438,7 @@ namespace CostumeFW
             SKSE::GetTaskInterface()->AddTask([] {
                 Reconcile();  // master off hides everything; on re-shows
                 ApplyBoxAbilities();
+                RestampAllTokens();  // off zeroes the worn token's armor/weight/keywords
                 // Persist head carriers follow the master switch: off deregisters
                 // the pool (head physics gone), on re-registers it (stage 3b).
                 ApplyCarrierOverrides(false);

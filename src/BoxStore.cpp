@@ -2118,6 +2118,27 @@ namespace CostumeFW
         return g_cefEnabled;
     }
 
+    void RestampAllTokens()
+    {
+        StoreLock lk;
+        // The master switch reaches the token's NUMBERS, not just its mesh.
+        // Turning CEF off hid the costume and revoked the ability, and left the
+        // token's armor rating, weight and passed-through keywords stamped on a
+        // piece of gear the player is still wearing - an invisible suit of armour
+        // that goes on protecting them. Nobody asked for "hide the look, keep the
+        // defence", and it is the sort of thing that comes back as a bug report
+        // about armour ratings that do not add up.
+        //
+        // SetTokenStats reads CefEnabled() itself, so this is only the sweep that
+        // makes it see the new answer: off writes zeroes, on writes the sums back.
+        // Main thread only - it edits ARMO forms.
+        for (const auto& b : g_boxes) {
+            SetTokenStats(b);
+        }
+        SKSE::log::info("boxes: re-stamped {} token(s) for master {}", g_boxes.size(),
+            g_cefEnabled ? "ON" : "OFF");
+    }
+
     bool BoxTokenUsable(const BoxDefInfo& a_box)
     {
         return a_box.tokenState == TokenState::Resolved;
@@ -4733,7 +4754,10 @@ namespace CostumeFW
             }
             ClearTokenKeywords(a_tokenId, token);
             auto& mine = g_boxKeywords[a_tokenId];
-            if (a_box.enabled) {
+            // Master switch as well as the box's own Distribute toggle: see
+            // RestampAllTokens. A keyword is as much a stat as the armor rating -
+            // other mods read them off the worn token - so the two travel together.
+            if (a_box.enabled && CefEnabled()) {
                 for (const auto& c : StatAdmittedContents(a_box.contents)) {  // blacklist only
                     auto* armo = ResolveArmo(c);
                     if (!armo) {
@@ -4783,7 +4807,10 @@ namespace CostumeFW
         {
             float armorSum = 0.0f;
             float weightSum = 0.0f;
-            if (a_box.enabled) {
+            // a_box.enabled is the box's own Distribute toggle; CefEnabled() is
+            // the master switch. Either one off means the token pays nothing
+            // through - sums stay 0 and the fields below are written as 0.
+            if (a_box.enabled && CefEnabled()) {
                 for (const auto& c : StatAdmittedContents(a_box.contents)) {  // blacklist only
                     if (auto* armo = ResolveArmo(c)) {
                         if (!g_statArmorOff.contains(c)) {

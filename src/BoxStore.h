@@ -114,6 +114,14 @@ namespace CostumeFW
     bool CefEnabled();
     bool SetCefEnabled(bool a_on);  // persists + returns the new state
 
+    // Write every box's armor / weight / passed-through keywords onto its token
+    // again, which with the master switch off means writing zeroes. Call it
+    // wherever CefEnabled() changes, alongside Reconcile / ApplyBoxAbilities /
+    // ApplyCarrierOverrides - turning CEF off has to take the numbers with the
+    // mesh, or a worn token keeps defending an invisible costume. Main thread:
+    // it edits ARMO forms.
+    void RestampAllTokens();
+
     // Token-less always-injected persist content (colon-form ids).
     std::vector<std::string> PersistContents();
     bool AddPersistContent(const std::string& a_content);     // def + json (dedup)
