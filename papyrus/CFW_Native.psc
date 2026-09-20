@@ -123,7 +123,18 @@ Int Function GetTokenSlot(String token) Global Native
 
 ; The box index on biped slot `slot`, or -1 if none. Lets the per-box MCM pages
 ; (named by slot) resolve to their box even after a deletion shifts box indices.
+; Ambiguous by design since 1.6.4: -1 when the slot holds more than one box.
+; Kept for compatibility - the MCM keys on boxId from 1.6.4.1 and no longer calls
+; this; it goes when the function does.
 Int Function GetBoxBySlot(Int slot) Global Native
+
+; The box's LOGICAL id, and the way back from one. This is what "this box" means:
+; an index shifts the moment another box is deleted, and a biped slot stopped
+; being unique in 1.6.4, but a boxId is issued once and never changes - not on
+; rename, not on a contents change, not across a publish round trip.
+; GetBoxById returns -1 when there is no such box (deleted this session).
+String Function GetBoxId(Int index) Global Native
+Int Function GetBoxById(String boxId) Global Native
 
 ; How many boxes sit on this biped slot. From v1.6.4 a slot can hold several
 ; (CostumeFW_BoxPool1.esp adds more physical tokens per slot), and this MCM

@@ -36,9 +36,12 @@ string[] _persistUncatIds
 ; Each box now has its OWN page (scroll-limit fix); "Boxes" is a short overview.
 int      _curBoxIndex       ; the box rendered on the current single-box page
 string[] _boxPageNames      ; page name per box page, for OnPageReset lookup
-int[]    _boxPageSlots      ; the biped slot each box page maps to (parallel)
-int      _sharedSlotBoxes   ; boxes left out of the page list because their
-                            ; biped slot holds more than one (v1.6.4 I2)
+int      _unpagedBoxes      ; boxes past the Papyrus array cap, with no page
+string[] _boxPageIds        ; the BOX ID each box page maps to (parallel)
+                            ; v1.6.4.1: was the biped slot, which stopped being
+                            ; unique in 1.6.4 - a slot can hold four boxes, so
+                            ; two pages named for one slot both resolved to the
+                            ; first box. A boxId is issued once and never moves.
 int _optNewBox
 int[]    _equipOpts
 int[]    _equipBoxIdx
@@ -73,10 +76,13 @@ int      _optInvFilter      ; "Inventory filter" input (persist + box pages)
 string   _invFilter         ; current inventory-capture name filter (session)
 int[]    _genderOpts        ; per-content "Body" (forced NIF) menu (box page)
 int[]    _persistGenderOpts ; per-content "Body" menu (persist page)
+int      _persistPage       ; F20: current window into the persist catalog
+int      _persistPrevOpt    ; its "< Prev" nav option (-1 when absent)
+int      _persistNextOpt    ; its "Next >" nav option (-1 when absent)
 int      _contentPage       ; F2: current contents page index within a box page
 int      _contentPrevOpt    ; "< Prev contents" nav option (-1 when absent)
 int      _contentNextOpt    ; "Next contents >" nav option (-1 when absent)
-int      _curBoxSlot        ; ROOT I: the open box page's STABLE biped slot (index re-resolve)
+string   _curBoxId          ; ROOT I: the open box page's STABLE box id (index re-resolve)
 string[] _freeTokenIds      ; ids parallel to the open "new box" slot menu
 string[] _presetFilesCache  ; files parallel to the open "assign preset" menu
 
@@ -105,8 +111,9 @@ endEvent
 function SetupConfig()
     ModName = "Costume Expansion FW"
     _curBoxIndex = 0
+    _curBoxId = ""
     _boxPageNames = new string[1]
-    _boxPageSlots = new int[1]
+    _boxPageIds = new string[1]
     BuildPages()  ; Main, Persist, Boxes (overview), one page per box, Presets
 
     ; Init every option-map array so a Find() before a page is built is safe.
@@ -167,28 +174,48 @@ endFunction
 ; after closing + reopening the MCM).
 function BuildPages()
     int n = CFW_Native.GetBoxCount()
-    _boxPageNames = Utility.CreateStringArray(n + 1, "")  ; +1 so size is never 0
-    _boxPageSlots = Utility.CreateIntArray(n + 1, 0)
-    _sharedSlotBoxes = 0
+    ; A Papyrus array holds at most 128 entries and six of the pages are fixed,
+    ; so 122 boxes can have one. The shipped pools cannot reach that (27 + 81 =
+    ; 108) but a later generation would, and an over-sized array is a runtime
+    ; error, not a short list. Before 1.6.4.1 the slot filter kept this well
+    ; under the cap by accident; now that every box gets a page it has to be
+    ; said out loud.
+    int cap = 122
+    int pageable = n
+    if pageable > cap
+        pageable = cap
+    endIf
+    _unpagedBoxes = n - pageable
+    _boxPageNames = Utility.CreateStringArray(pageable + 1, "")  ; +1 so size is never 0
+    _boxPageIds = Utility.CreateStringArray(pageable + 1, "")
 
-    ; I2 (v1.6.4): a biped slot can hold several boxes now, and this menu keys
-    ; its pages by slot - two boxes on slot 55 would produce two pages with the
-    ; SAME name, Find() would return the first for both, and every action on
-    ; either page would land on one box. So a page is built only for a slot that
-    ; holds exactly ONE box; the rest are counted and named on the Boxes page,
-    ; which points at SMF. Operating them from here arrives in 1.6.4.1, when the
-    ; pages move to boxId.
+    ; v1.6.4.1: EVERY box gets a page, including the ones sharing a biped slot.
+    ; 1.6.4 left those out because the pages were keyed by slot: two boxes on
+    ; slot 55 made two pages with the same name, Find() answered the first for
+    ; both, and every action on either page landed on one box. The key is the
+    ; box id now, so the only thing the name still has to do is be UNIQUE and
+    ; recognisable - the box's own label when its slot is shared, and a "#2"
+    ; suffix in the last resort where two boxes are named the same thing.
     int pageCount = 0
     int i = 0
-    while i < n
+    while i < n && pageCount < cap
         int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
-        if CFW_Native.GetBoxesOnSlot(slot) == 1
-            _boxPageNames[pageCount] = "Box " + slot + ": " + SlotName(slot)
-            _boxPageSlots[pageCount] = slot
-            pageCount += 1
-        else
-            _sharedSlotBoxes += 1
+        string name = "Box " + slot + ": " + SlotName(slot)
+        if CFW_Native.GetBoxesOnSlot(slot) > 1
+            string label = CFW_Native.GetBoxLabel(i)
+            if label != ""
+                name = "Box " + slot + ": " + label
+            endIf
         endIf
+        string unique = name
+        int dup = 2
+        while _boxPageNames.Find(unique) >= 0
+            unique = name + " #" + dup
+            dup += 1
+        endWhile
+        _boxPageNames[pageCount] = unique
+        _boxPageIds[pageCount] = CFW_Native.GetBoxId(i)
+        pageCount += 1
         i += 1
     endWhile
 
@@ -220,6 +247,8 @@ endEvent
 event OnPageReset(string a_page)
     _contentPrevOpt = -1   ; F2: invalidate stale box-page content-nav options
     _contentNextOpt = -1
+    _persistPrevOpt = -1   ; F20: same, for the persist catalog window
+    _persistNextOpt = -1
     if a_page == "Boxes"
         ResetBoxesOverviewPage()
     elseIf a_page == "Persist"
@@ -233,14 +262,15 @@ event OnPageReset(string a_page)
     elseIf a_page == "Main" || a_page == ""
         ResetMainPage()
     else
-        ; Box page: resolve by SLOT (stable) not by page position, so a deletion
-        ; that shifts box indices still maps each page to the right box.
+        ; Box page: resolve by BOX ID (stable) not by page position, so a deletion
+        ; that shifts box indices still maps each page to the right box - and so
+        ; two boxes on one biped slot are two different pages.
         int pi = _boxPageNames.Find(a_page)
         if pi < 0
             ResetMainPage()
             return
         endIf
-        int boxIdx = CFW_Native.GetBoxBySlot(_boxPageSlots[pi])
+        int boxIdx = CFW_Native.GetBoxById(_boxPageIds[pi])
         if boxIdx >= 0
             ResetSingleBoxPage(boxIdx)
         else
@@ -410,8 +440,35 @@ function ResetPersistPage()
     ; M2 (CEF_STATE_SCOPE.md): the catalog is GLOBAL (shared by every save /
     ; character); the toggle on each row is what THIS save actually shows.
     string[] contents = CFW_Native.GetPersistContents()
-    AddHeaderOption("Catalog (" + contents.Length + ") - shared across saves")
-    if contents.Length == 0
+    ; F20: SkyUI gives a page a fixed number of option positions and a catalog
+    ; row costs FIVE of them, so a long catalog ran off the end - the rows at the
+    ; bottom came out with no controls at all, which reads as CEF losing them.
+    ; Show a window with prev/next, the same shape the box page uses for its
+    ; contents. Sixteen rows is 80 positions and leaves room for everything else
+    ; on the page, including the uncatalogued list below.
+    int total = contents.Length
+    int perPage = 16
+    int pageCount = 1
+    if total > perPage
+        pageCount = (total + perPage - 1) / perPage
+    endIf
+    if _persistPage >= pageCount
+        _persistPage = pageCount - 1
+    endIf
+    if _persistPage < 0
+        _persistPage = 0
+    endIf
+    int start = _persistPage * perPage
+    int shown = total - start
+    if shown > perPage
+        shown = perPage
+    endIf
+    if pageCount > 1
+        AddHeaderOption("Catalog " + (start + 1) + "-" + (start + shown) + " of " + total + " - shared across saves")
+    else
+        AddHeaderOption("Catalog (" + total + ") - shared across saves")
+    endIf
+    if total == 0
         AddTextOption("(none - use + Add worn item)", "", OPTION_FLAG_DISABLED)
         _persistActiveOpts     = new int[1]
         _persistMorphOpts      = new int[1]
@@ -420,20 +477,33 @@ function ResetPersistPage()
         _persistHideOpts       = new int[1]
         _persistRemoveContents = new string[1]
     else
-        _persistActiveOpts     = Utility.CreateIntArray(contents.Length, -1)
-        _persistMorphOpts      = Utility.CreateIntArray(contents.Length, -1)
-        _persistGenderOpts     = Utility.CreateIntArray(contents.Length, -1)
-        _persistRemoveOpts     = Utility.CreateIntArray(contents.Length, -1)
-        _persistHideOpts       = Utility.CreateIntArray(contents.Length, -1)
-        _persistRemoveContents = Utility.CreateStringArray(contents.Length, "")
+        if pageCount > 1
+            AddTextOption("  Page " + (_persistPage + 1) + " / " + pageCount, "", OPTION_FLAG_DISABLED)
+            if _persistPage > 0
+                _persistPrevOpt = AddTextOption("  < Prev", "")
+            endIf
+            if _persistPage < pageCount - 1
+                _persistNextOpt = AddTextOption("  Next >", "")
+            endIf
+        endIf
+        _persistActiveOpts     = Utility.CreateIntArray(shown, -1)
+        _persistMorphOpts      = Utility.CreateIntArray(shown, -1)
+        _persistGenderOpts     = Utility.CreateIntArray(shown, -1)
+        _persistRemoveOpts     = Utility.CreateIntArray(shown, -1)
+        _persistHideOpts       = Utility.CreateIntArray(shown, -1)
+        _persistRemoveContents = Utility.CreateStringArray(shown, "")
+        ; The arrays are the WINDOW, not the catalog: every handler maps an
+        ; option back through _persistRemoveContents, so they need no idea that
+        ; there is a window at all.
         int i = 0
-        while i < contents.Length
-            _persistActiveOpts[i] = AddToggleOption(CFW_Native.GetItemName(contents[i]), CFW_Native.IsPersistActive(contents[i]))
-            _persistMorphOpts[i] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(contents[i]))
-            _persistGenderOpts[i] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(contents[i])))
-            _persistHideOpts[i] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(contents[i]))
+        while i < shown
+            string cid = contents[start + i]
+            _persistActiveOpts[i] = AddToggleOption(CFW_Native.GetItemName(cid), CFW_Native.IsPersistActive(cid))
+            _persistMorphOpts[i] = AddToggleOption("  Body morph (BodySlide mesh)", CFW_Native.GetBodyMorph(cid))
+            _persistGenderOpts[i] = AddMenuOption("  Body (forced NIF)", GenderName(CFW_Native.GetContentGender(cid)))
+            _persistHideOpts[i] = AddInputOption("  Hide when worn (slots)", CFW_Native.GetHideSlots(cid))
             _persistRemoveOpts[i] = AddTextOption("  Remove from catalog", "[remove]")
-            _persistRemoveContents[i] = contents[i]
+            _persistRemoveContents[i] = cid
             i += 1
         endWhile
         AddHeaderOption("Actions")
@@ -453,11 +523,19 @@ function ResetPersistPage()
     endWhile
     if uncat > 0
         AddHeaderOption("Active but not in catalog (" + uncat + ")")
-        _persistUncatOpts = Utility.CreateIntArray(uncat, -1)
-        _persistUncatIds  = Utility.CreateStringArray(uncat, "")
+        ; Bounded for the same reason the catalog above is (F20): this list has
+        ; no upper size of its own, and rows that run past the page's option
+        ; positions come out without their button.
+        int uncatShown = uncat
+        if uncatShown > 16
+            uncatShown = 16
+            AddTextOption("(showing 16 of " + uncat + " - SMF lists them all)", "", OPTION_FLAG_DISABLED)
+        endIf
+        _persistUncatOpts = Utility.CreateIntArray(uncatShown, -1)
+        _persistUncatIds  = Utility.CreateStringArray(uncatShown, "")
         int uidx = 0
         ai = 0
-        while ai < act.Length
+        while ai < act.Length && uidx < uncatShown
             if contents.Find(act[ai]) < 0
                 _persistUncatOpts[uidx] = AddTextOption(CFW_Native.GetItemName(act[ai]), "[deactivate]")
                 _persistUncatIds[uidx] = act[ai]
@@ -483,11 +561,11 @@ function ResetBoxesOverviewPage()
     int n = CFW_Native.GetBoxCount()
     _optNewBox = AddMenuOption("+ New box (pick slot)", "")
     AddHeaderOption("Boxes (" + n + ")")
-    ; I3 (v1.6.4): say where the missing boxes went. Without this the list simply
-    ; has fewer rows than the count above it, which reads as data loss.
-    if _sharedSlotBoxes > 0
-        AddTextOption("(" + _sharedSlotBoxes + " box(es) share a slot with another - use the", "", OPTION_FLAG_DISABLED)
-        AddTextOption("  SKSE Menu Framework to work with those)", "", OPTION_FLAG_DISABLED)
+    ; Say where the missing pages went. Without this the page list simply has
+    ; fewer entries than the count above it, which reads as data loss.
+    if _unpagedBoxes > 0
+        AddTextOption("(" + _unpagedBoxes + " box(es) past this menu's page limit -", "", OPTION_FLAG_DISABLED)
+        AddTextOption("  use the SKSE Menu Framework for those)", "", OPTION_FLAG_DISABLED)
     endIf
 
     if n == 0
@@ -503,23 +581,27 @@ function ResetBoxesOverviewPage()
         if CFW_Native.IsBoxWorn(i)
             worn = "WORN"
         endIf
-        AddTextOption("Box " + slot + ": " + SlotName(slot) + " (" + cnt + " items)", worn, OPTION_FLAG_DISABLED)
+        string row = "Box " + slot + ": " + SlotName(slot)
+        ; A shared slot needs the label to tell the rows apart, same as the page
+        ; list on the left (v1.6.4.1).
+        if CFW_Native.GetBoxesOnSlot(slot) > 1 && CFW_Native.GetBoxLabel(i) != ""
+            row = "Box " + slot + ": " + CFW_Native.GetBoxLabel(i)
+        endIf
+        AddTextOption(row + " (" + cnt + " items)", worn, OPTION_FLAG_DISABLED)
         i += 1
     endWhile
 endFunction
 
-; Shown when a box page's box was deleted this session (the page list only
-; refreshes on reopen). Avoids rendering a shifted, wrong box on that page.
-; Reached when a page's slot names no single box: either the box was deleted
-; this session, or (v1.6.4) another box has since been created on the same slot
-; and the slot no longer identifies one. Deliberately carries NO controls - it is
-; what makes a stale page harmless.
+; Shown when a box page's box is gone (the page list only refreshes on reopen).
+; Avoids rendering a shifted, wrong box on that page. Reached when the page's box
+; id names no box: it was deleted this session, or published (which dissolves the
+; box into a snapshot). Deliberately carries NO controls - it is what makes a
+; stale page harmless.
 function ResetDeletedBoxPage()
     SetCursorFillMode(TOP_TO_BOTTOM)
     AddHeaderOption("(not available here)")
-    AddTextOption("This box was deleted, or its slot now holds more than one box.", "", OPTION_FLAG_DISABLED)
-    AddTextOption("Reopen the MCM to refresh the list; shared slots are handled in", "", OPTION_FLAG_DISABLED)
-    AddTextOption("the SKSE Menu Framework.", "", OPTION_FLAG_DISABLED)
+    AddTextOption("This box is no longer there - it was deleted or published.", "", OPTION_FLAG_DISABLED)
+    AddTextOption("Reopen the MCM to refresh the page list.", "", OPTION_FLAG_DISABLED)
 endFunction
 
 ; Full controls for ONE box (its own page). The box index is tracked in
@@ -538,7 +620,7 @@ function ResetSingleBoxPage(int a_idx)
 
     string token = CFW_Native.GetBoxToken(a_idx)
     int slot = CFW_Native.GetTokenSlot(token)
-    _curBoxSlot = slot   ; ROOT I: remember the stable slot for index re-resolution
+    _curBoxId = CFW_Native.GetBoxId(a_idx)   ; ROOT I: the stable handle to re-resolve from
     string[] contents = CFW_Native.GetBoxContents(a_idx)
     int total = contents.Length
     ; Keep the current selection if it still belongs to this box; else pick the first
@@ -791,6 +873,16 @@ event OnOptionSelect(int a_option)
         ForcePageReset()
         return
     endIf
+    if a_option == _persistPrevOpt && _persistPrevOpt != -1   ; F20: catalog window
+        _persistPage -= 1
+        ForcePageReset()
+        return
+    endIf
+    if a_option == _persistNextOpt && _persistNextOpt != -1
+        _persistPage += 1
+        ForcePageReset()
+        return
+    endIf
     int p = _persistRemoveOpts.Find(a_option)
     if p >= 0
         string rid = _persistRemoveContents[p]
@@ -869,14 +961,12 @@ event OnOptionSelect(int a_option)
     endIf
 
     ; --- Boxes (single-box page: box index is _curBoxIndex) ---
-    RefreshCurBoxIndex()   ; ROOT I: re-resolve from the stable slot before acting
-    ; I6 (v1.6.4): the re-resolve can now come back empty - the box was deleted,
-    ; or another box was created on the same slot while this page was open and
-    ; the slot no longer names one. Either way there is nothing safe to act on,
-    ; so every per-box handler below is skipped rather than run against a stale
-    ; index. This is the one place a shared slot could still reach a mutator.
+    RefreshCurBoxIndex()   ; ROOT I: re-resolve from the stable box id before acting
+    ; I6: the re-resolve can come back empty - the box was deleted or published
+    ; while this page was open. There is nothing safe to act on, so every per-box
+    ; handler below is skipped rather than run against a stale index.
     if _curBoxIndex < 0
-        Debug.Notification("CostumeFW: this page no longer refers to one box - reopen the MCM")
+        Debug.Notification("CostumeFW: this box is no longer there - reopen the MCM")
         return
     endIf
 
@@ -1049,16 +1139,18 @@ function ReturnDroppedContents(string[] aOld, string[] aNew, bool aPersist, stri
     endWhile
 endFunction
 
-; ROOT I: re-resolve _curBoxIndex from the box page's STABLE biped slot, so a live
+; ROOT I: re-resolve _curBoxIndex from the box page's STABLE box id, so a live
 ; handler acts on the right box even if an external box add/remove shifted g_boxes
-; since the page was rendered (OnPageReset is slot-stable; the handlers were not).
+; since the page was rendered (OnPageReset is id-stable; the handlers were not).
+; v1.6.4.1: the handle is the box id. It was the biped slot, which answered -1
+; for a shared slot and could not tell two boxes on one slot apart at all.
 function RefreshCurBoxIndex()
-    if _curBoxSlot > 0
-        int idx = CFW_Native.GetBoxBySlot(_curBoxSlot)
-        ; I6 (v1.6.4): CLEAR on a miss rather than keeping the old value. -1 now
-        ; also means "this slot holds more than one box", and carrying a stale
-        ; index forward is exactly how a handler would act on the wrong one. Every
-        ; handler below bails on a negative index.
+    if _curBoxId != ""
+        int idx = CFW_Native.GetBoxById(_curBoxId)
+        ; I6 (v1.6.4): CLEAR on a miss rather than keeping the old value. -1 means
+        ; the box is gone (deleted, or published out of the list), and carrying a
+        ; stale index forward is exactly how a handler would act on the wrong box.
+        ; Every handler below bails on a negative index.
         _curBoxIndex = idx
     endIf
 endFunction
@@ -1136,17 +1228,17 @@ endFunction
 
 event OnOptionMenuOpen(int a_option)
     if a_option == _optNewBox
-        ; I5 (v1.6.4): offer only slots that hold NO box yet, and only ONE token
-        ; per such slot.
+        ; I5, half of it lifted (v1.6.4.1): offer ONE free token per slot, but
+        ; offer it whether or not the slot already holds a box.
         ;
-        ; Two reasons. Creating a second box on an occupied slot is legitimate
-        ; from 1.6.4 on, but this menu cannot then operate EITHER of them (its
-        ; pages are keyed by slot), so it must not be the thing that creates that
-        ; state - SMF's picker still shows every free token, which is where
-        ; sharing a slot on purpose belongs. And a Papyrus array tops out at 128:
-        ; an empty slot can have four free tokens once BoxPool1 is installed, so
-        ; listing them all would grow with every pool generation. One per slot
-        ; caps this at the slot count and matches how this menu thinks anyway.
+        ; The half that is gone existed because this menu could not operate two
+        ; boxes on one slot, so it had no business creating that state. Its pages
+        ; key on the box id now, so it can. The half that stays is the Papyrus
+        ; array cap of 128: an empty slot can have four free tokens with BoxPool1
+        ; installed and more with every pool generation after it, so listing them
+        ; all would eventually overrun. One per slot caps the menu at the slot
+        ; count. Which physical token a new box gets does not matter here - they
+        ; are interchangeable within a slot - and SMF still shows every one.
         string[] allFree = CFW_Native.GetFreeTokenIds()
         string[] keep = Utility.CreateStringArray(128, "")
         int[] keepSlots = Utility.CreateIntArray(128, 0)
@@ -1154,7 +1246,7 @@ event OnOptionMenuOpen(int a_option)
         int si = 0
         while si < allFree.Length && kept < 128
             int slot = CFW_Native.GetTokenSlot(allFree[si])
-            if CFW_Native.GetBoxesOnSlot(slot) == 0 && keepSlots.Find(slot) < 0
+            if keepSlots.Find(slot) < 0
                 keep[kept] = allFree[si]
                 keepSlots[kept] = slot
                 kept += 1
@@ -1167,7 +1259,7 @@ event OnOptionMenuOpen(int a_option)
             ; CreateStringArray(0) is not valid, and an empty dialog would look
             ; like a bug rather than a full pool. Say which it is.
             string[] emptyOpts = Utility.CreateStringArray(1, "")
-            emptyOpts[0] = "(no empty slot - use SKSE Menu Framework to share one)"
+            emptyOpts[0] = "(no free token left - every one is held by a box)"
             SetMenuDialogOptions(emptyOpts)
             return
         endIf
@@ -1333,7 +1425,7 @@ event OnOptionMenuAccept(int a_option, int a_index)
     endIf
 
     ; --- Box "+ Add worn item" / "+ Add from inventory" capture ---
-    RefreshCurBoxIndex()   ; ROOT I: re-resolve the box index from its stable slot
+    RefreshCurBoxIndex()   ; ROOT I: re-resolve the box index from its stable box id
     if _curBoxIndex < 0    ; I6: same guard as the toggle handlers above
         Debug.Notification("CostumeFW: this page no longer refers to one box - reopen the MCM")
         return

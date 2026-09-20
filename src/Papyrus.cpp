@@ -130,6 +130,21 @@ namespace CostumeFW
             return BoxAt(a_index).label;
         }
 
+        // The box's LOGICAL id, and the way back from one. From 1.6.4.1 the MCM
+        // keys its pages on this instead of the biped slot: an index shifts the
+        // moment another box is deleted, and a slot stopped being unique in
+        // 1.6.4, but a boxId is issued once and never changes - not on rename,
+        // not on a contents change, not across a publish round trip.
+        RE::BSFixedString GetBoxId(RE::StaticFunctionTag*, std::int32_t a_index)
+        {
+            return BoxAt(a_index).boxId;
+        }
+
+        std::int32_t GetBoxByIdNative(RE::StaticFunctionTag*, RE::BSFixedString a_boxId)
+        {
+            return FindBoxById(a_boxId.c_str());
+        }
+
         RE::BSFixedString GetBoxToken(RE::StaticFunctionTag*, std::int32_t a_index)
         {
             return BoxAt(a_index).token;
@@ -1011,6 +1026,8 @@ namespace CostumeFW
 
         a_vm->RegisterFunction("GetBoxCount", kClass, GetBoxCount);
         a_vm->RegisterFunction("GetBoxLabel", kClass, GetBoxLabel);
+        a_vm->RegisterFunction("GetBoxId", kClass, GetBoxId);
+        a_vm->RegisterFunction("GetBoxById", kClass, GetBoxByIdNative);
         a_vm->RegisterFunction("GetBoxToken", kClass, GetBoxToken);
         a_vm->RegisterFunction("GetBoxContents", kClass, GetBoxContents);
         a_vm->RegisterFunction("IsBoxWorn", kClass, IsBoxWorn);
