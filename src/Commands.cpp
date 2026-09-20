@@ -325,6 +325,20 @@ namespace CostumeFW
                 return;
             }
             SKSE::GetTaskInterface()->AddTask([id, on] {
+                // Typo guard, the same class as the one on hideshape below and
+                // found the same way (test run 2026-09-20). Turning a rule OFF
+                // deliberately has no holder check - a stale entry on a box that
+                // is gone has to stay clearable - so "off" on a string that names
+                // nothing erased nothing, wrote the settings file anyway, and
+                // answered "body morph off for <id> (re-injected)". A mistyped
+                // plugin name is the likely way to get here, and the one thing
+                // the reply must not do is look like it worked.
+                if (ResolveFormId(id) == 0) {
+                    SKSE::log::warn("morph: '{}' does not resolve to a form - ignoring", id);
+                    ConsolePrint("[CEF] no such item: " + id +
+                                 " - check the FormID and the plugin name");
+                    return;
+                }
                 // Report the refusal (a published costume's look is frozen, an
                 // unheld id has nowhere to store the setting) - re-injecting and
                 // printing success either way said the opposite of the truth.
