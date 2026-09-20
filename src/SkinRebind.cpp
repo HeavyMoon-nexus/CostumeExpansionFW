@@ -2307,6 +2307,51 @@ namespace CostumeFW
         // Exact race, additional race, then data-order fallback - identical to
         // the old picker, but only among candidates that passed hard admission.
         // The race is a PARAMETER (NPC generalization): pass the wearer's race.
+        // ---- Partial armature notes (F13) --------------------------------
+        //
+        // One ARMO, several ARMA in its armature, and between them they cover
+        // different biped slots: a dress whose skirt and top are separate
+        // addons, a helmet plus the piece that hides the hair. Injection shows
+        // ONE addon - the one the picker above chose - so the rest of the item
+        // is simply not there, and nothing said so. Showing them all is a
+        // feature that reaches the renderer, the hide rules and the carrier
+        // build; saying so is a sentence.
+        //
+        // Only a real partial take is worth a word. The chosen addon must leave
+        // one of the ARMO's own slots uncovered AND another admitted addon must
+        // cover it - an armature full of race variants of the same piece covers
+        // nothing extra and stays quiet.
+        std::mutex g_partialMutex;
+        std::unordered_map<std::string, std::string> g_partialByContent;
+
+        std::string SlotList(std::uint32_t a_mask)
+        {
+            std::string out;
+            for (int bit = 0; bit < 32; ++bit) {
+                if (a_mask & (1u << bit)) {
+                    if (!out.empty()) {
+                        out += ", ";
+                    }
+                    out += std::to_string(30 + bit);
+                }
+            }
+            return out;
+        }
+
+        // True the first time, so the log says it once per item per session.
+        bool NotePartialArmature(std::uint32_t a_localID, const std::string& a_plugin,
+            std::uint32_t a_shown, std::uint32_t a_left)
+        {
+            const std::string note =
+                "this item is built from more than one piece - CEF shows the part on slot(s) " +
+                SlotList(a_shown) + " and leaves the part(s) on slot(s) " + SlotList(a_left) +
+                " out";
+            std::scoped_lock lk(g_partialMutex);
+            return g_partialByContent
+                .insert_or_assign(std::format("{:06X}:{}", a_localID, a_plugin), note)
+                .second;
+        }
+
         RE::TESObjectARMA* PickAdmittedAddonForRace(RE::TESObjectARMO* a_armo,
             const policy::CapturePolicy& a_policy, std::uint32_t a_localID,
             const std::string& a_plugin, bool a_log, RE::TESRace* a_race,
@@ -2352,6 +2397,34 @@ namespace CostumeFW
                 return want == 0 ||
                        (static_cast<std::uint32_t>(a_addon->GetSlotMask()) & want) != 0;
             };
+            // F13: is this a partial take? Only if the chosen addon leaves one of
+            // the ARMO's own slots uncovered and a sibling covers it.
+            const auto notePartial = [&](RE::TESObjectARMA* a_chosen) {
+                if (!a_chosen || want == 0 || admitted.size() < 2) {
+                    return;
+                }
+                const std::uint32_t shown =
+                    static_cast<std::uint32_t>(a_chosen->GetSlotMask()) & want;
+                const std::uint32_t missing = want & ~shown;
+                if (missing == 0) {
+                    return;
+                }
+                std::uint32_t left = 0;
+                for (auto* other : admitted) {
+                    if (other != a_chosen) {
+                        left |= static_cast<std::uint32_t>(other->GetSlotMask()) & missing;
+                    }
+                }
+                if (left == 0) {
+                    return;  // nothing else draws the rest either
+                }
+                if (NotePartialArmature(a_localID, a_plugin, shown, left) && a_log) {
+                    SKSE::log::warn(
+                        "  addon pick {:X}:{}: partial - shows slot(s) {} and leaves slot(s) {} "
+                        "to another addon of the same item",
+                        a_localID, a_plugin, SlotList(shown), SlotList(left));
+                }
+            };
             const auto raceExact = [race](RE::TESObjectARMA* a_addon) {
                 return race && a_addon->race == race;
             };
@@ -2388,6 +2461,7 @@ namespace CostumeFW
                                 want, static_cast<std::uint32_t>(addon->GetSlotMask()),
                                 admitted.size());
                         }
+                        notePartial(addon);
                         return addon;
                     }
                 }
@@ -2399,6 +2473,7 @@ namespace CostumeFW
                     "mesh may be the wrong body part",
                     a_localID, a_plugin, want, admitted.size());
             }
+            notePartial(admitted.front());
             return admitted.front();
         }
 
@@ -3300,6 +3375,18 @@ namespace CostumeFW
         }
         a_nifOut = m3p.nifPath;
         return true;
+    }
+
+    std::string PartialArmatureNote(const std::string& a_contentId)
+    {
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_contentId, localID, plugin)) {
+            return {};
+        }
+        std::scoped_lock lk(g_partialMutex);
+        const auto it = g_partialByContent.find(std::format("{:06X}:{}", localID, plugin));
+        return it == g_partialByContent.end() ? std::string{} : it->second;
     }
 
     std::string LegacyNifRefusal(const std::string& a_contentId)

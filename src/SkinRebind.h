@@ -80,6 +80,12 @@ namespace CostumeFW
     // engine's skin-partition loader.
     std::string LegacyNifRefusal(const std::string& a_contentId);
 
+    // One ARMO, several addons, and the one being shown does not cover all of
+    // the item's slots while a sibling does - so what is injected is part of the
+    // item. Returns the sentence to show, or "" when it is not that. Recorded
+    // when the model is picked, so a capture check is enough to populate it.
+    std::string PartialArmatureNote(const std::string& a_contentId);
+
     // Every such refusal this session, "<id> - <reason>", sorted. Diagnostics.
     std::vector<std::string> LegacyNifRefusals();
 

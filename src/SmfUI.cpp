@@ -224,6 +224,14 @@ namespace CostumeFW::SmfUI
             s_status = UiOps::ContentHasScript(a_id)
                 ? "note: item has attached scripts - script-driven behavior won't run under CEF"
                 : "";
+            // F13: an item whose armature has several addons shows ONE of them.
+            // Said at capture time, which is the moment the user can still pick
+            // a different piece - and as a notification for the same reason the
+            // refusal above is one (X-UI2: s_status is off-screen from here).
+            if (const std::string partial = PartialArmatureNote(a_id); !partial.empty()) {
+                s_status = s_status.empty() ? partial : (s_status + " | " + partial);
+                RE::DebugNotification(("CostumeFW: " + partial).c_str());
+            }
             const std::string token = a_token;
             const std::string id = a_id;
             SKSE::GetTaskInterface()->AddTask([token, id] {
@@ -261,6 +269,14 @@ namespace CostumeFW::SmfUI
             s_status = UiOps::ContentHasScript(a_id)
                 ? "note: item has attached scripts - script-driven behavior won't run under CEF"
                 : "";
+            // F13: an item whose armature has several addons shows ONE of them.
+            // Said at capture time, which is the moment the user can still pick
+            // a different piece - and as a notification for the same reason the
+            // refusal above is one (X-UI2: s_status is off-screen from here).
+            if (const std::string partial = PartialArmatureNote(a_id); !partial.empty()) {
+                s_status = s_status.empty() ? partial : (s_status + " | " + partial);
+                RE::DebugNotification(("CostumeFW: " + partial).c_str());
+            }
             const std::string id = a_id;
             SKSE::GetTaskInterface()->AddTask([id] {
                 if (!UiOps::AddPersist(id)) {
