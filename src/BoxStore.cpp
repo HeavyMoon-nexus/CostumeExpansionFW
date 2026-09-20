@@ -2635,18 +2635,35 @@ namespace CostumeFW
         // claiming a setting that does nothing and then silently reverts.
         // Item-data (stat) toggles are NOT gated here: publish reads those live
         // on every ability rebuild, so they are meant to apply while published.
+        //
+        // Every caller asks this BEFORE deciding what the edit is, not only when
+        // it turns something ON. Frozen is frozen in both directions: the ON path
+        // was refused and the OFF path went through, so a published costume could
+        // not be given a hide rule but could have one taken away - and it came
+        // back at unpublish anyway, since the snapshot is what restores. The
+        // asymmetry only ever let someone edit a setting and be told nothing.
+        //
+        // NPC-persist assignments freeze the same way (RegisterNpr copies the
+        // settings at assign time), so they get the same answer rather than
+        // accepting an edit that does nothing until the NPC is re-assigned.
         bool RefusedAsPublished(const char* a_what, const std::string& a_id,
             const std::string& a_holder)
         {
-            const int slot = PublishSlotOfHolder(a_holder);
-            if (slot < 0) {
-                return false;
+            if (const int slot = PublishSlotOfHolder(a_holder); slot >= 0) {
+                SKSE::log::warn(
+                    "{}: '{}' belongs to published costume #{} - its look is frozen at publish "
+                    "time; unpublish it first to change this",
+                    a_what, a_id, slot + 1);
+                return true;
             }
-            SKSE::log::warn(
-                "{}: '{}' belongs to published costume #{} - its look is frozen at publish "
-                "time; unpublish it first to change this",
-                a_what, a_id, slot + 1);
-            return true;
+            if (a_holder.starts_with("npr:")) {
+                SKSE::log::warn(
+                    "{}: '{}' belongs to an NPC persist assignment - its look was frozen when it "
+                    "was assigned; re-assign the NPC to change this",
+                    a_what, a_id);
+                return true;
+            }
+            return false;
         }
     }
 
@@ -2658,6 +2675,11 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        // Before the branch: clearing the rule is an edit too.
+        if (RefusedAsPublished("hide", id, holder)) {
+            return false;
+        }
         // Keep only valid vanilla biped slots (30-61), de-duplicated.
         std::vector<int> clean;
         for (const int s : a_slots) {
@@ -2669,12 +2691,8 @@ namespace CostumeFW
         if (clean.empty()) {
             g_hideRules.erase(id);  // empty list = clear the rule
         } else {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E [1476]: no orphan side-map entries
                 SKSE::log::warn("hide: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("hide", id, holder)) {
                 return false;
             }
             g_hideRules[id] = std::move(clean);
@@ -2698,13 +2716,13 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("gender", id, holder)) {  // both directions
+            return false;
+        }
         if (a_mode == 1 || a_mode == 2) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E [1476]: no orphan side-map entries
                 SKSE::log::warn("gender: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("gender", id, holder)) {
                 return false;
             }
             g_genderModes[id] = a_mode;
@@ -2732,13 +2750,13 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("morph", id, holder)) {  // both directions
+            return false;
+        }
         if (a_on) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E [1498]: no orphan bodyMorph entries
                 SKSE::log::warn("morph: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("morph", id, holder)) {
                 return false;
             }
             g_bodyMorphOn.insert(id);
@@ -2763,13 +2781,13 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("realbody", id, holder)) {  // both directions
+            return false;
+        }
         if (a_on) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E: no orphan entries
                 SKSE::log::warn("realbody: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("realbody", id, holder)) {
                 return false;
             }
             g_showRealBody.insert(id);
@@ -2803,13 +2821,13 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("hideshape", id, holder)) {  // both directions
+            return false;
+        }
         if (a_on) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E: no orphan hide-shape entries
                 SKSE::log::warn("hideshape: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("hideshape", id, holder)) {
                 return false;
             }
             auto& names = g_hideShapes[id];
