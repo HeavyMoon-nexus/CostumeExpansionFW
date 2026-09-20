@@ -44,23 +44,37 @@ worn gear.
 ### Skyrim VR (community beta)
 
 The same DLL runs on Skyrim VR 1.4.15 (built multi-runtime via CommonLibSSE-NG).
-Install the main package plus the **VR Patch** archive (which carries the dll +
-VR notes), and swap the runtime requirements:
+There is no VR build and there never was: the DLL works out which engine loaded
+it, and the old **VR Patch** archive shipped that same file. From 1.6.3 there is
+one installer — pick Skyrim VR in it and you get `README_VR.txt`; the DLL, the
+plugins, the meshes and the scripts all come from the core install. If the old
+VR Patch is still installed as a separate mod, remove it: it holds a DLL at the
+same path, so depending on mod order it can put the old one back over the new.
+
+Swap the runtime requirements:
 
 - [SKSEVR](https://skse.silverlock.org/) 2.0.12
 - [VR Address Library for SKSEVR](https://www.nexusmods.com/skyrimspecialedition/mods/58101) — required
 - [Skyrim VR ESL Support](https://www.nexusmods.com/skyrimspecialedition/mods/106712) —
-  required (`CostumeFW.esp` is ESL-flagged with a 1.71 header; vanilla VR loads neither)
-- [SkyUI VR](https://github.com/Odie/skyui-vr) (MCM — the primary UI on VR; the SMF
-  section also works via [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466))
+  required (`CostumeFW.esp` and `CostumeFW_BoxPool1.esp` are ESL-flagged with a 1.71
+  header; vanilla VR loads neither. It covers the optional `CostumeFW_NPC.esp` too;
+  `CostumeFW_Abilities.esp` is a full plugin and needs nothing special)
+- [SKSE Menu Framework](https://www.nexusmods.com/skyrimspecialedition/mods/120352)
+  \+ [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466)
+  — the main UI on VR as well; see "Which UI" for what the MCM no longer reaches
+- [SkyUI VR](https://github.com/Odie/skyui-vr) (the legacy MCM)
 - [RaceMenu VR 0.4.14](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee)
 - *(recommended)* [VRIK Player Avatar](https://www.nexusmods.com/skyrimspecialedition/mods/23416)
   — vanilla VR renders no player body, so without it you can't see your own costume
 
+One behavioral difference: tempering on VR uses the raw improvement multiplier
+rather than the engine's item-card measurement, so a captured item's armor can
+read slightly higher than the same item does on SE/AE.
+
 VR support is community-tested (no VR rig here); `CEF_DISABLE.txt` (see
-"Disabling CEF from outside the game") makes the plugin fully inert if anything
-misbehaves, and the log's first lines (`runtime: Skyrim VR 1.4.15.0` + build
-stamp) identify the build in reports.
+"Turning CEF off from outside the game", and read the note about saving there)
+makes the plugin fully inert if anything misbehaves, and the log's first lines
+(`runtime: Skyrim VR 1.4.15.0` + build stamp) identify the build in reports.
 
 ## Which UI
 
@@ -74,8 +88,9 @@ What the MCM does not reach: NPC distribution, the capture blacklist
 toggles, the verbose-logging switch, and from 1.6.4 **any biped slot that holds
 more than one box**. Its pages are keyed by slot, so a slot with two boxes names
 neither of them; those slots get no MCM page at all rather than a page that
-edits the wrong box. The Persist page also runs out of room past 11 entries
-(SkyUI's option buffer) — SMF has no such limit.
+edits the wrong box. The Persist page also runs out of room once the catalog
+grows past roughly a dozen entries, which is SkyUI's option buffer rather than a
+CEF limit — SMF has no such limit.
 
 On VR, SMF needs
 [ImGui VR Helper](https://www.nexusmods.com/skyrimspecialedition/mods/183466).
@@ -115,28 +130,69 @@ entries actually *show* is per-save, stored in the co-save.
   (no inline HDT extra data in the NIF) are not detected as SMP — they inject without
   physics (static). The carrier sync log says so per item.
 
-## Disabling CEF from outside the game (recovery)
+## Turning CEF off from outside the game
 
-The MCM master toggle only hides/shows meshes at runtime; the plugin's hooks still run.
-For a hard off — and to **recover a save that a CEF crash left unloadable** — use the
-external config, read once at startup **before CEF touches anything**, so you can edit it
-without launching the game. Two ways (either is enough):
+Both switches below are read at startup, before CEF touches anything, so you can set
+either one without launching the game. They are not interchangeable. Pick by what you
+are trying to do.
+
+### Stop injecting, keep the save data (`CEF_settings.json`)
+
+Set `"enabled": false` in `Data\SKSE\Plugins\CEF_settings.json`. This is the same switch
+as the Main page toggle. Nothing is injected and the enchantment abilities come off, but
+the hooks, the box definitions and the co-save data all keep working, so setting it back
+to `true` gives you your costumes back exactly as they were.
+
+One thing it does not touch: a box token you are still wearing stays worn, and it is a
+real piece of equipment, so its armor rating, weight and passthrough keywords stay in
+effect while the costume is invisible. Take the token off if you want those gone too.
+
+Use this when you want to play without CEF's costumes, or when the crash you are chasing
+happens while something is worn.
+
+### Hard off, for a save that will not load (`bEnabled=0` / `CEF_DISABLE.txt`)
 
 - `Data\SKSE\Plugins\CostumeExpansionFW.ini` → `[General]` `bEnabled=0`
-- Create an empty `Data\SKSE\Plugins\CEF_DISABLE.txt` — its mere presence forces CEF off
-  (typo-proof panic switch).
+- or create an empty `Data\SKSE\Plugins\CEF_DISABLE.txt` — its mere presence forces CEF
+  off, so there is nothing to mistype.
 
-When disabled, CEF registers no hooks, no event sinks, loads no boxes, and does no mesh
-injection or carrier/FSMP work — the save opens with the plugin fully inert (the stale
-co-save data is skipped). Set `bEnabled=1` / delete the flag file to re-enable.
+CEF then registers no hooks, no event sinks, no serialization and no Papyrus functions,
+loads no boxes, and does no mesh injection or carrier/FSMP work. The plugin is fully
+inert, which is what lets a save that a CEF crash left unloadable open again. Use it when
+the first switch is not enough — a crash during the carrier build or the persist head
+rebuild, for instance, happens whether or not anything is being injected.
+
+**Do not save the game while CEF is hard off.** Registering no serialization means CEF
+writes nothing into the save, so that save loses what is in the hidden storage, which
+persist items it shows, which NPCs wear a published costume, and which NPCs have a persist
+assignment. The storage container is still in the save with the items inside it, but CEF
+has no way left to find it. Open the save, check that it loads, then quit to desktop —
+fix the cause, re-enable CEF, and load the save again.
 
 ## Uninstalling
 
-Before removing the mod, open **MCM → Main → Prepare for uninstall**. This returns every
-captured item to you, removes all box tokens from your inventory, detaches the injected
-meshes, **and disables CEF persistently** (`enabled=false` in the settings — reloading or
-playing on will not re-apply anything; re-enable from MCM → Main if you change your mind).
-Save, then remove the mod.
+Before removing the mod, open **Main → Prepare for uninstall** (SMF, or the MCM's copy of
+it). This returns every captured item to you, recalls published costumes from NPCs and
+strips NPC persist assignments, removes all box tokens from your inventory, detaches the
+injected meshes, **and disables CEF persistently** (`enabled=false` in the settings —
+reloading or playing on will not re-apply anything). Save, then remove the mod.
+
+Two things it does not cover in 1.6.4:
+
+- **Persist entries that are off for this save.** The cleanup hands back box contents and
+  the persist items this save is showing. A catalog entry you turned off with "Active on
+  this save" keeps its original in storage so you can turn it back on, and the cleanup
+  does not reach it. Turn those back on before you run it, or remove them from the
+  catalog one at a time (the single-row remove hands the original back; "Remove all
+  persist" does not).
+- **Anything in storage that no box, persist entry, published costume or NPC owns.** That
+  normally comes back by itself on the next load; if you are deleting the mod, there is no
+  next load. `cef store` lists what is in there, and `cef recover <id>` hands one back.
+
+**"Re-enable from Main" is not an undo.** It turns CEF back on, but your items are already
+back in your inventory. The box definitions still list them, so taking one out of a box
+afterwards makes a fresh plain copy instead of finding the original — you end up with two.
+If you want the boxes working again, capture the items into them again.
 
 ## Known limitations
 
@@ -196,9 +252,10 @@ does not bundle fonts.
   it (all four layers above match it). While MARA is running, CFW also **refuses to
   capture jewelry you are currently wearing** — stripping a worn ring/amulet out from
   under MARA crashes inside MARA itself — unequip it first, or capture it from your
-  inventory. Two more co-existence notes: (1) jewelry packed into a slot-35/36 box
-  passes ArmorJewelry through to the worn token, so MARA may try to manage the
-  invisible token like a real amulet/ring — if an amulet/ring box misbehaves with
+  inventory. Two more co-existence notes: (1) a box token never carries `ArmorJewelry`
+  (CEF drops every keyword that names an equipment class before stamping the rest onto
+  the token), but a slot-35/36 box still occupies the amulet/ring biped slot, so MARA
+  may try to manage the invisible token anyway — if an amulet/ring box misbehaves with
   MARA installed, move that box to another slot; (2) CEF natively stacks the looks and
   enchant effects of several jewelry pieces in one box (one slot), which covers the
   common "wear multiple amulets" wish without re-slotting.

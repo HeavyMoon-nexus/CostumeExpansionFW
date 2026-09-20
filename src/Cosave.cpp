@@ -328,6 +328,11 @@ namespace CostumeFW
         }
     }
 
+    // NOT called when Config.h's HardDisabled() trips - SKSEPluginLoad returns
+    // before it. That is deliberate (an inert plugin cannot be the thing that
+    // crashes a save open), and it is also why saving while hard-disabled writes
+    // no CEF chunk at all and drops everything below. See the note on
+    // HardDisabled().
     void InstallSerialization()
     {
         auto* ser = SKSE::GetSerializationInterface();

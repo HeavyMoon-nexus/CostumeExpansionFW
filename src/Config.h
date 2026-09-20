@@ -54,6 +54,22 @@ namespace CostumeFW
     // hook and load-time task still runs. HardDisabled() short-circuits before any
     // of that, which is what makes it a safe recovery switch.
     //
+    // AND WHY IT IS ONLY A RECOVERY SWITCH
+    //   "Registers nothing" includes InstallSerialization, so a game saved while
+    //   this is on carries NO CEF co-save chunk. Reloading that save afterwards
+    //   loses the hidden store's ref (the container and its items are still in
+    //   the save, but nothing can find them again), the store manifest the loss
+    //   detector compares against, this save's active persist set, the publish
+    //   bindings and the npc-persist assignments. The chunk cannot be preserved
+    //   by writing it back verbatim either: the co-save header is rebuilt with
+    //   the CURRENT plugin list, so unresolved form ids would be reinterpreted
+    //   against a different load order - which is exactly the situation someone
+    //   recovering a save is in.
+    //   So this switch is for opening a save, confirming it loads, and quitting
+    //   to desktop. Playing on without CEF's costumes is what the settings-file
+    //   "enabled" is for, and that one keeps the save data intact. The user-
+    //   facing version of this note lives in CostumeExpansionFW.ini and README.md.
+    //
     // Paths are relative and resolve through MO2's VFS as Data\SKSE\Plugins\...
     // (same as the other CEF files). Read ONCE per process (a static local) - the
     // value can't change mid-session anyway.
@@ -71,13 +87,24 @@ namespace CostumeFW
         static const bool disabled = [] {
             // (1) Panic flag file: existence alone disables (can't be mistyped).
             if (std::ifstream("Data\\SKSE\\Plugins\\CEF_DISABLE.txt").good()) {
-                SKSE::log::warn("CEF hard-DISABLED by CEF_DISABLE.txt - plugin is inert");
+                SKSE::log::warn(
+                    "CEF hard-DISABLED by CEF_DISABLE.txt - plugin is inert. "
+                    "DO NOT SAVE while it is: CEF writes nothing into the save, so saving "
+                    "here loses the hidden storage, this save's persist items and any NPC "
+                    "costume bindings. Open the save, check it loads, then quit to desktop. "
+                    "To play with the costumes off but the data intact, delete this file and "
+                    "set \"enabled\": false in CEF_settings.json instead.");
                 return true;
             }
             // (2) ini bEnabled=0. Missing file / missing key = enabled (default on).
             if (!IniFlag("benabled", true)) {
                 SKSE::log::warn(
-                    "CEF hard-DISABLED by CostumeExpansionFW.ini (bEnabled=0) - plugin is inert");
+                    "CEF hard-DISABLED by CostumeExpansionFW.ini (bEnabled=0) - plugin is inert. "
+                    "DO NOT SAVE while it is: CEF writes nothing into the save, so saving "
+                    "here loses the hidden storage, this save's persist items and any NPC "
+                    "costume bindings. Open the save, check it loads, then quit to desktop. "
+                    "To play with the costumes off but the data intact, set bEnabled=1 and "
+                    "put \"enabled\": false in CEF_settings.json instead.");
                 return true;
             }
             return false;
