@@ -649,6 +649,13 @@ namespace CostumeFW
     // Resolve the recorded store, else CREATE it (PlaceAtMe CFW_Storage 0x80D at
     // the player, disabled, force-persist) and record it. Main thread only.
     RE::TESObjectREFR* EnsureStoreRef();
+    // If this save's store is a ref the engine does not keep on its own (the
+    // MCM made it without force-persist, and only a script property holds it),
+    // move everything into a new force-persistent store - one move per
+    // extra-data list, so instance data travels - and record that one instead
+    // (review 2026-09-23 C12). Returns the number of moves; 0 = nothing to do.
+    // Post-load main thread, before anything else takes items out of the store.
+    int MakeStorePersistent();
     // Move ONE physical copy of a_id from the player into the hidden store,
     // preferring the worn / instance-data ExtraDataList so tempering + player
     // enchants travel with it (what the MCM's Papyrus move preserved). Main

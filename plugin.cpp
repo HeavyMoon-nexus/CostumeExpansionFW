@@ -444,6 +444,12 @@ namespace
                 // destroys the captured original while the box definition survives
                 // in the global json; nothing pointed at that before.
                 CostumeFW::ReportLostStoreItems();
+                // An MCM-made store survives only while the MCM script points at
+                // it; move its contents into a store the engine keeps (review
+                // 2026-09-23 C12). After the loss report, which should read the
+                // store as the save left it; before every pass that takes items
+                // out of it.
+                CostumeFW::MakeStorePersistent();
                 // v1.6.1: recover temper/enchant snapshots missing on older
                 // captures from the stored originals BEFORE stats reapply; a
                 // heal also restamps publish tokens (their armor sums live).

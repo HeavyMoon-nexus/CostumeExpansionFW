@@ -5816,6 +5816,33 @@ namespace CostumeFW
                    UninstallRanOnThisSave()) == policy::ReturnAction::kRecreate;
     }
 
+    namespace
+    {
+        // A new hidden store: CFW_Storage (0x80D) placed at the player, disabled,
+        // FORCE-PERSISTENT. Does not record it anywhere. Main thread only.
+        RE::TESObjectREFR* CreateStoreRef()
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            auto* base = dh ? dh->LookupForm<RE::TESObjectCONT>(0x00080D, "CostumeFW.esp") : nullptr;
+            if (!player || !base) {
+                SKSE::log::warn(
+                    "custody: cannot create hidden store (player or CostumeFW.esp 0x80D missing)");
+                return nullptr;
+            }
+            // Force-persist: nothing else holds this ref. Without the flag the
+            // engine keeps a placed ref only while a script property points at
+            // it - which is all that kept the MCM's container alive (C12).
+            auto ref = player->PlaceObjectAtMe(base, true);
+            if (!ref) {
+                SKSE::log::warn("custody: PlaceObjectAtMe failed for the hidden store");
+                return nullptr;
+            }
+            ref->Disable();
+            return ref.get();
+        }
+    }
+
     RE::TESObjectREFR* EnsureStoreRef()
     {
         StoreLock lk;
@@ -5827,24 +5854,82 @@ namespace CostumeFW
             SKSE::log::warn("custody: recorded store {:08X} no longer resolves - creating a new one",
                 g_storeFormId);
         }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        auto* dh = RE::TESDataHandler::GetSingleton();
-        auto* base = dh ? dh->LookupForm<RE::TESObjectCONT>(0x00080D, "CostumeFW.esp") : nullptr;
-        if (!player || !base) {
-            SKSE::log::warn("custody: cannot create hidden store (player or CostumeFW.esp 0x80D missing)");
-            return nullptr;
-        }
-        // Force-persist: unlike the MCM's container (pinned by a persistent
-        // Papyrus ObjectReference property), nothing else holds this ref.
-        auto ref = player->PlaceObjectAtMe(base, true);
+        auto* ref = CreateStoreRef();
         if (!ref) {
-            SKSE::log::warn("custody: PlaceObjectAtMe failed for the hidden store");
             return nullptr;
         }
-        ref->Disable();
         g_storeFormId = ref->GetFormID();
         SKSE::log::info("custody: created hidden store {:08X}", g_storeFormId);
-        return ref.get();
+        return ref;
+    }
+
+    int MakeStorePersistent()
+    {
+        StoreLock lk;
+        // Before P2 the MCM created the store: PlaceAtMe without force-persist,
+        // kept alive only by the script's ObjectReference property. The co-save
+        // adopted that ref as it was. The day the MCM goes (1.6.5), nothing
+        // points at it and the engine is free to drop it - with every captured
+        // original inside, tempering and enchantments included (review
+        // 2026-09-23 C12). So the contents move into a store CEF owns properly.
+        auto* old = CurrentStore();
+        if (!old || old->IsPersistent()) {
+            return 0;
+        }
+        auto* fresh = CreateStoreRef();
+        if (!fresh) {
+            SKSE::log::warn("custody: store {:08X} is not persistent and a permanent one could "
+                            "not be made - left as it is",
+                g_storeFormId);
+            return 0;
+        }
+        // Collect first: every move below changes the container being walked.
+        // One move per extra-data list, so tempering and enchantments travel
+        // with their item exactly as a capture moved them in; then whatever the
+        // lists do not account for, in one go.
+        struct Move
+        {
+            RE::TESBoundObject* obj;
+            RE::ExtraDataList* xlist;
+            std::int32_t count;
+        };
+        std::vector<Move> moves;
+        for (auto& [obj, data] : old->GetInventory()) {
+            const auto& [count, entry] = data;
+            if (!obj || count <= 0) {
+                continue;
+            }
+            std::int32_t listed = 0;
+            if (entry && entry->extraLists) {
+                for (auto* x : *entry->extraLists) {
+                    if (!x) {
+                        continue;
+                    }
+                    const std::int32_t n = std::min(std::max(x->GetCount(), 1), count - listed);
+                    if (n <= 0) {
+                        break;
+                    }
+                    moves.push_back({ obj, x, n });
+                    listed += n;
+                }
+            }
+            if (count > listed) {
+                moves.push_back({ obj, nullptr, count - listed });
+            }
+        }
+        for (const auto& m : moves) {
+            old->RemoveItem(m.obj, m.count, RE::ITEM_REMOVE_REASON::kStoreInContainer, m.xlist,
+                fresh);
+        }
+        const std::uint32_t oldId = g_storeFormId;
+        g_storeFormId = fresh->GetFormID();
+        // The old ref stays, empty and disabled: an MCM property may still point
+        // at it, and an empty container is harmless. The MCM prefers the native
+        // store (GetStoreRef) and SetStoreRef keeps the one that resolves.
+        SKSE::log::info("custody: moved the hidden store to a permanent container ({} stack(s), "
+                        "{:08X} -> {:08X})",
+            moves.size(), oldId, g_storeFormId);
+        return static_cast<int>(moves.size());
     }
 
     bool CaptureItemToStore(const std::string& a_id)
