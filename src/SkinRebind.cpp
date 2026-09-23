@@ -1219,7 +1219,12 @@ namespace CostumeFW
                 }
                 state->inRebindRetry = true;
                 Reconcile();
-                state->inRebindRetry = false;
+                // Looked up again: Reconcile can drop an NPC's state (the actor
+                // unloaded or lost its last binding), and `state` would then
+                // point at freed memory (review 2026-09-23 M4).
+                if (ActorState* after = isPlayer ? &PlayerState() : FindState(handle)) {
+                    after->inRebindRetry = false;
+                }
             });
         }
 
