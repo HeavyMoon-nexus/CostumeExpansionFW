@@ -8,6 +8,10 @@ code the DLL runs, not a re-implementation of it:
   T2  two boxes on slot 55: two namespaces, neither overwriting the other, and
       an unchanged re-run that skips both
   T3  a hand-edited carrier key that could escape the mod folder: refused
+  T4  a box cannot take a stem another pipeline owns
+  T5  a mesh path that is not ASCII resolves, and never stops the sync (C6)
+  T6  a physics XML declared in a legacy encoding comes out as real UTF-8,
+      and one that is not UTF-8 and declares nothing is refused (W27)
 
 Run after a release build:
 
@@ -161,6 +165,44 @@ check(done.returncode == 0, 'sync succeeded (rc=%d)' % done.returncode)
 check(os.path.exists(os.path.join(carrier_dir(), 'carriers.json')), 'carriers.json was written')
 check(log.count('no inline HDT xml') == 2, 'both non-ASCII folders resolved')
 check(log.count('cannot resolve under data roots') == 1, 'only the missing one did not')
+
+print('T6 - a physics XML in a legacy encoding comes out as real UTF-8 (W27)')
+# FSMP decodes an XML by its declaration and compares names as UTF-8. pugixml
+# kept Shift_JIS bytes as they were and re-saved them under a UTF-8
+# declaration, so a Japanese comment alone was enough to make FSMP reject the
+# merged file. Merged here through the real MergeXml.
+fresh()
+sjis = os.path.join(root, 'sjis.xml')
+with open(sjis, 'wb') as f:
+    # The text rides in an attribute: MergeXml copies elements only, so a
+    # comment would not reach the output either way.
+    f.write('<?xml version="1.0" encoding="Shift_JIS"?>\n<system>\n'
+            '  <!-- 揺れ -->\n  <bone name="Skirt_01" note="スカートの揺れ"/>\n</system>\n'
+            .encode('cp932'))
+utf8 = os.path.join(root, 'utf8.xml')
+with open(utf8, 'w', encoding='utf-8') as f:
+    f.write('<?xml version="1.0" encoding="UTF-8"?>\n<system>\n  <bone name="Veil_01"/>\n</system>\n')
+bad = os.path.join(root, 'bad.xml')
+with open(bad, 'wb') as f:  # cp932 bytes, no declaration: nothing says how to read them
+    f.write('<system>\n  <!-- 揺れ -->\n  <bone name="X"/>\n</system>\n'.encode('cp932'))
+out = os.path.join(root, 'merged.xml')
+done = subprocess.run([CLI, 'mergexml', out, sjis, utf8], capture_output=True)
+check(done.returncode == 0, 'merge succeeded (rc=%d)' % done.returncode)
+text = open(out, 'rb').read() if os.path.exists(out) else b''
+try:
+    decoded = text.decode('utf-8')
+    valid = True
+except UnicodeDecodeError:
+    decoded, valid = '', False
+check(valid, 'the merged file is valid UTF-8')
+check('スカートの揺れ' in decoded, 'the Shift_JIS text survived, converted')
+check('Skirt_01' in decoded and 'Veil_01' in decoded, 'both documents are in it')
+check('Shift_JIS' not in decoded, 'nothing still claims Shift_JIS')
+done = subprocess.run([CLI, 'mergexml', os.path.join(root, 'merged2.xml'), bad, utf8],
+                      capture_output=True)
+log = done.stdout.decode('utf-8', errors='replace')
+check(done.returncode != 0 and 'declares no encoding' in log,
+      'undeclared non-UTF-8 is refused with a reason')
 
 shutil.rmtree(root, ignore_errors=True)
 print()

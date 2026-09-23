@@ -213,6 +213,154 @@ namespace nifcarrier {
             return allZero && allBlend && !shapes.empty() && skinned && hdt;
         }
 
+        // --- physics XML in, as UTF-8 (review 2026-09-23 W27) -------------------
+        // FSMP reads a physics XML through XmlInspector with a UTF-8 writer: it
+        // decodes by the declared encoding and compares names as UTF-8. pugixml
+        // does not transcode anything but UTF-16/32 and Latin-1 - a file that
+        // says encoding="Shift_JIS" was loaded as if it were UTF-8, and saved
+        // back with pugixml's default declaration (UTF-8) around its Shift_JIS
+        // bytes. FSMP then met invalid UTF-8 - Japanese comments are enough - and
+        // the merged costume lost its physics. So a declared legacy encoding is
+        // converted to UTF-8 here, before pugixml sees it; a file that declares
+        // nothing (or UTF-8) and is not valid UTF-8 is refused with a reason.
+
+        bool XmlBytesAreUtf8(const std::string& a_bytes)
+        {
+            return a_bytes.empty() ||
+                   ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, a_bytes.data(),
+                       static_cast<int>(a_bytes.size()), nullptr, 0) > 0;
+        }
+
+        // The encoding named in the XML declaration, lower-cased; "" when the
+        // file has no declaration or it names none. a_valueAt / a_valueLen say
+        // where the name sits, for the rewrite.
+        std::string DeclaredXmlEncoding(const std::string& a_bytes, std::size_t& a_valueAt,
+            std::size_t& a_valueLen)
+        {
+            if (a_bytes.compare(0, 5, "<?xml") != 0) {
+                return {};
+            }
+            const std::size_t end = a_bytes.find("?>");
+            const std::size_t at = a_bytes.find("encoding", 0);
+            if (end == std::string::npos || at == std::string::npos || at > end) {
+                return {};
+            }
+            const std::size_t q = a_bytes.find_first_of("\"'", at);
+            if (q == std::string::npos || q > end) {
+                return {};
+            }
+            const char quote = a_bytes[q];
+            const std::size_t close = a_bytes.find(quote, q + 1);
+            if (close == std::string::npos || close > end) {
+                return {};
+            }
+            a_valueAt = q + 1;
+            a_valueLen = close - a_valueAt;
+            std::string name = a_bytes.substr(a_valueAt, a_valueLen);
+            for (auto& ch : name) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            return name;
+        }
+
+        // The Windows code page for a declared encoding, 0 for UTF-8 (or a name
+        // this does not know - the bytes are then held to UTF-8).
+        unsigned XmlCodePage(const std::string& a_name)
+        {
+            static const std::pair<const char*, unsigned> kPages[] = {
+                { "shift_jis", 932 }, { "shift-jis", 932 }, { "sjis", 932 }, { "x-sjis", 932 },
+                { "windows-31j", 932 }, { "cp932", 932 }, { "ms932", 932 },
+                { "gb2312", 936 }, { "gbk", 936 }, { "cp936", 936 }, { "gb18030", 54936 },
+                { "big5", 950 }, { "cp950", 950 },
+                { "euc-kr", 949 }, { "ks_c_5601-1987", 949 }, { "cp949", 949 },
+                { "windows-1252", 1252 }, { "cp1252", 1252 },
+                { "iso-8859-1", 28591 }, { "latin1", 28591 }, { "latin-1", 28591 },
+            };
+            for (const auto& [name, page] : kPages) {
+                if (a_name == name) {
+                    return page;
+                }
+            }
+            return 0;
+        }
+
+        bool ConvertToUtf8(const std::string& a_bytes, unsigned a_page, std::string& a_out)
+        {
+            const int n = ::MultiByteToWideChar(a_page, MB_ERR_INVALID_CHARS, a_bytes.data(),
+                static_cast<int>(a_bytes.size()), nullptr, 0);
+            if (n <= 0) {
+                return false;
+            }
+            std::wstring wide(static_cast<std::size_t>(n), L'\0');
+            ::MultiByteToWideChar(a_page, MB_ERR_INVALID_CHARS, a_bytes.data(),
+                static_cast<int>(a_bytes.size()), wide.data(), n);
+            const int m = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), n, nullptr, 0, nullptr,
+                nullptr);
+            if (m <= 0) {
+                return false;
+            }
+            a_out.assign(static_cast<std::size_t>(m), '\0');
+            ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), n, a_out.data(), m, nullptr, nullptr);
+            return true;
+        }
+
+        // Load a physics XML into a_doc as UTF-8. False, with a_why, when it
+        // cannot be read, cannot be converted, or is not well-formed.
+        bool LoadXmlUtf8(pugi::xml_document& a_doc, const std::filesystem::path& a_path,
+            unsigned a_options, std::string& a_why)
+        {
+            std::string bytes;
+            {
+                std::ifstream f(a_path, std::ios::binary);
+                if (!f) {
+                    a_why = "cannot be opened";
+                    return false;
+                }
+                std::ostringstream ss;
+                ss << f.rdbuf();
+                bytes = ss.str();
+            }
+            // UTF-16/32 with a byte-order mark: pugixml converts those itself.
+            const auto b0 = bytes.size() >= 2 ? static_cast<unsigned char>(bytes[0]) : 0u;
+            const auto b1 = bytes.size() >= 2 ? static_cast<unsigned char>(bytes[1]) : 0u;
+            if ((b0 == 0xFF && b1 == 0xFE) || (b0 == 0xFE && b1 == 0xFF)) {
+                const auto res = a_doc.load_buffer(bytes.data(), bytes.size(), a_options,
+                    pugi::encoding_auto);
+                if (!res) {
+                    a_why = res.description();
+                }
+                return static_cast<bool>(res);
+            }
+            if (bytes.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+                bytes.erase(0, 3);
+            }
+            std::size_t valueAt = 0;
+            std::size_t valueLen = 0;
+            const std::string declared = DeclaredXmlEncoding(bytes, valueAt, valueLen);
+            if (const unsigned page = XmlCodePage(declared); page != 0) {
+                std::string utf8;
+                if (!ConvertToUtf8(bytes, page, utf8)) {
+                    a_why = "declares " + declared + " but is not valid " + declared;
+                    return false;
+                }
+                // The declaration still names the old encoding; say what it is
+                // now. Offsets are unchanged: the declaration is ASCII.
+                utf8.replace(valueAt, valueLen, "UTF-8");
+                bytes = std::move(utf8);
+            } else if (!XmlBytesAreUtf8(bytes)) {
+                a_why = declared.empty() ?
+                            "is not UTF-8 text and declares no encoding" :
+                            "declares " + declared + ", which CEF cannot convert, and is not UTF-8";
+                return false;
+            }
+            const auto res = a_doc.load_buffer(bytes.data(), bytes.size(), a_options,
+                pugi::encoding_utf8);
+            if (!res) {
+                a_why = res.description();
+            }
+            return static_cast<bool>(res);
+        }
+
         // Recursion bounds for input CEF does not control (C15). A physics XML is
         // a handful of levels deep and a skeleton a few dozen; anything past
         // these is damaged, and recursing into it is a stack overflow.
@@ -829,10 +977,10 @@ namespace nifcarrier {
                 auto& d = docs.emplace_back();
                 // parse_comments/parse_pi: XDocument (the C# oracle) preserves
                 // these; pugixml's parse_default silently drops them.
-                const auto res = d.load_file(in.c_str(),
-                    pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
-                if (!res) {
-                    Log(r.log, "[mergexml] FAILED to load %s: %s", U8(in).c_str(), res.description());
+                std::string why;
+                if (!LoadXmlUtf8(d, in, pugi::parse_default | pugi::parse_comments | pugi::parse_pi,
+                        why)) {
+                    Log(r.log, "[mergexml] FAILED to load %s: %s", U8(in).c_str(), why.c_str());
                     return r;
                 }
                 if (std::string(d.document_element().name()) != "system") {
@@ -969,10 +1117,12 @@ namespace nifcarrier {
         VerbResult r;
         try {
             pugi::xml_document doc;
-            const auto res = doc.load_file(in.c_str(),
-                pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
-            if (!res || !doc.document_element()) {
-                Log(r.log, "[persist] FAILED xml load '%s'", U8(in).c_str());
+            std::string why;
+            if (!LoadXmlUtf8(doc, in, pugi::parse_default | pugi::parse_comments | pugi::parse_pi,
+                    why) ||
+                !doc.document_element()) {
+                Log(r.log, "[persist] FAILED xml load '%s': %s", U8(in).c_str(),
+                    why.empty() ? "no root element" : why.c_str());
                 return r;
             }
             int n = 0;
@@ -988,7 +1138,14 @@ namespace nifcarrier {
                 if (nmAttr.empty()) {
                     continue;
                 }
-                const auto it = renames.find(nmAttr.value());
+                // Case-blind, like IsolateContent (W27): the XML may spell the
+                // shape in another case than the NIF the renames came from.
+                auto it = renames.find(nmAttr.value());
+                if (it == renames.end()) {
+                    const std::string key = LowerCopy(nmAttr.value());
+                    it = std::find_if(renames.begin(), renames.end(),
+                        [&key](const auto& a_kv) { return LowerCopy(a_kv.first) == key; });
+                }
                 if (it != renames.end()) {
                     nmAttr.set_value(it->second.c_str());
                     ++n;
@@ -1050,12 +1207,19 @@ namespace nifcarrier {
             // only ever removes childless nodes, so anything still referenced
             // keeps its node alive - fail-safe by construction.
             pugi::xml_document doc;
-            const auto xmlRes = doc.load_file(xmlIn.c_str(),
-                pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
-            if (!xmlRes || !doc.document_element()) {
-                Log(r.log, "[isolate] FAILED xml load '%s'", U8(xmlIn).c_str());
+            std::string xmlWhy;
+            if (!LoadXmlUtf8(doc, xmlIn, pugi::parse_default | pugi::parse_comments | pugi::parse_pi,
+                    xmlWhy) ||
+                !doc.document_element()) {
+                Log(r.log, "[isolate] FAILED xml load '%s': %s", U8(xmlIn).c_str(),
+                    xmlWhy.empty() ? "no root element" : xmlWhy.c_str());
                 return r;
             }
+            // Keyed lower-case (W27): the XML and the NIF of one costume do not
+            // always agree on case ("skirt_01" / "Skirt_01"), FSMP pairs them
+            // without regard to it, and an exact match here dropped that node
+            // from the slimmed NIF and left the XML reference un-prefixed - the
+            // costume went static the moment a second one was merged beside it.
             std::set<std::string> referenced;
             {
                 // Depth-capped (C15): a physics XML is a few levels deep, and a
@@ -1069,13 +1233,13 @@ namespace nifcarrier {
                     }
                     for (auto attr : node.attributes()) {
                         if (attr.value()[0]) {
-                            referenced.insert(attr.value());
+                            referenced.insert(LowerCopy(attr.value()));
                         }
                     }
                     for (auto child : node.children()) {
                         if (child.type() == pugi::node_pcdata) {
                             if (child.value()[0]) {
-                                referenced.insert(child.value());
+                                referenced.insert(LowerCopy(child.value()));
                             }
                             continue;
                         }
@@ -1091,7 +1255,7 @@ namespace nifcarrier {
             }
             for (auto* s : nif.GetShapes()) {
                 for (const auto& b : ShapeBoneNames(nif, s)) {
-                    referenced.insert(b);
+                    referenced.insert(LowerCopy(b));
                 }
             }
             std::set<std::string> keep;
@@ -1107,7 +1271,7 @@ namespace nifcarrier {
                 for (uint32_t i = 0; i < hdr0.GetNumBlocks(); ++i) {
                     if (auto* node = hdr0.GetBlock<nifly::NiNode>(i)) {
                         const std::string nm = node->name.get();
-                        if (!nm.empty() && referenced.count(nm) != 0) {
+                        if (!nm.empty() && referenced.count(LowerCopy(nm)) != 0) {
                             keep.insert(nm);
                             keepWithAncestors(node);
                         }
@@ -1149,7 +1313,10 @@ namespace nifcarrier {
 
             // Rename map: every custom bone (live-skeleton bones stay shared -
             // that union IS the point of the merge) and every shape (collision
-            // meshes; also de-duplicates VirtualGround across contents).
+            // meshes; also de-duplicates VirtualGround across contents). Keyed
+            // by the lower-cased name, valued by the NIF's own spelling with the
+            // prefix: whatever case the XML uses, it ends up naming exactly the
+            // node the NIF now has (W27).
             std::map<std::string, std::string> renames;
             const auto& hdr = nif.GetHeader();
             int bones = 0;
@@ -1164,7 +1331,7 @@ namespace nifcarrier {
                     continue;
                 }
                 node->name.get() = prefix + nm;
-                renames.emplace(nm, prefix + nm);
+                renames.emplace(LowerCopy(nm), prefix + nm);
                 ++bones;
             }
             int shapes = 0;
@@ -1174,7 +1341,7 @@ namespace nifcarrier {
                     continue;
                 }
                 s->name.get() = prefix + nm;
-                renames.emplace(nm, prefix + nm);
+                renames.emplace(LowerCopy(nm), prefix + nm);
                 ++shapes;
             }
             if (nif.Save(nifOut) != 0) {
@@ -1200,7 +1367,7 @@ namespace nifcarrier {
                     return;
                 }
                 for (auto attr : node.attributes()) {
-                    const auto it = renames.find(attr.value());
+                    const auto it = renames.find(LowerCopy(attr.value()));
                     if (it != renames.end()) {
                         attr.set_value(it->second.c_str());
                         ++refs;
@@ -1208,7 +1375,7 @@ namespace nifcarrier {
                 }
                 for (auto child : node.children()) {
                     if (child.type() == pugi::node_pcdata) {
-                        const auto it = renames.find(child.value());
+                        const auto it = renames.find(LowerCopy(child.value()));
                         if (it != renames.end()) {
                             child.set_value(it->second.c_str());
                             ++refs;
@@ -2404,11 +2571,11 @@ namespace nifcarrier {
             std::vector<std::string> needed;
             for (const auto& xmlDisk : xmlDisks) {
                 pugi::xml_document xdoc;
-                const auto pres = xdoc.load_file(xmlDisk.c_str(),
-                    pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
-                if (!pres) {
+                std::string why;
+                if (!LoadXmlUtf8(xdoc, xmlDisk,
+                        pugi::parse_default | pugi::parse_comments | pugi::parse_pi, why)) {
                     Log(log, "[persist] WARNING cannot parse xml '%s': %s", U8(xmlDisk).c_str(),
-                        pres.description());
+                        why.c_str());
                     continue;
                 }
                 for (auto el : xdoc.document_element().children()) {
