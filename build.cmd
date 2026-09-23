@@ -12,6 +12,16 @@ rem NOTE: vcvars64 forces VCPKG_ROOT to the VS-bundled vcpkg. The project was fi
 rem installed with it, so we keep it for cache reuse. To use a different vcpkg,
 rem set VCPKG_ROOT AFTER this line.
 
+rem English compiler messages. Ninja learns which headers each .cpp includes by
+rem reading cl's /showIncludes lines, and it only recognizes the prefix CMake
+rem recorded at configure time ("Note: including file:"). A Japanese-locale cl
+rem prints that note in Japanese instead, Ninja records no header at all, and
+rem editing a header then rebuilds only the .cpp files that changed too -
+rem the rest link against code compiled from the OLD header (found 2026-09-23 as
+rem an unresolved ReturnStoredItem; a changed inline function would not even
+rem fail to link).
+set "VSLANG=1033"
+
 rem Auto-deploy target: CMake copies the built .dll to
 rem   %SKYRIM_MODS_FOLDER%\CostumeExpansionFW\SKSE\Plugins\
 rem so MO2 sees it as a mod. Override by setting SKYRIM_MODS_FOLDER before calling.
