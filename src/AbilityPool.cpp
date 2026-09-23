@@ -1057,7 +1057,14 @@ namespace CostumeFW::abilities
                 // The WHOLE enchantment is refused, not the one effect that
                 // failed (design 5.7). Half an enchantment is a different
                 // enchantment, and the author did not design that one.
-                SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId, why);
+                // Said once per content per session: this runs on every
+                // convergence - every equip event - for every piece with no
+                // enchantment, and the log flushes per line (W13).
+                static std::unordered_set<std::string> s_said;
+                if (s_said.insert(a_contentId).second) {
+                    SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId,
+                        why);
+                }
                 return nullptr;
             }
 

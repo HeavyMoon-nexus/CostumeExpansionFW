@@ -168,8 +168,13 @@ namespace
                 const auto handle = actor->GetHandle();
                 const auto base = a_event->baseObject;
                 const bool equipped = a_event->equipped;
+                // Needs the event itself, so it is not coalesced - and it
+                // carries its own convergence, because the coalesced pass below
+                // may already be queued AHEAD of it and would not see the
+                // binding this makes.
                 SKSE::GetTaskInterface()->AddTask([handle, base, equipped] {
                     CostumeFW::OnNpcTokenEquip(handle, base, equipped);
+                    CostumeFW::ApplyBoxAbilities();
                 });
             }
             if (actor == RE::PlayerCharacter::GetSingleton()) {
@@ -177,10 +182,19 @@ namespace
                     SKSE::log::debug("equip: {:08X} {}", a_event->baseObject,
                         a_event->equipped ? "on" : "off");
                 }
-                SKSE::GetTaskInterface()->AddTask([] {
-                    CostumeFW::Reconcile();
-                    CostumeFW::ApplyBoxAbilities();
-                });
+                // ONE pass for a burst. An outfit swap or an equip-set mod fires
+                // an event per piece in the same frame, and each used to queue
+                // its own Reconcile + convergence (review 2026-09-23 W13). The
+                // flag is cleared as the pass STARTS, so an event arriving while
+                // it runs queues the next one - nothing is missed.
+                static std::atomic_bool s_queued{ false };
+                if (!s_queued.exchange(true)) {
+                    SKSE::GetTaskInterface()->AddTask([] {
+                        s_queued = false;
+                        CostumeFW::Reconcile();
+                        CostumeFW::ApplyBoxAbilities();
+                    });
+                }
             } else if (CostumeFW::IsPublishToken(a_event->baseObject) ||
                        CostumeFW::IsNpcPersistCarrier(a_event->baseObject)) {
                 const auto handle = actor->GetHandle();

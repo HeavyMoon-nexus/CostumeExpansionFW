@@ -204,6 +204,17 @@ namespace CostumeFW
             return !a_id.empty() && g_refOnly.erase(RefKey(a_id)) > 0;
         }
 
+        // A box's token FormID, resolved once per box (W13, see tokenFormCache).
+        // 0 while it does not resolve - asked again next time, which only a
+        // quarantined box ever needs, and those are skipped before asking.
+        std::uint32_t TokenFormOf(const BoxDefInfo& a_box)
+        {
+            if (a_box.tokenFormCache == 0) {
+                a_box.tokenFormCache = ResolveFormId(a_box.token);
+            }
+            return a_box.tokenFormCache;
+        }
+
         // Persist content (colon-form ARMA ids): always-injected, token-less. Phase 1
         // stores + injects these; worn-capture UI and seed retirement come in the MCM
         // rework (the capture flow mirrors a box but with no token gate).
@@ -2471,7 +2482,7 @@ namespace CostumeFW
         for (const auto& b : g_boxes) {
             // A quarantined box's token is not a box token to the equip and
             // container sinks (W11): it may be a publish token an NPC wears.
-            if (BoxTokenUsable(b) && ResolveFormId(b.token) == a_form) {
+            if (BoxTokenUsable(b) && TokenFormOf(b) == a_form) {
                 return true;
             }
         }
@@ -4822,6 +4833,18 @@ namespace CostumeFW
             return player && player->GetWornArmor(form) != nullptr;
         }
 
+        // The same, through the box's cached token FormID (W13) - the form the
+        // per-box loops use.
+        bool TokenWorn(const BoxDefInfo& a_box)
+        {
+            const std::uint32_t form = TokenFormOf(a_box);
+            if (form == 0) {
+                return false;
+            }
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            return player && player->GetWornArmor(form) != nullptr;
+        }
+
 
 
 
@@ -5675,8 +5698,7 @@ namespace CostumeFW
         // can be stated once.
         if (cefOn) {
             for (const auto& b : g_boxes) {
-                if (!BoxTokenUsable(b) || b.enabled || b.contents.empty() ||
-                    !TokenWorn(b.token)) {
+                if (!BoxTokenUsable(b) || b.enabled || b.contents.empty() || !TokenWorn(b)) {
                     continue;
                 }
                 SKSE::log::info("boxes: '{}'{} is WORN, so its token distribution is turned back "
@@ -5698,7 +5720,7 @@ namespace CostumeFW
             // A quarantined box pays nothing even if its token is on the player
             // - it can be a publish token someone else's costume uses (W11). Not
             // skipped outright: its manual ability still has to come off.
-            const bool worn = cefOn && b.enabled && BoxTokenUsable(b) && TokenWorn(b.token);
+            const bool worn = cefOn && b.enabled && BoxTokenUsable(b) && TokenWorn(b);
             if (worn) {
                 admit(b.contents, "a worn box");
             }

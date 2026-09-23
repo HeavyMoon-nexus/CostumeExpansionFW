@@ -78,6 +78,14 @@ namespace CostumeFW
         // The file records what the user meant; this records what the current
         // load order can actually deliver.
         TokenState tokenState{ TokenState::Resolved };
+        // Runtime only, never serialized: the token's resolved FormID, filled on
+        // first use. Resolving a colon-id walks every loaded plugin's name, and
+        // IsBoxToken / the worn check ran that for every box on every equip and
+        // every item leaving the inventory (review 2026-09-23 W13). The load
+        // order cannot change within a session, and every path that makes a box
+        // (LoadBoxes, AddBox) starts it at 0 - which here means only "not looked
+        // up yet", nothing else (not the persist sentinel of trap 12).
+        mutable std::uint32_t tokenFormCache{ 0 };
     };
 
     // True while the box's token is usable: the allocator, the stat stamp, the

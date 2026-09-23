@@ -3326,7 +3326,9 @@ namespace CostumeFW
         }
         const auto pol = CapturePolicySnapshot();  // one generation for the whole sweep
         const bool cefOn = CefEnabled();  // master off (Main page) -> hide everything
-        SKSE::log::info("Reconcile: {} actor state(s) (cef enabled={})", g_actors.size(), cefOn);
+        // debug, not info: this runs on every equip event, and the log flushes
+        // per line (W13).
+        SKSE::log::debug("Reconcile: {} actor state(s) (cef enabled={})", g_actors.size(), cefOn);
         for (auto& state : g_actors) {
             ReconcileActorImpl(state, *pol, cefOn);
         }
