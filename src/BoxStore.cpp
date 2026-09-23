@@ -432,7 +432,25 @@ namespace CostumeFW
             doc["custodyLog"] = std::move(custody);
             EmitPublishJson(doc);
 
-            if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
+            // dump() does not write text that is not UTF-8 - it THROWS
+            // (type_error.316), and nothing between here and the engine catches
+            // it, so it was a crash from a task or a native. Worse, it came back
+            // on every load once the text was in memory (review 2026-09-23 C1):
+            // a mesh path, a plugin name, a shape name or a label in a legacy
+            // codepage. Refusing the write is the fail-closed answer - AddBox
+            // reads false and rolls back, so a capture moves nothing (F05), and
+            // the file on disk stays the last one that could be written. The
+            // entrances refuse such text too; this is the last line.
+            std::string body;
+            try {
+                body = doc.dump(2);
+            } catch (const nlohmann::json::exception& e) {
+                SKSE::log::error(
+                    "settings: NOT written - {} (text that is not UTF-8 reached the settings)",
+                    e.what());
+                return false;
+            }
+            if (!WriteFileAtomic(kSettingsPath, body)) {
                 SKSE::log::error("settings: cannot write {}", kSettingsPath);
                 return false;
             }
@@ -770,7 +788,20 @@ namespace CostumeFW
                 doc["persist"] = { { "contents", std::move(pcontents) } };
             }
 
-            const std::string out = doc.dump(1);
+            // Same fail-closed rule as WriteJson (C1): a model path in a legacy
+            // codepage would throw out of dump(), and this runs from the load-time
+            // task on EVERY load, so one such costume crashed every save. The old
+            // manifest stays, the carriers stay as they are, and no sync starts.
+            std::string out;
+            try {
+                out = doc.dump(1);
+            } catch (const nlohmann::json::exception& e) {
+                SKSE::log::error(
+                    "carrier manifest: NOT written - {} (a path that is not UTF-8) - carriers "
+                    "are left as they are",
+                    e.what());
+                return;
+            }
             {
                 std::ifstream prev(kManifestPath);
                 if (prev) {

@@ -341,12 +341,24 @@ namespace CostumeFW::Preset
         doc["hideRules"] = std::move(rules);
         doc["genderModes"] = std::move(genders);
 
+        // Text first, file second. dump() throws on text that is not UTF-8
+        // (review 2026-09-23 C1), and the stream below truncates the moment it
+        // opens - so doing it the other way round turned a refused name into an
+        // EMPTY preset file on disk, and the throw itself into a crash.
+        std::string body;
+        try {
+            body = doc.dump(2);
+        } catch (const nlohmann::json::exception& e) {
+            SKSE::log::error("preset: {} NOT written - {} (a name or id that is not UTF-8)", file,
+                e.what());
+            return {};
+        }
         std::ofstream out(dir / file, std::ios::trunc);
         if (!out) {
             SKSE::log::error("preset: cannot write {}", file);
             return {};
         }
-        out << doc.dump(2);
+        out << body;
         SKSE::log::info("preset: exported {} ({} content)", file, a_contents.size());
         return file;
     }

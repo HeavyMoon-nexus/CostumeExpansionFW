@@ -643,12 +643,26 @@ namespace CostumeFW::abilities
             nlohmann::json doc;
             doc["schema"] = kSchema;
             const auto arr = AbilitiesArray();
-            const auto body = arr.dump();
-            doc["checksum"] = std::format("{:016x}", Fnv1a(body));
-            doc["abilities"] = arr;
+            // dump() throws on text that is not UTF-8 instead of writing it
+            // (review 2026-09-23 C1): a content id, a magic effect or a condition
+            // form from a plugin whose name is in a legacy codepage. Not written
+            // is the answer every caller already has for a disk that refused -
+            // Allocate takes its entry back out, the rest simply do not persist.
+            std::string text;
+            try {
+                const auto body = arr.dump();
+                doc["checksum"] = std::format("{:016x}", Fnv1a(body));
+                doc["abilities"] = arr;
+                text = doc.dump(2);
+            } catch (const nlohmann::json::exception& e) {
+                SKSE::log::error("abilities: {} NOT written - {} (text that is not UTF-8) - no new "
+                                 "allocation is in effect",
+                    kRegistryPath, e.what());
+                return false;
+            }
 
             RotateBackups();
-            if (!WriteFileAtomic(kRegistryPath, doc.dump(2))) {
+            if (!WriteFileAtomic(kRegistryPath, text)) {
                 SKSE::log::error("abilities: could not write {} - no new allocation is in effect",
                     kRegistryPath);
                 return false;
