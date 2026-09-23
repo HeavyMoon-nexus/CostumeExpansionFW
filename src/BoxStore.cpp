@@ -4976,6 +4976,16 @@ namespace CostumeFW
                 pushLive(armo->formEnchanting);
                 return effs;  // this content is done
             }
+            if (stored.inStore) {
+                // The original is in storage and carries no enchantment of its
+                // own, and neither does its base form: it is worth nothing, and
+                // that is the answer. The snapshot and the frozen copy below are
+                // for an original that cannot be reached - falling through to
+                // them here paid for an enchantment the stored piece does not
+                // have, e.g. one snapshotted off a second, enchanted copy the
+                // player kept (review 2026-09-23 W21).
+                return effs;
+            }
             const auto snap = g_contentEnchants.find(c);
             if (snap != g_contentEnchants.end()) {
                 if (!armo) {
@@ -5372,6 +5382,25 @@ namespace CostumeFW
             auto* armo = a_entry->object ? a_entry->object->As<RE::TESObjectARMO>() : nullptr;
             return MeasureTemperMult(armo, xlist, health);
         }
+
+        // The enchantment of the copy a capture MOVES: that list's own
+        // ExtraEnchantment, else the base form's. InventoryEntryData::
+        // GetEnchantment answers for the whole stack instead - the first list
+        // that has one - so with a plain piece and a self-enchanted one of the
+        // same item, the snapshot came from the enchanted copy while the plain
+        // one went into storage, and the token paid for an enchantment the
+        // player was still holding (review 2026-09-23 W21).
+        RE::EnchantmentItem* EntryInstanceEnchantment(const RE::InventoryEntryData* a_entry)
+        {
+            if (auto* xlist = EntryInstanceList(a_entry)) {
+                if (const auto* xe = xlist->GetByType<RE::ExtraEnchantment>(); xe && xe->enchantment) {
+                    return xe->enchantment;
+                }
+            }
+            auto* armo = a_entry && a_entry->object ? a_entry->object->As<RE::TESObjectARMO>()
+                                                    : nullptr;
+            return armo ? armo->formEnchanting : nullptr;
+        }
     }
 
     bool CaptureEnchant(const std::string& a_content)
@@ -5425,13 +5454,13 @@ namespace CostumeFW
             }
             owned = true;
             if (entry->IsWorn()) {
-                ench = entry->GetEnchantment();
+                ench = EntryInstanceEnchantment(entry.get());  // W21: the copy that moves
                 temper = EntryTemperMult(entry.get());
                 sawWorn = true;
                 break;
             }
             if (!carried) {
-                carried = entry->GetEnchantment();
+                carried = EntryInstanceEnchantment(entry.get());
                 carriedTemper = EntryTemperMult(entry.get());
             }
         }
@@ -6017,18 +6046,10 @@ namespace CostumeFW
         }
         // Prefer the worn / any instance-data list so tempering + player enchants
         // travel with the stored copy (the engine unequips a worn list on remove).
-        RE::ExtraDataList* xlist = nullptr;
-        if (const auto& entry = it->second.second; entry && entry->extraLists) {
-            for (auto* x : *entry->extraLists) {
-                if (x && (x->HasType<RE::ExtraWorn>() || x->HasType<RE::ExtraWornLeft>())) {
-                    xlist = x;
-                    break;
-                }
-            }
-            if (!xlist && !entry->extraLists->empty()) {
-                xlist = entry->extraLists->front();
-            }
-        }
+        // EntryInstanceList is the one choice CaptureEnchant snapshots from, so
+        // the numbers and the item that goes into storage are the same copy
+        // (W21).
+        RE::ExtraDataList* xlist = EntryInstanceList(it->second.second.get());
         player->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, xlist, store);
         SKSE::log::info("custody: captured 1x '{}' into the hidden store", a_id);
         // The custody row starts here. This is the ONLY moment the id is
