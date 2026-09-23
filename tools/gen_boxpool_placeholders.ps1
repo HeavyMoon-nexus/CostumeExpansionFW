@@ -22,6 +22,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if ($Generation -lt 1) { throw "Generation must be >= 1 (generation 0 is CostumeFW.esp)." }
+# A shipped generation's token ids are frozen, and the carrier keys below are
+# those ids: another -PerSlot names files for tokens that do not exist and
+# leaves out ones that do. espmerge --build-boxpool pins the plugin itself by
+# md5; this is the same freeze on the carrier side (review 2026-09-23 W24).
+$shippedPerSlot = @{ 1 = 3 }
+if ($shippedPerSlot.ContainsKey($Generation) -and $PerSlot -ne $shippedPerSlot[$Generation]) {
+    throw "generation $Generation shipped with -PerSlot $($shippedPerSlot[$Generation]) and its token ids are frozen - add capacity as a new generation."
+}
 
 $repo = Split-Path $PSScriptRoot -Parent
 $meshRoot = Join-Path $repo 'package_assets\meshes\CostumeFW'

@@ -22,6 +22,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
@@ -423,6 +424,25 @@ internal static class Program
     // --verify-pool then assert they stayed that way.
     private const int kDefaultPerSlot = 3;
 
+    // Generations that have shipped, by the md5 of the plugin that went out. A
+    // shipped generation is frozen. Saves point at its tokens by (plugin, local
+    // id), and the ids are positional - 0x800 + 2 * index over (slot, ordinal) -
+    // so a rebuild with another --per-slot, or from a core whose token set
+    // changed, moves every id after the first difference to another slot, and
+    // each saved box token turns into some other slot's token. Every internal
+    // check still passes on such a file; only the bytes can tell. Capacity is
+    // added as a new generation instead (review 2026-09-23 W24).
+    private static readonly Dictionary<int, string> kShippedBoxPoolMd5 = new() {
+        [1] = "eb32e35e320813600fa65692657dc703",
+    };
+
+    private static string Md5Hex(string path)
+    {
+        using var md5 = MD5.Create();
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(md5.ComputeHash(stream)).ToLowerInvariant();
+    }
+
     private static string CarrierKey(int generation, uint armoLocalId) =>
         "BP" + generation.ToString("00") + "_" + armoLocalId.ToString("X6");
 
@@ -484,8 +504,10 @@ internal static class Program
                 var armoId = (uint)(0x800 + index * 2);
                 var armaId = armoId + 1;
                 if (armaId > 0xFFF) {
-                    Console.Error.WriteLine("this generation does not fit the ESL range - " +
-                                            "lower --per-slot or add another generation");
+                    Console.Error.WriteLine("generation " + generation + " at " + perSlot +
+                                            " per slot does not fit the ESL range 800-FFF (" +
+                                            templates.Count + " slots x " + perSlot +
+                                            " tokens x 2 records)");
                     return 1;
                 }
                 var armor = t.Armor.Duplicate(new FormKey(outKey, armoId));
@@ -534,11 +556,21 @@ internal static class Program
             }
         }
 
+        // Built into a stage directory and moved into place only once it verifies
+        // and, for a shipped generation, matches what shipped byte for byte - so
+        // a refused build never replaces a good file. The staged copies keep
+        // their real names: Mutagen takes a plugin's ModKey from its file name,
+        // and the KID check looks for the ini beside the plugin.
         Directory.CreateDirectory(outDir);
         var outPath = Path.Combine(outDir, outName);
-        outMod.WriteToBinary(outPath);
+        var kidName = "CostumeFW_BoxPool" + generation + "_KID.ini";
+        var kidPath = Path.Combine(outDir, kidName);
+        var stageDir = Path.Combine(outDir, ".espmerge_stage");
+        Directory.CreateDirectory(stageDir);
+        var stagedPath = Path.Combine(stageDir, outName);
+        var stagedKid = Path.Combine(stageDir, kidName);
+        outMod.WriteToBinary(stagedPath);
 
-        var kidPath = Path.Combine(outDir, "CostumeFW_BoxPool" + generation + "_KID.ini");
         var header = new List<string> {
             "; Costume Expansion FW - LoreBox tooltip keywords for box pool generation " +
                 generation + ".",
@@ -552,13 +584,36 @@ internal static class Program
             "; these and there is no effect. KID auto-creates the keywords.",
             "",
         };
-        File.WriteAllLines(kidPath, header.Concat(kid));
+        File.WriteAllLines(stagedKid, header.Concat(kid));
 
-        Console.WriteLine("box pool " + generation + " -> " + outPath);
+        Console.WriteLine("box pool " + generation + " staged -> " + stagedPath);
         Console.WriteLine("  " + outMod.Armors.Count + " ARMO + " + outMod.ArmorAddons.Count +
                           " ARMA (" + perSlot + " per slot x " + templates.Count + " slots)");
-        Console.WriteLine("  " + kidPath + " (" + kid.Count + " keyword lines)");
-        return VerifyBoxPool(outPath, corePath);
+        Console.WriteLine("  " + stagedKid + " (" + kid.Count + " keyword lines)");
+        if (VerifyBoxPool(stagedPath, corePath) != 0) {
+            Console.Error.WriteLine("the new pool does not verify - " + outPath +
+                                    " untouched. The rejected result is in " + stageDir);
+            return 1;
+        }
+        if (kShippedBoxPoolMd5.TryGetValue(generation, out var shipped)) {
+            var built = Md5Hex(stagedPath);
+            if (!built.Equals(shipped, StringComparison.OrdinalIgnoreCase)) {
+                Console.Error.WriteLine("generation " + generation + " has shipped (md5 " + shipped +
+                                        ") and this build differs (md5 " + built + "). Its token " +
+                                        "ids are in players' saves, so it is never rebuilt - add " +
+                                        "a new generation instead. " + outPath + " untouched; the " +
+                                        "rejected result is in " + stageDir);
+                return 1;
+            }
+            Console.WriteLine("  md5 " + built + " = the shipped generation " + generation);
+        }
+        File.Copy(stagedPath, outPath, true);
+        File.Copy(stagedKid, kidPath, true);
+        File.Delete(stagedPath);
+        File.Delete(stagedKid);
+        try { Directory.Delete(stageDir); } catch (IOException) { /* not empty: leave it */ }
+        Console.WriteLine("box pool " + generation + " -> " + outPath);
+        return 0;
     }
 
     private static int VerifyBoxPool(string path, string corePath, string meshRoot = null)
