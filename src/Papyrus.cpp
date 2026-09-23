@@ -952,7 +952,67 @@ namespace CostumeFW
         // calls it at capture time, before moving the item to the store).
         bool CaptureContentEnchantNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
         {
-            return CaptureEnchant(a_content.c_str());  // sync def + json (inventory read)
+            // No rebuild here: the MCM moves the item with CaptureToStore right
+            // after, which rebuilds once the original is in storage - a rebuild
+            // now pays from the flat snapshot and burns a pool slot (W22).
+            return CaptureEnchant(a_content.c_str(), false);  // sync def + json (inventory read)
+        }
+
+        // --- the MCM's item custody, through the one native implementation ---
+        // (review 2026-09-23 R7). The MCM used to move items with Papyrus:
+        // its own "store, else a new copy" return and its own RemoveItem
+        // capture, a second custody implementation that knew nothing of
+        // preset-listed ids (C2), the uninstall mark (C3), the copy the enchant
+        // snapshot was taken from (W21) or the rebuild order (W22).
+
+        // Hand back one of a_id: the stored original, else - with aAllowNew -
+        // a new copy, unless a preset only listed it. aNotify says the notices
+        // the MCM gave (and the one for a listed-only id). True if an item
+        // reached the player.
+        bool ReturnItemNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, bool a_allowNew,
+            bool a_notify)
+        {
+            const std::string id = a_id.c_str();
+            bool recreated = false;
+            bool refOnly = false;
+            const bool ok =
+                ReturnStoredItem(id, a_allowNew, &recreated, RecreateContext::kNormal, &refOnly);
+            if (a_notify) {
+                if (ok && recreated) {
+                    RE::DebugNotification(
+                        "CostumeFW: returned as a new copy (none stored on this character)");
+                } else if (!ok && refOnly) {
+                    NotifyRefOnlyReturn(id);
+                }
+            }
+            return ok;
+        }
+
+        // Move one of a_id from the player into the hidden store - the copy the
+        // enchant snapshot was read from - with its custody row, the preset
+        // mark taken off, and the stats rebuilt after the move.
+        bool CaptureToStoreNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            return CaptureItemToStore(a_id.c_str());
+        }
+
+        // Whether the box at a_index can be used - false for a quarantined one
+        // (its token is not a working box token right now). M12.
+        bool IsBoxUsableNative(RE::StaticFunctionTag*, std::int32_t a_index)
+        {
+            if (a_index < 0 || a_index >= BoxCount()) {
+                return false;
+            }
+            return BoxTokenUsable(BoxAt(a_index));
+        }
+
+        // Always true. A native the DLL never registered answers the Papyrus
+        // default (false) - which is how the MCM tells it is running without
+        // CEF (CEF_DISABLE.txt, a failed load) before trusting any native with
+        // the user's items (C10).
+        bool IsDllRunningNative(RE::StaticFunctionTag*)
+        {
+            return true;
         }
 
         // True if the content's base form has a REAL Papyrus script attached
@@ -1049,6 +1109,10 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetBoxesOnSlot", kClass, GetBoxesOnSlot);
         a_vm->RegisterFunction("UninstallNpcCleanup", kClass, UninstallNpcCleanupNative);
         a_vm->RegisterFunction("UninstallCleanup", kClass, UninstallCleanupNative);
+        a_vm->RegisterFunction("ReturnItem", kClass, ReturnItemNative);
+        a_vm->RegisterFunction("CaptureToStore", kClass, CaptureToStoreNative);
+        a_vm->RegisterFunction("IsBoxUsable", kClass, IsBoxUsableNative);
+        a_vm->RegisterFunction("IsDllRunning", kClass, IsDllRunningNative);
         a_vm->RegisterFunction("GetBoxEnabled", kClass, GetBoxEnabled);
         a_vm->RegisterFunction("SetBoxEnabled", kClass, SetBoxEnabledNative);
         a_vm->RegisterFunction("GetBoxArmorType", kClass, GetBoxArmorType);
