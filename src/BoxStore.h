@@ -1006,8 +1006,14 @@ namespace CostumeFW
     // AddBox: create the box for a_token if absent (with a_label), then append
     // a_content if non-empty and not already present. Returns false on bad input.
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content);
+    // Both return false - and change nothing - when the settings could not be
+    // saved: every caller hands the items back only on true, and handing them
+    // back while the file still lists them is a second copy on the next
+    // take-out (review 2026-09-23 W12). a_keepOnWriteFailure = false is for the
+    // one caller that must drop the box from memory whatever the disk says
+    // (unpublish rolling back a half-built box).
     bool RemoveBoxContent(const std::string& a_token, const std::string& a_content);
-    bool RemoveBox(const std::string& a_token);
+    bool RemoveBox(const std::string& a_token, bool a_keepOnWriteFailure = true);
     bool SetBoxLabel(const std::string& a_token, const std::string& a_label);
 
     // Give a freshly re-created box the logical identity it had before, so a

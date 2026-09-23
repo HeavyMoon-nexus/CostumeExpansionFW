@@ -847,12 +847,29 @@ namespace CostumeFW
         }
         ResetPublishedTokenState(slot);
         g_published.push_back(snap);
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t tokenForm = ResolveFormId(box.token);
+        const bool wasWorn = player && tokenForm && player->GetWornArmor(tokenForm);
         WearBoxToken(box.token, false);
         for (const auto& id : box.contents) DetachSkinned(id);
-        RemoveBox(box.token);
+        if (!RemoveBox(box.token)) {
+            // RemoveBox's write is the one that makes a publish real: box gone
+            // and snapshot present, in one file. It did not happen, so RemoveBox
+            // kept the box - and the snapshot must go too, or two holders claim
+            // the same contents (W12). Put the box back the way it was.
+            g_published.erase(std::remove(g_published.begin(), g_published.end(), snap),
+                g_published.end());
+            ResetPublishedTokenState(slot);
+            for (const auto& id : box.contents) RegisterBoxById(id, box.token);
+            if (wasWorn) WearBoxToken(box.token, true);
+            Reconcile();
+            SKSE::log::error("publish: '{}' NOT published - the settings could not be saved; "
+                             "the box is unchanged", box.label);
+            return false;
+        }
         GiveOrRemoveToken(box.token, false);
         StampAllPublishTokens();
-        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+        if (player) {
             if (auto* token = PubTokenArmo(slot))
                 player->AddObjectToContainer(token, nullptr, 1, nullptr);
         }
@@ -1297,7 +1314,11 @@ namespace CostumeFW
             // put the costume back rather than leaving a half-filled box and no
             // definition to rebuild it from. The wearers are already recalled -
             // the tokens have to be handed out again - but the composition lives.
-            RemoveBox(token);
+            // The half-built box goes from memory even if its removal cannot be
+            // saved: the snapshot takes its contents back on the next line, and
+            // two holders of one content is the state every guard exists to
+            // prevent (W12).
+            RemoveBox(token, false);
             g_published.push_back(snap);
             SaveGlobalSettings();
             SKSE::log::error(

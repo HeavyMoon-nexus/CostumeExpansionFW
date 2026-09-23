@@ -7417,32 +7417,65 @@ namespace CostumeFW
         if (it == box.contents.end()) {
             return false;
         }
+        const auto pos = it - box.contents.begin();
         box.contents.erase(it);  // caller detaches the node
-        g_hideRules.erase(a_content);       // drop any hide rule for the removed content
-        g_genderModes.erase(a_content);     // and its gender override
-        g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
-        g_statEnchantOff.erase(a_content);  // and its item-data opt-outs
-        g_statWeightOff.erase(a_content);
-        g_statArmorOff.erase(a_content);
-        g_hideShapes.erase(a_content);      // and its per-shape hide choices
-        g_contentShapes.erase(a_content);   // and its cached shape list
-        g_showRealBody.erase(a_content);    // and its show-real-body opt-in
-        g_contentEnchants.erase(a_content);  // and its captured enchantment
-        g_contentTemper.erase(a_content);    // and its captured temper multiplier
-        WriteJson();
-        SetTokenStats(box);  // recompute token armor/weight
+        // Extracted rather than erased, so a write that fails can put every one
+        // back (inserting an empty node is a no-op).
+        auto hideRule = g_hideRules.extract(a_content);       // its hide rule
+        auto gender = g_genderModes.extract(a_content);       // its gender override
+        auto morph = g_bodyMorphOn.extract(a_content);        // its body-morph opt-in
+        auto enchOff = g_statEnchantOff.extract(a_content);   // its item-data opt-outs
+        auto weightOff = g_statWeightOff.extract(a_content);
+        auto armorOff = g_statArmorOff.extract(a_content);
+        auto hideShapes = g_hideShapes.extract(a_content);    // its per-shape hide choices
+        auto shapes = g_contentShapes.extract(a_content);     // its cached shape list
+        auto realBody = g_showRealBody.extract(a_content);    // its show-real-body opt-in
+        auto enchants = g_contentEnchants.extract(a_content); // its captured enchantment
+        auto temper = g_contentTemper.extract(a_content);     // its captured temper multiplier
+        if (!WriteJson()) {
+            // The mirror of AddBox's rollback (F05). Every caller reads false
+            // as "hand nothing back", and handing the item back while the file
+            // still lists it is a second copy on the next take-out (review
+            // 2026-09-23 W12). So memory goes back to what the disk still says.
+            g_boxes[idx].contents.insert(g_boxes[idx].contents.begin() + pos, a_content);
+            g_hideRules.insert(std::move(hideRule));
+            g_genderModes.insert(std::move(gender));
+            g_bodyMorphOn.insert(std::move(morph));
+            g_statEnchantOff.insert(std::move(enchOff));
+            g_statWeightOff.insert(std::move(weightOff));
+            g_statArmorOff.insert(std::move(armorOff));
+            g_hideShapes.insert(std::move(hideShapes));
+            g_contentShapes.insert(std::move(shapes));
+            g_showRealBody.insert(std::move(realBody));
+            g_contentEnchants.insert(std::move(enchants));
+            g_contentTemper.insert(std::move(temper));
+            SKSE::log::error("boxes: '{}' NOT removed from '{}' - the settings could not be "
+                             "saved, so it stays and nothing is handed back",
+                a_content, a_token);
+            return false;
+        }
+        SetTokenStats(g_boxes[idx]);  // recompute token armor/weight
         return true;
     }
 
-    bool RemoveBox(const std::string& a_token)
+    bool RemoveBox(const std::string& a_token, bool a_keepOnWriteFailure)
     {
         StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
         }
+        BoxDefInfo removed = std::move(g_boxes[idx]);
         g_boxes.erase(g_boxes.begin() + idx);  // caller detaches each content node
-        WriteJson();
+        if (!WriteJson() && a_keepOnWriteFailure) {
+            // Same rule as RemoveBoxContent (W12): the callers return the
+            // contents only on true, so the box has to still be there on false.
+            g_boxes.insert(g_boxes.begin() + idx, std::move(removed));
+            SKSE::log::error("boxes: box '{}' NOT deleted - the settings could not be saved, so "
+                             "it stays and nothing is handed back",
+                a_token);
+            return false;
+        }
         ResetTokenStats(a_token);  // freed token: clear its stat fields
         return true;
     }
