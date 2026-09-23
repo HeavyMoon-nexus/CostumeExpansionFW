@@ -1,5 +1,6 @@
 #include "BoxStore.h"
 #include "BodyMorph.h"
+#include "Cosave.h"  // UnresolvedActiveIds - carried actives are still held (C4)
 #include "SkinRebind.h"
 #include "PublishStore.h"
 #include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
@@ -5964,14 +5965,23 @@ namespace CostumeFW
 
         // Every content id something still holds. The sweep returns what is NOT
         // in here, so a forgotten source means handing back a costume that is
-        // still in use - all four are load-bearing:
-        //   box contents / persist catalog / PUBLISHED snapshots / NPC-persist.
-        // The last two are the easy ones to miss: their items sit in the same
-        // hidden store while an NPC wears them. NPC assignments must include the
+        // still in use - all of them are load-bearing:
+        //   box contents / persist catalog / this save's persist ACTIVES /
+        //   PUBLISHED snapshots / NPC-persist.
+        // The NPC ones are easy to miss: their items sit in the same hidden
+        // store while an NPC wears them. NPC assignments must include the
         // UNRESOLVED ones - at load the actor's cell usually is not loaded yet -
         // which is why this reads NprAssignmentsForSave() and not the live list.
-        // The persist CATALOG (not this save's active set) is deliberate: it is
-        // the wider set, and a wider held set can only mean returning less.
+        //
+        // The catalog is NOT a superset of the actives, which is what this used
+        // to assume. An entry another character took out of the catalog stays
+        // ACTIVE on a save that had it on (M2: "this save keeps showing it until
+        // deactivated"), and its original is in THIS save's store. Judged by the
+        // catalog alone it was an orphan: the sweep handed back the original
+        // while the costume went on showing, and Deactivate then minted a second
+        // one (review 2026-09-23 C4). So the actives count, and so do the actives
+        // the co-save carried unresolved - a costume whose plugin is off this
+        // session is still that save's, and would come back as a duplicate.
         //
         // Keyed by resolved FormID rather than colon-id string, so no spelling
         // difference between sources can make a held item look orphaned.
@@ -5989,6 +5999,12 @@ namespace CostumeFW
                 }
             }
             for (const auto& c : PersistContents()) {
+                add(c);
+            }
+            for (const auto& c : ActivePersistIds()) {
+                add(c);
+            }
+            for (const auto& c : UnresolvedActiveIds()) {
                 add(c);
             }
             for (const auto& snap : PublishedSnapshot()) {
@@ -6031,6 +6047,14 @@ namespace CostumeFW
             }
             for (const auto& c : PersistContents()) {
                 mark(c, "persist");
+            }
+            // After the catalog, so an entry in both keeps the plain label
+            // (emplace does not overwrite). See BuildHeldFormIds (C4).
+            for (const auto& c : ActivePersistIds()) {
+                mark(c, "persist (active on this save only)");
+            }
+            for (const auto& c : UnresolvedActiveIds()) {
+                mark(c, "persist (active on this save only)");
             }
             for (const auto& snap : PublishedSnapshot()) {
                 for (const auto& c : snap.contents) {
@@ -6667,6 +6691,17 @@ namespace CostumeFW
         if (std::any_of(g_persist.begin(), g_persist.end(), same)) {
             return "persist";
         }
+        // Active on this save without being in the catalog (M2) - still persist,
+        // and its original is in this save's store. Answering "nobody" let the
+        // Recovery page offer to recover it and a box capture take a second
+        // copy of a costume on display (review 2026-09-23 C4). Same sources as
+        // BuildHeldFormIds.
+        const auto actives = ActivePersistIds();
+        const auto carried = UnresolvedActiveIds();
+        if (std::any_of(actives.begin(), actives.end(), same) ||
+            std::any_of(carried.begin(), carried.end(), same)) {
+            return "persist";
+        }
         // Published costumes and NPC-persist assignments are OWNERS too (review
         // 2026-09-09 F03/F06/F08). Publish DELETES the source box, so before this
         // a published content answered "held by nobody" and the one-content-one-
@@ -6675,8 +6710,8 @@ namespace CostumeFW
         // silently dropped contents), and every ROOT E side-map guard below
         // refused to store its hide/gender/morph settings.
         //
-        // Same four sources as BuildHeldFormIds / BuildHolderLabels - the sweep,
-        // the Recovery list and this admission gate must agree on "held".
+        // Same sources as BuildHeldFormIds / BuildHolderLabels - the sweep, the
+        // Recovery list and this admission gate must agree on "held".
         // Sentinels, like "persist": not a token colon-id, so the existing
         // `holder != "persist"` / `holder != token` rejections all fire correctly.
         if (const int slot = PublishedSlotHolding(a_content); slot >= 0) {

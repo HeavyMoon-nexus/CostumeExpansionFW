@@ -328,6 +328,11 @@ namespace CostumeFW
         }
     }
 
+    std::vector<std::string> UnresolvedActiveIds()
+    {
+        return g_unresolvedActives;
+    }
+
     // NOT called when Config.h's HardDisabled() trips - SKSEPluginLoad returns
     // before it. That is deliberate (an inert plugin cannot be the thing that
     // crashes a save open), and it is also why saving while hard-disabled writes
