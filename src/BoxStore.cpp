@@ -6378,14 +6378,29 @@ namespace CostumeFW
             if (g_custody.size() <= kCustodyMax) {
                 return;
             }
-            // Over the cap: drop the oldest row. Stamps are sortable strings.
-            auto oldest = g_custody.begin();
+            // Over the cap: drop the oldest "held" row if there is one, else the
+            // oldest row. A "held" row is the history backfill's, and the next
+            // load writes it again for anything still held; "lost" and
+            // "returned-orphan" are written once, by the pass that saw it
+            // happen, and are the rows the Recovery page exists for - evicting
+            // by age alone dropped those first (review 2026-09-23 M6). The row
+            // just written is never the one that goes. Stamps are sortable.
+            auto victim = g_custody.end();
+            bool victimHeld = false;
             for (auto it = g_custody.begin(); it != g_custody.end(); ++it) {
-                if (it->second.when < oldest->second.when) {
-                    oldest = it;
+                if (it->first == a_id) {
+                    continue;
+                }
+                const bool held = it->second.event == "held";
+                if (victim == g_custody.end() || (held && !victimHeld) ||
+                    (held == victimHeld && it->second.when < victim->second.when)) {
+                    victim = it;
+                    victimHeld = held;
                 }
             }
-            g_custody.erase(oldest);
+            if (victim != g_custody.end()) {
+                g_custody.erase(victim);
+            }
         }
 
         // Every content id something still holds. The sweep returns what is NOT
