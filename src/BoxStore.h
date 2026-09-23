@@ -436,10 +436,11 @@ namespace CostumeFW
 
     // L2 deny-list (v1.3.2 Phase 2). Shipped defaults live in code (MARA's
     // "CORE Carrier" by NAME - a runtime form has no plugin to name, so the
-    // name entry is the effective one; the "MARA" plugin prefix is future-
-    // proofing). The json persists only the USER extension. Matching is
-    // case-insensitive; a name entry may end in '*' for a prefix match;
-    // plugin entries are filename prefixes; id entries are colon-ids.
+    // name entry is the effective one; the MARA.esp/esm/esl plugin names are
+    // future-proofing, matched whole - W7). The json persists only the USER
+    // extension. Matching is case-insensitive; a name entry may end in '*' for
+    // a prefix match; the user's plugin entries are filename prefixes; id
+    // entries are colon-ids.
     struct CaptureBlacklistView  // UI snapshot (defaults + user + switches)
     {
         std::vector<std::string> defaultNames;

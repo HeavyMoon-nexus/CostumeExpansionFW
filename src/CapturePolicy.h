@@ -28,7 +28,8 @@ namespace CostumeFW::policy
     struct CapturePolicy
     {
         std::vector<std::string> names;    // exact, or trailing '*' = prefix (CI)
-        std::vector<std::string> plugins;  // source-plugin filename prefix (CI)
+        std::vector<std::string> plugins;  // source-plugin filename PREFIX (CI) - the
+                                           // user's; the shipped ones are exact (W7)
         std::vector<std::string> ids;      // canonical colon-ids (CI)
         bool allowNonPlayable{ false };    // soft switch: show non-playable armors
         bool disableDefaults{ false };     // soft switch: shipped deny-list off
@@ -37,7 +38,8 @@ namespace CostumeFW::policy
     // Shipped L2 defaults, honored unless disableDefaults. Kept beside the
     // matcher so code and data cannot drift.
     const std::vector<std::string>& DefaultBlockNames();    // { "CORE Carrier" }
-    const std::vector<std::string>& DefaultBlockPlugins();  // { "MARA" }
+    // { "MARA.esp", "MARA.esm", "MARA.esl" } - whole names, matched exactly.
+    const std::vector<std::string>& DefaultBlockPlugins();
 
     // Case-insensitive string primitives (ASCII fold - plugin filenames and
     // the shipped names are ASCII; user entries match byte-CI like the rest

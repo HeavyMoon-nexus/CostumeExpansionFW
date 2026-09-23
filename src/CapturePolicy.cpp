@@ -21,8 +21,13 @@ namespace CostumeFW::policy
 
     const std::vector<std::string>& DefaultBlockPlugins()
     {
-        // Future-proofing for a hypothetical MARA.esp (prefix match).
-        static const std::vector<std::string> kPlugins = { "MARA" };
+        // Future-proofing for a hypothetical MARA plugin. Whole file names,
+        // matched EXACTLY (case aside): this used to be the prefix "MARA", which
+        // refused every item of every plugin whose name merely starts with
+        // "Mara" - "Marauder Armor.esp" - and quietly took their pieces already
+        // in boxes off the player and out of the stats (review 2026-09-23 W7).
+        // The user's own "plugins" entries stay prefixes.
+        static const std::vector<std::string> kPlugins = { "MARA.esp", "MARA.esm", "MARA.esl" };
         return kPlugins;
     }
 
@@ -72,8 +77,8 @@ namespace CostumeFW::policy
             return false;
         }
         if (!a_policy.disableDefaults) {
-            for (const auto& prefix : DefaultBlockPlugins()) {
-                if (PrefixCI(a_filename, prefix)) {
+            for (const auto& name : DefaultBlockPlugins()) {
+                if (EqualsCI(a_filename, name)) {  // exact (W7)
                     return true;
                 }
             }

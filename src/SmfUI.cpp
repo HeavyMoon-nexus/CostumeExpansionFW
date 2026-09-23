@@ -2012,7 +2012,8 @@ namespace CostumeFW::SmfUI
                 ImGui::Text(view.disableDefaults ? "name: %s (off)" : "name: %s", name.c_str());
             }
             for (const auto& plugin : view.defaultPlugins) {
-                ImGui::Text(view.disableDefaults ? "plugin: %s* (off)" : "plugin: %s*",
+                // Whole names, not prefixes (W7) - so no trailing '*'.
+                ImGui::Text(view.disableDefaults ? "plugin: %s (off)" : "plugin: %s",
                     plugin.c_str());
             }
 

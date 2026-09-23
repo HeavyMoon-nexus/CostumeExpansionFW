@@ -288,8 +288,10 @@ int main()
     pol.disableDefaults = false;
 
     // --- Policy: plugins ----------------------------------------------------
-    CHECK(PluginDenied(pol, "MARA.esp"));           // shipped default (prefix)
-    CHECK(PluginDenied(pol, "mara_extra.esl"));     // CI prefix
+    CHECK(PluginDenied(pol, "MARA.esp"));           // shipped default (exact)
+    CHECK(PluginDenied(pol, "mara.ESL"));           // ...without case (W7)
+    CHECK(!PluginDenied(pol, "Marauder.esp"));      // ...and NOT a prefix any more (W7)
+    CHECK(!PluginDenied(pol, "mara_extra.esl"));
     CHECK(!PluginDenied(pol, "Skyrim.esm"));
     CHECK(!PluginDenied(pol, ""));                  // no filename = not plugin-denied
     pol.plugins.push_back("BadMod");
@@ -381,7 +383,10 @@ int main()
 
     // --- Shipped defaults are what the docs claim ----------------------------
     CHECK(DefaultBlockNames().size() == 1 && DefaultBlockNames()[0] == "CORE Carrier");
-    CHECK(DefaultBlockPlugins().size() == 1 && DefaultBlockPlugins()[0] == "MARA");
+    CHECK(DefaultBlockPlugins().size() == 3 && DefaultBlockPlugins()[0] == "MARA.esp" &&
+          DefaultBlockPlugins()[1] == "MARA.esm" && DefaultBlockPlugins()[2] == "MARA.esl");
+    // A user entry is still a prefix: "BadMod" was added above.
+    CHECK(PluginDenied(pol, "BadMod_Extra.esp"));
 
     TokenIdentityChecks();
     Utf8Checks();
