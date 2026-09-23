@@ -456,6 +456,15 @@ namespace
                 // both need this save's restored store id, and the sweep's held
                 // set needs the publish / NPC-persist state the co-save restored.
                 CostumeFW::SweepOrphanedStoredItems();
+                // Which listed ids have no item behind them (review 2026-09-23
+                // C2). Before the backfill below: it reads which ids have no
+                // custody row yet, and the backfill gives every one of them a
+                // row. Before ReapplyBoxes / ApplyBoxAbilities, which leave the
+                // listed-only ids out of the stats; a published costume's token
+                // is stamped elsewhere, so it gets restamped here.
+                if (CostumeFW::ReconcileRefOnly() > 0) {
+                    CostumeFW::StampAllPublishTokens();
+                }
                 // Then give anything still held a custody row if it has none, so
                 // the Recovery list covers items captured before the history
                 // existed. After the sweep: what it just returned is no longer

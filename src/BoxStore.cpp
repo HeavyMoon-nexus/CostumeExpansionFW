@@ -123,6 +123,60 @@ namespace CostumeFW
         std::unordered_map<std::string, CustodyLogEntry> g_custody;
         constexpr std::size_t kCustodyMax = 256;
 
+        // "Reference only": content ids a PRESET put into a box or persist that
+        // CEF never took an item for (review 2026-09-23 C2). A preset lists ids;
+        // it hands over nothing. Everything that returns items used to treat a
+        // listed id like a captured one - store first, else mint a copy - so
+        // assigning any preset and taking its pieces out made every piece, again
+        // and again. Ids here are never minted (policy::DecideReturn) and pay no
+        // stats (StatAdmittedContents, decision D1) until the real item is
+        // captured, which takes the id out. Global like the definitions it
+        // qualifies. Not pruned: it only grows by what presets list, and an id
+        // that leaves every definition costs a few bytes.
+        //
+        // Keyed by RefKey, valued by the id as the definition spells it: the
+        // stat filter asks on every equip, and W26's "same record, other
+        // spelling" has to be an exact lookup there, not a scan.
+        std::map<std::string, std::string> g_refOnly;
+        // The one-time pass that marks assignments made before 1.6.4.1 has run
+        // (see ReconcileRefOnly).
+        bool g_refOnlyChecked = false;
+
+        // One key per record, whatever the spelling - the rule SameColonId
+        // compares by: the local id as a number, the plugin without case.
+        std::string RefKey(std::string_view a_id)
+        {
+            const auto lower = [](std::string a_s) {
+                for (auto& ch : a_s) {
+                    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
+                return a_s;
+            };
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (policy::ParseColonId(a_id, local, plugin)) {
+                return policy::FormatColonId(local, lower(std::move(plugin)));
+            }
+            return lower(std::string(a_id));
+        }
+
+        bool RefOnlyHas(const std::string& a_id)
+        {
+            return !a_id.empty() && g_refOnly.contains(RefKey(a_id));
+        }
+
+        // Whether it was new.
+        bool RefOnlyInsert(const std::string& a_id)
+        {
+            return !a_id.empty() && g_refOnly.emplace(RefKey(a_id), a_id).second;
+        }
+
+        // Whether anything was taken out.
+        bool RefOnlyErase(const std::string& a_id)
+        {
+            return !a_id.empty() && g_refOnly.erase(RefKey(a_id)) > 0;
+        }
+
         // Persist content (colon-form ARMA ids): always-injected, token-less. Phase 1
         // stores + injects these; worn-capture UI and seed retirement come in the MCM
         // rework (the capture flow mirrors a box but with no token gate).
@@ -477,6 +531,14 @@ namespace CostumeFW
                 custody[id] = { { "name", e.name }, { "event", e.event }, { "when", e.when } };
             }
             doc["custodyLog"] = std::move(custody);
+            {
+                auto refs = nlohmann::json::array();
+                for (const auto& [key, id] : g_refOnly) {  // key order: stable file
+                    refs.push_back(id);
+                }
+                doc["refOnly"] = std::move(refs);
+            }
+            doc["refOnlyChecked"] = g_refOnlyChecked;
             EmitPublishJson(doc);
 
             // dump() does not write text that is not UTF-8 - it THROWS
@@ -1609,6 +1671,8 @@ namespace CostumeFW
         g_persistPreset.clear();
         g_persistPresetName.clear();
         g_custody.clear();
+        g_refOnly.clear();
+        g_refOnlyChecked = false;
         PublishPolicy({});
         g_cefEnabled = true;
         g_settingsLoadOk = false;  // set only on the clean path below
@@ -1627,6 +1691,11 @@ namespace CostumeFW
                 // still holds a full store is the case we know LEAST about, and
                 // an empty held set there would hand back everything at once.
                 SKSE::log::info("settings: no {} (no settings yet)", kSettingsPath);
+                // Nothing here predates the reference-only set, so its one-time
+                // pass has nothing to look at - and running it later would read
+                // this install's first MCM captures (they get a custody row only
+                // at the next load) as items nobody ever held.
+                g_refOnlyChecked = true;
                 return;
             }
             SKSE::log::info("settings: migrating legacy {} -> {}", kOldBoxesPath, kSettingsPath);
@@ -2052,6 +2121,15 @@ namespace CostumeFW
             ev.when = it.value().value("when", std::string{});
             g_custody[std::move(key)] = std::move(ev);
         }
+        for (const auto& e : JsonArray(doc, "refOnly")) {
+            if (!e.is_string()) {
+                continue;
+            }
+            std::string id = e.get<std::string>();
+            healed |= CanonicalizeColonId(id);
+            RefOnlyInsert(id);
+        }
+        g_refOnlyChecked = JsonBool(doc, "refOnlyChecked", false);
         ParsePublishJson(doc);
         } catch (const std::exception& e) {
             // ROOT B: a wrong-typed field threw mid-extraction. Discard the partial
@@ -2080,6 +2158,8 @@ namespace CostumeFW
             g_persistPreset.clear();
             g_persistPresetName.clear();
             g_custody.clear();
+            g_refOnly.clear();
+            g_refOnlyChecked = false;
             DropPublishedSnapshots();
             PublishPolicy({});
             g_cefEnabled = true;
@@ -2518,9 +2598,19 @@ namespace CostumeFW
         // Case-blind like ContentHolder (W26): a second spelling of the same
         // plugin is the same item, and a second catalog row for it would be a
         // second registry entry drawing it twice.
+        // A preset-listed entry is the exception (C2): it is active with no item
+        // behind it, and capturing the real one is how it gets its original -
+        // so that succeeds instead, adding nothing. The capture that follows
+        // takes the mark off.
+        const bool backing = RefOnlyHas(content);
         for (const auto& it : ActiveSnapshot()) {
             if (it.tokenId.empty() && policy::SameColonId(it.id, content)) {
-                return false;
+                if (!backing) {
+                    return false;
+                }
+                SKSE::log::info("persist: '{}' backs the preset-listed entry with a real item",
+                    content);
+                break;
             }
         }
         if (std::none_of(g_persist.begin(), g_persist.end(),
@@ -2805,6 +2895,17 @@ namespace CostumeFW
                 g_nonUtf8Mesh.size()));
             for (const auto& id : g_nonUtf8Mesh) {
                 out.push_back("  " + EnsureUtf8(id));
+            }
+        }
+        // Same rule. The question this answers is "why does this piece give no
+        // stats, and why did taking it out give me nothing" (C2 / D1).
+        if (!g_refOnly.empty()) {
+            out.push_back("# Listed by a preset only");
+            out.push_back(std::format(
+                "{} item(s): shown, no stats, never recreated - capture the real item to back one",
+                g_refOnly.size()));
+            for (const auto& [key, id] : g_refOnly) {
+                out.push_back(std::format("  {}  {}", id, ItemDisplayName(id)));
             }
         }
         const auto npc = NpcDiagLines();
@@ -3241,11 +3342,22 @@ namespace CostumeFW
         std::vector<std::string> out;
         out.reserve(a_ids.size());
         for (const auto& id : a_ids) {
+            // D1: listed by a preset, never captured - it looks the part and is
+            // worth nothing until the real item backs it.
+            if (RefOnlyHas(id)) {
+                continue;
+            }
             if (IsContentAdmissible(id, *pol, nullptr, false)) {
                 out.push_back(id);
             }
         }
         return out;
+    }
+
+    bool IsRefOnly(const std::string& a_id)
+    {
+        StoreLock lk;
+        return RefOnlyHas(a_id);
     }
 
     namespace
@@ -5228,6 +5340,7 @@ namespace CostumeFW
         float temper = 1.0f;
         float carriedTemper = 1.0f;
         bool sawWorn = false;
+        bool owned = false;  // the player really has one to capture
         // Target-only filter (review P1-2): the old Armor-wide filter made
         // GetInventory copy EVERY armor's InventoryEntryData - capturing a
         // perfectly safe item still copied a foreign runtime item's hostile
@@ -5244,6 +5357,7 @@ namespace CostumeFW
             if (count <= 0 || !entry) {
                 continue;
             }
+            owned = true;
             if (entry->IsWorn()) {
                 ench = entry->GetEnchantment();
                 temper = EntryTemperMult(entry.get());
@@ -5260,6 +5374,16 @@ namespace CostumeFW
         }
         if (!sawWorn) {
             temper = carriedTemper;
+        }
+        // Both UIs' captures pass through here with the item still on the
+        // player - the MCM moves it with Papyrus afterwards, so this is the one
+        // point every capture shares. A preset-listed id that the user now
+        // captures for real stops being reference-only: it gets its stats, and
+        // a later take-out returns this item (C2). Only when the player has
+        // one - an external call naming an item nobody owns must not lift it.
+        if (owned && RefOnlyErase(a_content)) {
+            SKSE::log::info("capture: '{}' was listed by a preset only - it has its original now",
+                a_content);
         }
         std::vector<EnchEffect> effs;
         if (ench) {
@@ -5585,6 +5709,60 @@ namespace CostumeFW
     // SMF reads it while drawing the uninstall dialog.
     static std::atomic<bool> g_uninstallRan{ false };
 
+    namespace
+    {
+        // This save's hidden store, or null when it has none or it no longer
+        // resolves. Caller holds StoreLock.
+        RE::TESObjectREFR* CurrentStore()
+        {
+            auto* form = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+            return form ? form->As<RE::TESObjectREFR>() : nullptr;
+        }
+
+        // FormIDs of everything this save's store holds: one inventory walk
+        // answers "is it in storage?" for a whole list of ids.
+        std::unordered_set<RE::FormID> StoreHeldFormIds()
+        {
+            std::unordered_set<RE::FormID> out;
+            if (auto* store = CurrentStore()) {
+                for (const auto& [obj, count] : store->GetInventoryCounts()) {
+                    if (obj && count > 0) {
+                        out.insert(obj->GetFormID());
+                    }
+                }
+            }
+            return out;
+        }
+
+        // A preset assignment is the one way an id enters a definition without
+        // an item (C2). Marks what the assignment brings in that the definition
+        // did not list before and this save's store does not hold. An id the
+        // definition already had keeps whatever it was: a real capture - on this
+        // character or another - stays real. Returns how many were marked.
+        int MarkRefOnlyFromPreset(const std::vector<std::string>& a_incoming,
+            const std::vector<std::string>& a_before)
+        {
+            const auto held = StoreHeldFormIds();
+            int marked = 0;
+            for (const auto& c : a_incoming) {
+                const bool had = std::any_of(a_before.begin(), a_before.end(),
+                    [&c](const std::string& a_id) { return policy::SameColonId(a_id, c); });
+                if (had) {
+                    continue;
+                }
+                if (const std::uint32_t formId = ResolveFormId(c); formId && held.contains(formId)) {
+                    continue;  // its original is right here
+                }
+                std::string id = c;
+                CanonicalizeColonId(id);
+                if (RefOnlyInsert(id)) {
+                    ++marked;
+                }
+            }
+            return marked;
+        }
+    }
+
     void SetStoreRef(RE::TESObjectREFR* a_store)
     {
         StoreLock lk;
@@ -5630,10 +5808,11 @@ namespace CostumeFW
         g_uninstallRan.store(a_ran, std::memory_order_relaxed);
     }
 
-    bool MayRecreate(const std::string&, RecreateContext a_ctx)
+    bool MayRecreate(const std::string& a_id, RecreateContext a_ctx)
     {
         StoreLock lk;
-        return policy::DecideReturn(false, true, false, a_ctx == RecreateContext::kUninstall,
+        return policy::DecideReturn(false, true, RefOnlyHas(a_id),
+                   a_ctx == RecreateContext::kUninstall,
                    UninstallRanOnThisSave()) == policy::ReturnAction::kRecreate;
     }
 
@@ -5705,6 +5884,11 @@ namespace CostumeFW
         // guaranteed to be recorded somewhere the user can reach later: if the
         // box entry is rolled back away, the row is all that is left of it.
         RecordCustody(a_id, "captured");
+        // CaptureEnchant normally took the mark off already; this covers a
+        // caller that moves the item without snapshotting it first (C2).
+        if (RefOnlyErase(a_id)) {
+            SKSE::log::info("custody: '{}' now has its original - no longer reference-only", a_id);
+        }
         return true;
     }
 
@@ -5759,9 +5943,12 @@ namespace CostumeFW
     }
 
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate, bool* a_wasRecreated,
-        RecreateContext a_ctx)
+        RecreateContext a_ctx, bool* a_wasRefOnly)
     {
         StoreLock lk;
+        if (a_wasRefOnly) {
+            *a_wasRefOnly = false;
+        }
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_id);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -5771,8 +5958,7 @@ namespace CostumeFW
         }
         // Prefer the captured original in the hidden store (keeps tempering /
         // player-enchant instance data), exactly like the MCM's ReturnItem.
-        auto* sform = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
-        auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr;
+        auto* store = CurrentStore();
         bool inStore = false;
         if (store) {
             const auto counts = store->GetInventoryCounts();
@@ -5780,7 +5966,8 @@ namespace CostumeFW
             inStore = it != counts.end() && it->second > 0;
         }
         const bool uninstall = a_ctx == RecreateContext::kUninstall;
-        switch (policy::DecideReturn(inStore, a_fabricate, false, uninstall,
+        const bool refOnly = RefOnlyHas(a_id);
+        switch (policy::DecideReturn(inStore, a_fabricate, refOnly, uninstall,
             UninstallRanOnThisSave())) {
         case policy::ReturnAction::kFromStore:
             store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
@@ -5805,8 +5992,23 @@ namespace CostumeFW
             SKSE::log::info("custody: '{}' is not in storage and this save was already prepared "
                             "for uninstall - not recreated",
                 a_id);
+        } else if (a_fabricate && refOnly) {
+            SKSE::log::info("custody: '{}' was only listed by a preset - no item to hand back, "
+                            "none made",
+                a_id);
+            if (a_wasRefOnly) {
+                *a_wasRefOnly = true;
+            }
         }
         return false;
+    }
+
+    void NotifyRefOnlyReturn(const std::string& a_id)
+    {
+        RE::DebugNotification(std::format("CostumeFW: {} was only listed by a preset - there was "
+                                          "no item to hand back.",
+            ItemDisplayName(a_id))
+                .c_str());
     }
 
     bool RecoverContentItem(const std::string& a_id)
@@ -5815,7 +6017,8 @@ namespace CostumeFW
         // ROOT A ([2279]): drain the store first, fabricate only on a store miss -
         // so recovering a still-stored item no longer mints a second copy.
         bool recreated = false;
-        if (ReturnStoredItem(a_id, true, &recreated)) {
+        bool refOnly = false;
+        if (ReturnStoredItem(a_id, true, &recreated, RecreateContext::kNormal, &refOnly)) {
             SKSE::log::info("recover: granted 1x '{}' ({}, {})", ItemDisplayName(a_id), a_id,
                 recreated ? "plain copy - the original was not in storage" : "the captured original");
             // Say WHICH it was. A recreated copy has no tempering and no player
@@ -5829,6 +6032,13 @@ namespace CostumeFW
             );
             WriteJson(false);  // console / Recovery UI callers do not persist otherwise
             return true;
+        }
+        if (refOnly) {
+            // Recovery exists for items that went missing; a preset-listed id
+            // never had one to go missing (C2).
+            SKSE::log::info("recover: '{}' was only listed by a preset - nothing to recover", a_id);
+            NotifyRefOnlyReturn(a_id);
+            return false;
         }
         SKSE::log::warn("recover: '{}' does not resolve to an inventory item", a_id);
         return false;
@@ -6261,6 +6471,103 @@ namespace CostumeFW
         }
         return lost;
     }
+    int ReconcileRefOnly()
+    {
+        StoreLock lk;
+        if (!g_settingsLoadOk) {
+            return 0;  // the definitions in memory are not the user's this session
+        }
+        const auto held = StoreHeldFormIds();
+        int changes = 0;
+
+        // Heal. An original in this save's store got there by being captured,
+        // whatever the set says - and the pass below is a judgement from
+        // incomplete evidence, so a mark that meets the real item goes.
+        for (auto it = g_refOnly.begin(); it != g_refOnly.end();) {
+            const std::uint32_t formId = ResolveFormId(it->second);
+            if (formId && held.contains(formId)) {
+                SKSE::log::info("custody: '{}' has its original in this save's storage - no "
+                                "longer reference-only",
+                    it->second);
+                it = g_refOnly.erase(it);
+                ++changes;
+            } else {
+                ++it;
+            }
+        }
+
+        // Once per install: the assignments made before the set existed. There
+        // is no record of which entries a preset brought in, so this reads the
+        // custody log for a sign that an original was ever held:
+        //   - no row at all: CEF never saw a capture, a return or a loss of it.
+        //     Only trusted while the log has never been full - past its cap the
+        //     oldest rows were dropped, and a real capture can have lost its row.
+        //   - a row that says only "held" or "recreated": "held" is the history
+        //     backfill, written for everything a definition names whether or not
+        //     an item stood behind it, and "recreated" is exactly the minted copy
+        //     C2 is about. Neither proves an original, so they count only where a
+        //     preset fed the definition.
+        // Runs BEFORE this load's BackfillCustodyRows, which would give every
+        // unrecorded id a "held" row and erase the first signal. (The review
+        // placed it after, where its "no row" condition can never be true.)
+        //
+        // A wrong mark costs the convenience copy and the stats of an item that
+        // exists on another character, until the load that finds it in storage
+        // heals it - and it never costs an original, since store-first wins.
+        int marked = 0;
+        if (!g_refOnlyChecked) {
+            const bool rowsComplete = g_custody.size() < kCustodyMax;
+            const auto rowFor = [](const std::string& a_id) -> const CustodyLogEntry* {
+                if (const auto it = g_custody.find(a_id); it != g_custody.end()) {
+                    return &it->second;
+                }
+                for (const auto& [id, row] : g_custody) {
+                    if (policy::SameColonId(id, a_id)) {
+                        return &row;
+                    }
+                }
+                return nullptr;
+            };
+            const auto consider = [&](const std::string& a_id, bool a_presetFed) {
+                const std::uint32_t formId = ResolveFormId(a_id);
+                // Unresolvable this session: its plugin is off, and the store
+                // cannot be asked about it. Left alone.
+                if (!formId || held.contains(formId) || RefOnlyHas(a_id)) {
+                    return;
+                }
+                const CustodyLogEntry* row = rowFor(a_id);
+                const bool noProof = row && (row->event == "held" || row->event == "recreated");
+                if ((!row && rowsComplete) || (noProof && a_presetFed)) {
+                    std::string id = a_id;
+                    CanonicalizeColonId(id);
+                    RefOnlyInsert(id);
+                    ++marked;
+                    SKSE::log::info("custody: '{}' marked reference-only ({})", a_id,
+                        row ? "a preset fed it and its history shows no original" : "no history");
+                }
+            };
+            for (const auto& b : g_boxes) {
+                const bool fed = !b.preset.empty() || !b.presetName.empty();
+                for (const auto& c : b.contents) {
+                    consider(c, fed);
+                }
+            }
+            const bool persistFed = !g_persistPreset.empty() || !g_persistPresetName.empty();
+            for (const auto& c : g_persist) {
+                consider(c, persistFed);
+            }
+            g_refOnlyChecked = true;
+            changes += marked + 1;  // the flag itself has to reach the file
+            SKSE::log::info("custody: one-time check of existing box and persist entries - {} "
+                            "marked as listed by a preset only{}",
+                marked, rowsComplete ? "" : " (custody log was full: rowless ids left alone)");
+        }
+        if (changes > 0) {
+            WriteJson(false);  // stats move, the carrier manifest does not
+        }
+        return changes;
+    }
+
     int BackfillCustodyRows()
     {
         StoreLock lk;
@@ -6858,14 +7165,26 @@ namespace CostumeFW
                     [&content](const std::string& a_id) {
                         return policy::SameColonId(a_id, content);  // W26: case-blind
                     })) {
-                // Duplicate: report failure so the MCM capture flow does NOT move
-                // the physical item into the store (a swallowed extra copy could
-                // never be returned - review A-2 / CEF_STATE_SCOPE.md §4).
-                SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", content, token);
-                return false;
+                if (!RefOnlyHas(content)) {
+                    // Duplicate: report failure so the MCM capture flow does NOT
+                    // move the physical item into the store (a swallowed extra
+                    // copy could never be returned - review A-2 /
+                    // CEF_STATE_SCOPE.md §4).
+                    SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", content, token);
+                    return false;
+                }
+                // Listed by a preset, never captured: the entry has no item
+                // behind it, so this one becomes its original. Succeed without
+                // a second entry - refusing left the real item with the player
+                // and no way to put it behind the entry (C2). The capture that
+                // follows takes the mark off.
+                SKSE::log::info("boxes: AddBox '{}' backs the preset-listed entry in '{}' "
+                                "with a real item",
+                    content, token);
+            } else {
+                box.contents.push_back(content);  // caller registers + reconciles
+                tookContent = true;
             }
-            box.contents.push_back(content);  // caller registers + reconciles
-            tookContent = true;
         }
 
         // The settings are the record of what just happened. If they did not
@@ -6979,6 +7298,11 @@ namespace CostumeFW
         auto* armo = ResolveArmo(a_id);
         if (!armo) {
             return "(unresolved)";
+        }
+        // D1 (review 2026-09-23 C2): the toggles below do nothing for it, so
+        // listing what they would be worth would only mislead.
+        if (RefOnlyHas(a_id)) {
+            return "listed by a preset only - no stats until you capture the real item";
         }
         std::string enchants;
         const auto appendEffect = [&enchants](RE::EffectSetting* a_mgef, float a_mag) {
@@ -7306,12 +7630,15 @@ namespace CostumeFW
                 return false;
             }
         }
+        // A preset lists ids and hands over nothing (C2) - see g_refOnly.
+        const int listedOnly = MarkRefOnlyFromPreset(a_contents, g_persist);
         g_persist = a_contents;  // persist mirrors the preset's contents
         g_persistPreset = a_file;
         g_persistPresetName = a_presetName;
         WriteJson();
-        SKSE::log::info("preset: assigned '{}' to persist ({} content)",
-            a_presetName, a_contents.size());
+        SKSE::log::info("preset: assigned '{}' to persist ({} content, {} listed only - no item "
+                        "held for them)",
+            a_presetName, a_contents.size(), listedOnly);
         return true;
     }
 
@@ -7372,13 +7699,16 @@ namespace CostumeFW
                 return false;
             }
         }
+        // A preset lists ids and hands over nothing (C2) - see g_refOnly.
+        const int listedOnly = MarkRefOnlyFromPreset(a_contents, g_boxes[idx].contents);
         g_boxes[idx].preset = a_file;
         g_boxes[idx].presetName = a_presetName;
         g_boxes[idx].contents = a_contents;  // box mirrors the preset's contents
         WriteJson();
         SetTokenStats(g_boxes[idx]);  // recompute token armor/weight/keywords for new contents
-        SKSE::log::info("preset: assigned '{}' to box {} ({} content)",
-            a_presetName, a_token, a_contents.size());
+        SKSE::log::info("preset: assigned '{}' to box {} ({} content, {} listed only - no item "
+                        "held for them)",
+            a_presetName, a_token, a_contents.size(), listedOnly);
         return true;
     }
 

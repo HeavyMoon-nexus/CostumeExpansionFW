@@ -480,9 +480,15 @@ namespace CostumeFW::SmfUI
                         return;
                     }
                     bool recreated = false;
-                    if (ReturnStoredItem(id, true, &recreated) && recreated) {
-                        RE::DebugNotification(
-                            "CostumeFW: returned as a new copy (none stored on this character)");
+                    bool refOnly = false;
+                    if (ReturnStoredItem(id, true, &recreated, RecreateContext::kNormal,
+                            &refOnly)) {
+                        if (recreated) {
+                            RE::DebugNotification("CostumeFW: returned as a new copy (none stored "
+                                                  "on this character)");
+                        }
+                    } else if (refOnly) {
+                        NotifyRefOnlyReturn(id);  // C2: a preset listed it, nothing was held
                     }
                 });
                 a_selection.clear();
@@ -1092,9 +1098,15 @@ namespace CostumeFW::SmfUI
                     const bool wasActive = act;
                     SKSE::GetTaskInterface()->AddTask([rid, wasActive] {
                         bool recreated = false;
-                        if (ReturnStoredItem(rid, wasActive, &recreated) && recreated) {
-                            RE::DebugNotification(
-                                "CostumeFW: returned as a new copy (none stored on this character)");
+                        bool refOnly = false;
+                        if (ReturnStoredItem(rid, wasActive, &recreated, RecreateContext::kNormal,
+                                &refOnly)) {
+                            if (recreated) {
+                                RE::DebugNotification("CostumeFW: returned as a new copy (none "
+                                                      "stored on this character)");
+                            }
+                        } else if (refOnly) {
+                            NotifyRefOnlyReturn(rid);  // C2
                         }
                         if (wasActive) {
                             UiOps::SetPersistActive(rid, false);
@@ -1120,7 +1132,12 @@ namespace CostumeFW::SmfUI
                             // still active at execution time.
                             const auto now = PersistActiveIds();
                             if (std::find(now.begin(), now.end(), rid) != now.end()) {
-                                ReturnStoredItem(rid, true);
+                                bool refOnly = false;
+                                if (!ReturnStoredItem(rid, true, nullptr, RecreateContext::kNormal,
+                                        &refOnly) &&
+                                    refOnly) {
+                                    NotifyRefOnlyReturn(rid);  // C2
+                                }
                                 UiOps::SetPersistActive(rid, false);
                             }
                         });

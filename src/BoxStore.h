@@ -390,8 +390,24 @@ namespace CostumeFW
     //   - a published costume's stats skipped admission entirely, so a
     //     blacklisted item still counted (F04)
     // Stats follow the fact that the item is held; the model follows whether it
-    // can be drawn. Caller holds StoreLock.
+    // can be drawn. So an id a preset only LISTED is left out too (decision D1,
+    // review 2026-09-23 C2): assigning a preset would otherwise hand out the
+    // armour and enchantments of equipment nobody owns. It shows; capturing the
+    // real item makes it pay. Caller holds StoreLock.
     std::vector<std::string> StatAdmittedContents(const std::vector<std::string>& a_ids);
+
+    // Whether a_id is only listed - a preset put it into a box or persist and
+    // CEF never took an item for it (review 2026-09-23 C2). Main thread / any
+    // thread holding StoreLock.
+    bool IsRefOnly(const std::string& a_id);
+
+    // Load-time upkeep of the reference-only set. Heals: an id whose original
+    // sits in this save's store was captured, whatever the set says. Marks, once
+    // per install: box and persist entries that predate the set and show no sign
+    // of an original ever being held. Returns how much changed (0 = nothing, so
+    // no stat can have moved). Post-load main thread, after the orphan sweep and
+    // BEFORE BackfillCustodyRows (it reads which ids have no custody row yet).
+    int ReconcileRefOnly();
     // The semantic capture gate: IsContentAdmissible + mesh resolvability
     // (CanResolveContent). Every capture entrance funnels here - MCM (via the
     // CanResolveContent native), SMF QueueCapture*, preset Validate, and the
@@ -591,8 +607,8 @@ namespace CostumeFW
 
     // May CEF mint a plain copy of a_id when this save's store does not hold it?
     // No once an uninstall pass ran on this save and another is asking, and no
-    // for an id a preset only listed (R6) - both would hand out an item that
-    // already went back, or never existed on this character. The rule itself is
+    // for an id a preset only listed (IsRefOnly) - both would hand out an item
+    // that already went back, or never existed at all. The rule itself is
     // policy::DecideReturn; this feeds it the live state. Main thread.
     bool MayRecreate(const std::string& a_id, RecreateContext a_ctx);
 
@@ -612,8 +628,17 @@ namespace CostumeFW
     // store did not have it and a plain copy was minted instead. Only the
     // single-item user paths tell the player about it; the bulk return loops
     // (uninstall, catalog removal) would turn that into a wall of pop-ups.
+    // a_wasRefOnly (optional) is set when a copy was asked for and refused
+    // because a preset only listed the id - there was never an item to give
+    // back, and the single-item paths say so (review 2026-09-23 C2).
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate,
-        bool* a_wasRecreated = nullptr, RecreateContext a_ctx = RecreateContext::kNormal);
+        bool* a_wasRecreated = nullptr, RecreateContext a_ctx = RecreateContext::kNormal,
+        bool* a_wasRefOnly = nullptr);
+
+    // The notice for a take-out that had nothing to hand back because a preset
+    // only listed the id (review 2026-09-23 C2, N4). One wording for every UI;
+    // the single-item paths show it, the bulk loops only log. Main thread.
+    void NotifyRefOnlyReturn(const std::string& a_id);
 
     // --- SMF-era custody (P2): the native layer OWNS the hidden store ---------
     // The store FormID is co-save persisted ('STOR'), so an SMF-only session can
