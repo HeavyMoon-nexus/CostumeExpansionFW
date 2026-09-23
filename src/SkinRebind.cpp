@@ -2799,6 +2799,22 @@ namespace CostumeFW
             a_out3p = ModelRef{ nif3p, m3 };
             const char* nif1p = m1->model.c_str();
             a_out1p = (nif1p && *nif1p) ? ModelRef{ nif1p, m1 } : a_out3p;
+            // The gate above only looked at the 3P model, and the 1P one is a
+            // separate file - an SE-converted costume can still ship an LE
+            // first-person mesh, which went straight into the first-person
+            // skeleton (review 2026-09-23 W18). Not a refusal: the 3P model
+            // passed, so first person shows that one instead.
+            if (a_out1p.nifPath != a_out3p.nifPath) {
+                if (const std::string legacy1p = LegacyNifReasonFor(a_out1p.nifPath);
+                    !legacy1p.empty()) {
+                    if (a_log) {
+                        SKSE::log::warn("ResolveArma: {:X}:{} first-person model is not usable - "
+                                        "{}; first person shows the third-person model",
+                            a_localID, a_plugin, legacy1p);
+                    }
+                    a_out1p = a_out3p;
+                }
+            }
             return true;
         }
 
