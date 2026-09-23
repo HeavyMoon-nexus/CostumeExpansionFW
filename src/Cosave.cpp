@@ -241,6 +241,12 @@ namespace CostumeFW
                         if (a_intfc->ReadRecordData(slot) != sizeof(slot) ||
                             a_intfc->ReadRecordData(saved) != sizeof(saved) ||
                             a_intfc->ReadRecordData(flags) != sizeof(flags)) break;
+                        // Unresolved: kept for this session only - it blocks
+                        // Unpublish for the slot - and not written back. SKSE
+                        // reads a raw FormID through the plugin list of the
+                        // save that wrote it, and a save made without the
+                        // plugin has a different list: the value would land on
+                        // an unrelated NPC next time (review 2026-09-23 C5).
                         if (a_intfc->ResolveFormID(saved, resolved) && resolved)
                             RestorePubBinding(slot, resolved, flags);
                         else
@@ -277,6 +283,10 @@ namespace CostumeFW
                             contents.push_back(std::move(id));
                         }
                         if (!valid) break;
+                        // Unresolved: session-only, like PUBB above (C5). It
+                        // keeps its pool slot and its items held until the
+                        // next save drops it; the load after that returns the
+                        // items through the orphan sweep.
                         if (a_intfc->ResolveFormID(saved, resolved) && resolved) {
                             auto* form = RE::TESForm::LookupByID(resolved);
                             auto* actor = form ? form->As<RE::Actor>() : nullptr;
@@ -328,6 +338,9 @@ namespace CostumeFW
                 Reconcile();
                 SyncPersistManifest();
                 ReapplyNpcBindings();
+                // The next save releases NPC records whose plugin is missing
+                // (C5) - said once, now, while not saving is still an option.
+                ReportUnresolvedNpcRecords();
                 // After the reconcile, so the report is not competing with the
                 // load for the notification area.
                 abilities::ReportLegacySave(prePoolSave);

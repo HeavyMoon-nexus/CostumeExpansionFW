@@ -179,8 +179,10 @@ namespace CostumeFW
     // also what stops UnpublishToBox dissolving a costume somebody still has
     // (review 2026-09-11 F07).
     //
-    // a_forgetUnreachable is for the uninstall flow only, where a record that
-    // would ride the next co-save is worse than a forgotten one.
+    // a_forgetUnreachable is for the uninstall flow only, where a live binding
+    // that would ride the next co-save is worse than a forgotten one.
+    // (Unresolved bindings never ride it since review 2026-09-23 C5 - they live
+    // for the session, as the Unpublish guard.)
     bool RecallPublished(int a_slot, bool a_forgetUnreachable = false);
     bool PubHidden(int a_slot);
     bool UnpublishToBox(int a_slot);
@@ -222,22 +224,54 @@ namespace CostumeFW
     void OnNpcActorLoaded(RE::ActorHandle a_handle);
     std::vector<NprAssignmentInfo> NprAssignmentsSnapshot();
 
+    // What the co-save writes: the assignments whose actor resolved on THIS
+    // load. The unresolved ones are NOT written (review 2026-09-23 C5): SKSE
+    // re-reads a raw FormID through the plugin list of the save that wrote it,
+    // and that list no longer has the missing plugin - so a value carried
+    // across a save lands, on the next load, in whatever plugin moved into its
+    // index: an unrelated NPC gets a carrier equipped and kept in its inventory.
+    // There is no way to recover the plugin name from the raw value, and the
+    // engine drops that NPC's inventory changes on such a save anyway.
     std::vector<NprSaveAssignment> NprAssignmentsForSave();
+    // Everything that holds NPC-persist contents this session - resolved AND
+    // unresolved - for the orphan sweep's held set and the holder labels. The
+    // unresolved ones still hold their items until the save that drops them.
+    std::vector<NprSaveAssignment> NprAssignmentsHeld();
     void RestoreNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
         std::vector<std::string> a_contents, bool a_female);
+    // Kept in memory for this session only (slot reservation, held set) - see
+    // NprAssignmentsForSave.
     void CarryUnresolvedNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
         std::vector<std::string> a_contents, bool a_female);
     std::size_t UnresolvedNprAssignmentCount();
+    // Once per load, after the co-save restore: tell the player how many NPC
+    // persist assignments belong to a plugin that is not loaded, because the
+    // next save releases them (N3). Main thread.
+    void ReportUnresolvedNpcRecords();
     void ClearNpcBindings();
     // "Prepare for uninstall" NPC arm: recall every published slot + remove
     // every npc-persist assignment (unresolvable ones dropped, loudly). No-op
     // without the addon esp. Main thread only.
     void UninstallNpcCleanup();
 
+    // Every hidden flag the co-save restored, not only those of slots with a
+    // costume this session: with the settings unreadable there are no
+    // costumes, and writing only theirs erased every flag from the save
+    // (review 2026-09-23 C8).
     std::vector<PubSaveState> PubStatesForSave();
+    // The bindings to write: the live ones, plus the ones that resolved on this
+    // load but whose costume is not loaded this session (C8 - values of THIS
+    // load order, so safe to carry). Never the unresolved raw values (C5, see
+    // NprAssignmentsForSave).
     std::vector<PubBindSave> PubBindingsForSave();
     void RestorePubState(std::uint8_t a_slot, bool a_hidden);
+    // a_actor has been resolved through this save's plugin list. A value that
+    // lands on something other than an actor was written by a save whose list
+    // differs - the C5 corruption - and is dropped; the holder / wearer bits are
+    // kept only where the actor really has / wears the token (R4b).
     void RestorePubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags);
+    // Session-only, like CarryUnresolvedNprAssignment: still blocks
+    // UnpublishToBox for that slot, never written.
     void CarryUnresolvedPubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags);
     std::size_t UnresolvedPubBindingCount();
     int MaxNpcInjected();

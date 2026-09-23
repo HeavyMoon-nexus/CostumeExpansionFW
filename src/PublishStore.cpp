@@ -36,7 +36,16 @@ namespace CostumeFW
 
         std::vector<std::shared_ptr<PubSnapshot>> g_published;
         std::vector<PubBinding> g_bindings;
+        // Raw values that did not resolve at this load. Session-only: they block
+        // UnpublishToBox for their slot, and are never written back (C5).
         std::vector<PubBindSave> g_unresolved;
+        // Resolved at this load, but no costume is loaded for their slot this
+        // session - the settings did not load, or the publish list lacks it.
+        // Written back as they are, since they are values of THIS load order;
+        // dropping them wiped every NPC's published costume off the save after
+        // one autosave in such a session (review 2026-09-23 C8). They become
+        // live bindings again if the costume turns up (ParsePublishJson).
+        std::vector<PubBindSave> g_carriedBindings;
         std::unordered_map<int, bool> g_hidden;
         std::vector<NprAssignmentInfo> g_nprAssignments;
         std::vector<NprSaveAssignment> g_unresolvedNpr;
@@ -660,6 +669,15 @@ namespace CostumeFW
                 ResetPublishedTokenState(slot);
             }
         }
+        // C8: bindings this save restored while no costume was loaded for their
+        // slot (the settings did not load) are live again once it is - a
+        // settings reload after the file was fixed. Through RestorePubBinding,
+        // so the token checks it could not make then are made now.
+        auto carried = std::move(g_carriedBindings);
+        g_carriedBindings.clear();
+        for (const auto& b : carried) {
+            RestorePubBinding(b.pubSlot, b.actorFormID, b.flags);
+        }
         MigrateLegacyPublishIdentity();
         InitializeNpcSupport();
     }
@@ -1166,8 +1184,10 @@ namespace CostumeFW
                             "inventory ({} kept)", a_slot, spare, keep);
         }
         if (a_forgetUnreachable) {
-            // Uninstall: the user is about to delete the mod, so a record that
-            // would ride the next co-save is worse than a forgotten one.
+            // Uninstall: the user is about to delete the mod, so a live binding
+            // that would ride the next co-save is worse than a forgotten one.
+            // (Unresolved ones are session-only since C5; they go too, so
+            // nothing is left pending on a slot about to be dissolved.)
             std::erase_if(g_bindings, [a_slot](const PubBinding& b) { return b.pubSlot == a_slot; });
             std::erase_if(g_unresolved, [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
             SKSE::log::info("publish: recalled slot {} from {} actor(s); unreachable ones forgotten "
@@ -1632,10 +1652,43 @@ namespace CostumeFW
 
     std::vector<NprSaveAssignment> NprAssignmentsForSave()
     {
+        // Resolved only (C5) - see the header. The unresolved ones go with this
+        // save; their contents are handed back by the next load's sweep.
+        std::vector<NprSaveAssignment> out;
+        out.reserve(g_nprAssignments.size());
+        for (const auto& item : g_nprAssignments)
+            out.push_back({ item.poolSlot, item.actorFormID, item.contents, item.female });
+        return out;
+    }
+
+    std::vector<NprSaveAssignment> NprAssignmentsHeld()
+    {
         auto out = g_unresolvedNpr;
         for (const auto& item : g_nprAssignments)
             out.push_back({ item.poolSlot, item.actorFormID, item.contents, item.female });
         return out;
+    }
+
+    void ReportUnresolvedNpcRecords()
+    {
+        if (!g_unresolved.empty()) {
+            // Log only: a published costume's items belong to the costume, not
+            // to the binding, so releasing the binding returns nothing.
+            SKSE::log::warn("cosave: {} published-costume binding(s) name an actor whose plugin "
+                            "is not loaded - kept for this session, not written to the next save",
+                g_unresolved.size());
+        }
+        if (g_unresolvedNpr.empty()) {
+            return;
+        }
+        SKSE::log::warn("cosave: {} NPC persist assignment(s) name an actor whose plugin is not "
+                        "loaded - saving releases them, and the next load returns their items",
+            g_unresolvedNpr.size());
+        RE::DebugNotification(std::format("CostumeFW: {} NPC costume assignment(s) belong to a "
+                                          "plugin that isn't loaded. Saving now releases them, "
+                                          "and their items come back to you on the next load.",
+            g_unresolvedNpr.size())
+                .c_str());
     }
 
     void RestoreNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
@@ -1780,6 +1833,7 @@ namespace CostumeFW
         }
         g_bindings.clear();
         g_unresolved.clear();
+        g_carriedBindings.clear();
         g_hidden.clear();
         g_nprAssignments.clear();
         RefreshNprGate();
@@ -1788,15 +1842,21 @@ namespace CostumeFW
 
     std::vector<PubSaveState> PubStatesForSave()
     {
+        // Every flag, not just the slots with a costume this session (C8).
+        // A stale flag is harmless: a new publish into the slot forgets it
+        // (ResetPublishedTokenState), and nothing reads it without a costume.
         std::vector<PubSaveState> out;
-        for (const auto& snap : g_published)
-            out.push_back({ static_cast<std::uint8_t>(snap->pubSlot), g_hidden[snap->pubSlot] });
+        out.reserve(g_hidden.size());
+        for (const auto& [slot, hidden] : g_hidden)
+            if (slot >= 0 && slot < kPoolSize)
+                out.push_back({ static_cast<std::uint8_t>(slot), hidden });
         return out;
     }
 
     std::vector<PubBindSave> PubBindingsForSave()
     {
-        std::vector<PubBindSave> out = g_unresolved;
+        // g_carriedBindings, never g_unresolved (C5 / C8 - see the header).
+        std::vector<PubBindSave> out = g_carriedBindings;
         for (const auto& b : g_bindings)
             out.push_back({ static_cast<std::uint8_t>(b.pubSlot), b.actorFormID,
                 static_cast<std::uint8_t>((b.holder ? 1 : 0) | (b.wearer ? 2 : 0)) });
@@ -1809,8 +1869,38 @@ namespace CostumeFW
     }
     void RestorePubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags)
     {
-        if (a_slot >= kPoolSize || !a_actor || !PubBySlot(a_slot)) return;
-        g_bindings.push_back({ a_slot, a_actor, {}, (a_flags & 1) != 0, (a_flags & 2) != 0 });
+        if (a_slot >= kPoolSize || !a_actor) return;
+        // R4b: a save written while a plugin was missing can hold a raw value
+        // that SKSE has now read through the WRONG plugin list (C5). What it
+        // lands on is usually not an actor at all - a sure sign, so drop it.
+        // Null is not the same sign: an actor whose cell is not loaded can be
+        // out of memory, and its binding is kept as before.
+        auto* form = RE::TESForm::LookupByID(a_actor);
+        auto* actor = form ? form->As<RE::Actor>() : nullptr;
+        if (form && !actor) {
+            SKSE::log::warn("cosave: published-costume binding for slot {} names {:08X}, which is "
+                            "not an actor - dropped (written by a save that was missing a plugin)",
+                a_slot, a_actor);
+            return;
+        }
+        if (!PubBySlot(a_slot)) {
+            g_carriedBindings.push_back({ a_slot, a_actor, a_flags });  // C8
+            return;
+        }
+        std::uint8_t flags = a_flags;
+        // R4b: the holder / wearer bits only where they are visibly true - a
+        // binding restored onto the wrong actor claims a token it never had.
+        if (auto* token = PubTokenArmo(a_slot); token && actor) {
+            if (!ActorHasItem(actor, token)) flags &= static_cast<std::uint8_t>(~1u);
+            if (!actor->GetWornArmor(token->GetFormID())) flags &= static_cast<std::uint8_t>(~2u);
+            if (flags == 0) {
+                SKSE::log::warn("cosave: published-costume binding for slot {} names {:08X}, "
+                                "which neither has nor wears the token - dropped",
+                    a_slot, a_actor);
+                return;
+            }
+        }
+        g_bindings.push_back({ a_slot, a_actor, {}, (flags & 1) != 0, (flags & 2) != 0 });
     }
     void CarryUnresolvedPubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags)
     {

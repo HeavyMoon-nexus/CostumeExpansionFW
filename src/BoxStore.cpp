@@ -6434,7 +6434,9 @@ namespace CostumeFW
         // The NPC ones are easy to miss: their items sit in the same hidden
         // store while an NPC wears them. NPC assignments must include the
         // UNRESOLVED ones - at load the actor's cell usually is not loaded yet -
-        // which is why this reads NprAssignmentsForSave() and not the live list.
+        // which is why this reads NprAssignmentsHeld() and not the live list.
+        // (Nor NprAssignmentsForSave(), which since C5 leaves the unresolved ones
+        // out of the next save: until that save they still hold their items.)
         //
         // The catalog is NOT a superset of the actives, which is what this used
         // to assume. An entry another character took out of the catalog stays
@@ -6475,7 +6477,7 @@ namespace CostumeFW
                     add(c);
                 }
             }
-            for (const auto& npr : NprAssignmentsForSave()) {
+            for (const auto& npr : NprAssignmentsHeld()) {
                 for (const auto& c : npr.contents) {
                     add(c);
                 }
@@ -6491,8 +6493,8 @@ namespace CostumeFW
 
     namespace
     {
-        // Who holds each content id, by resolved FormID - the same four sources
-        // the sweep judges by, but keeping WHO rather than yes/no. One builder so
+        // Who holds each content id, by resolved FormID - the same sources the
+        // sweep judges by, but keeping WHO rather than yes/no. One builder so
         // the store listing, the sweep and the Recovery list can never disagree
         // about what "held" means.
         std::unordered_map<std::uint32_t, std::string> BuildHolderLabels()
@@ -6524,7 +6526,7 @@ namespace CostumeFW
                     mark(c, "published '" + snap.label + "'");
                 }
             }
-            for (const auto& npr : NprAssignmentsForSave()) {
+            for (const auto& npr : NprAssignmentsHeld()) {
                 for (const auto& c : npr.contents) {
                     mark(c, "NPC persist");
                 }
