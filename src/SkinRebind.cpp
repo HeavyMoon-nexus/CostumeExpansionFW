@@ -1087,9 +1087,10 @@ namespace CostumeFW
         // target is re-decided on every insert - which is what notifying the
         // condition variable makes wait_until do.
         //
-        // Lock order: a caller may hold StoreLock while pushing here (RunAfterDelayMs
-        // takes it), and the timer thread takes ONLY g_delayMutex and dispatches
-        // outside it, so the two can never wait on each other.
+        // Lock order: a caller may hold StoreLock while pushing here (most do -
+        // they are main-thread code that already holds it), and the timer thread
+        // takes ONLY g_delayMutex and dispatches outside it, so the two can never
+        // wait on each other. RunAfterDelayMs itself takes nothing but this.
         void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
         {
             // Started by the first caller, then runs for the life of the process -
@@ -2915,7 +2916,11 @@ namespace CostumeFW
 
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn)
     {
-        StoreLock lk;
+        // No StoreLock: this only pushes onto the delay heap, which has its own
+        // mutex. Taking the store lock here was the one place CEF took it off
+        // the main thread, and it made an NPC's Load3D on a background loader
+        // thread wait for whatever Reconcile the main thread was running
+        // (review 2026-09-23 W8).
         RunAfterDelay(std::chrono::steady_clock::now() + std::chrono::milliseconds(a_ms),
             std::move(a_fn));
     }

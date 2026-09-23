@@ -117,8 +117,9 @@ namespace CostumeFW
         const policy::CapturePolicy& a_policy, std::string& a_nifOut,
         bool a_log = true);
 
-    // Run a_fn on the main thread after (at least) a_ms milliseconds, via the
-    // SKSE task queue (re-posts until the deadline; hop rate is NOT frame-locked).
+    // Run a_fn on the main thread after (at least) a_ms milliseconds: one timer
+    // thread holds the deadline, then hands a_fn to the SKSE task queue once.
+    // Callable from any thread, and takes no CEF lock (review 2026-09-23 W8).
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn);
 
     // Snapshot of active items (id + tokenId), and a registry clear (co-save).
