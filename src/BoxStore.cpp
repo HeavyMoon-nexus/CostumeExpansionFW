@@ -87,6 +87,27 @@ namespace CostumeFW
             "Data\\SKSE\\Plugins\\CEF_settings.pre164.json";
         constexpr const char* kSchema = "cef.settings/1";
 
+        // Why a file cannot be opened for reading: 0 when it can, the Win32 error
+        // otherwise. Asked with the most permissive sharing there is, so a
+        // failure here is the file itself and not the way it was asked for.
+        DWORD OpenErrorFor(const char* a_path)
+        {
+            const HANDLE h = ::CreateFileA(a_path, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) {
+                return ::GetLastError();
+            }
+            ::CloseHandle(h);
+            return 0;
+        }
+
+        // The file is not there - as opposed to there and unreadable (C13).
+        bool IsNotFound(DWORD a_err)
+        {
+            return a_err == ERROR_FILE_NOT_FOUND || a_err == ERROR_PATH_NOT_FOUND;
+        }
+
         // GLOBAL box definitions (config; all saves). One box per token. Mutated
         // only on the main thread (loads + queued native tasks); MCM queries read
         // it from the VM thread, tolerated like the rest of the registry.
@@ -1681,8 +1702,51 @@ namespace CostumeFW
         // (migration) and rewrite into the new file at the end of load.
         bool migrated = false;
         g_settingsUnreadable = false;  // re-decided by this load
+        nlohmann::json doc;
+        bool fromBackup = false;
+        // The last-known-good copy, for a main file that cannot be used. False
+        // when there is none that parses.
+        const auto loadBackup = [&doc]() {
+            std::ifstream bak(kSettingsBakPath);
+            if (!bak) {
+                SKSE::log::error("settings: no readable {} either", kSettingsBakPath);
+                return false;
+            }
+            try {
+                bak >> doc;
+            } catch (const std::exception& e) {
+                SKSE::log::error("settings: backup parse error: {}", e.what());
+                return false;
+            }
+            return true;
+        };
         std::ifstream f(kSettingsPath);
-        if (!f) {
+        // "Cannot open" used to mean "no file", and a file that is there but
+        // cannot be read right now - a sync client or an editor holding it, a
+        // permission problem - loaded as a fresh install. The first change after
+        // that wrote the empty state over the real file, and the next clean start
+        // copied the empty one over the backup (review 2026-09-23 C13). Only a
+        // main file AND a backup that are both really absent make a fresh start.
+        const DWORD openErr = f ? 0 : OpenErrorFor(kSettingsPath);
+        const bool mainAbsent = IsNotFound(openErr);
+        if (!f && (!mainAbsent || !IsNotFound(OpenErrorFor(kSettingsBakPath)))) {
+            if (mainAbsent) {
+                SKSE::log::warn("settings: {} is missing but {} is there - loading the backup",
+                    kSettingsPath, kSettingsBakPath);
+            } else {
+                SKSE::log::error("settings: {} exists but cannot be opened (error {}) - loading "
+                                 "the backup",
+                    kSettingsPath, openErr);
+            }
+            if (!loadBackup()) {
+                g_settingsUnreadable = true;  // every WriteJson refuses while set
+                return;
+            }
+            fromBackup = true;
+            SKSE::log::warn("settings: recovered from {} (it is written back to {} on the next "
+                            "settings change)",
+                kSettingsBakPath, kSettingsPath);
+        } else if (!f) {
             std::ifstream old(kOldBoxesPath);
             if (!old) {
                 // No file at all: a fresh install, not a failure - writing must
@@ -1702,36 +1766,28 @@ namespace CostumeFW
             f.swap(old);
             migrated = true;
         }
-        nlohmann::json doc;
-        bool fromBackup = false;
-        try {
-            f >> doc;
-        } catch (const std::exception& e) {
-            SKSE::log::error("settings: JSON parse error: {}", e.what());
-            if (migrated) {
-                g_settingsUnreadable = true;
-                return;  // legacy file was corrupt; nothing else to try
-            }
-            // Corrupt main file: fall back to the last-known-good backup taken at
-            // the previous successful load. Without this, the cleared state above
-            // would look like "no settings" and the next WriteJson would make the
-            // loss permanent (Codex review 2026-07-05 A-1).
-            std::ifstream bak(kSettingsBakPath);
-            if (!bak) {
-                g_settingsUnreadable = true;
-                return;
-            }
+        if (!fromBackup) {
             try {
-                bak >> doc;
-            } catch (const std::exception& e2) {
-                SKSE::log::error("settings: backup parse error: {}", e2.what());
-                g_settingsUnreadable = true;
-                return;
+                f >> doc;
+            } catch (const std::exception& e) {
+                SKSE::log::error("settings: JSON parse error: {}", e.what());
+                if (migrated) {
+                    g_settingsUnreadable = true;
+                    return;  // legacy file was corrupt; nothing else to try
+                }
+                // Corrupt main file: fall back to the last-known-good backup taken
+                // at the previous successful load. Without this, the cleared state
+                // above would look like "no settings" and the next WriteJson would
+                // make the loss permanent (Codex review 2026-07-05 A-1).
+                if (!loadBackup()) {
+                    g_settingsUnreadable = true;
+                    return;
+                }
+                fromBackup = true;
+                SKSE::log::warn("settings: recovered from {} (main file corrupt; "
+                                "it is rewritten on the next settings change)",
+                    kSettingsBakPath);
             }
-            fromBackup = true;
-            SKSE::log::warn("settings: recovered from {} (main file corrupt; "
-                            "it is rewritten on the next settings change)",
-                kSettingsBakPath);
         }
         // The read handle goes NOW, before anything below can write. This
         // function writes from inside its own body - the v1.2.1 id heal and the
@@ -6545,7 +6601,13 @@ namespace CostumeFW
         }
         g_lastStoreLoss.store(lost, std::memory_order_relaxed);
         if (lost > 0) {
-            WriteJson(false);
+            // Only over settings that really loaded. Without them CEF holds an
+            // empty stand-in, and writing the "lost" rows would write that
+            // stand-in over whatever the user's file is (review 2026-09-23 C13).
+            // The rows stay in memory for the Recovery page either way.
+            if (g_settingsLoadOk) {
+                WriteJson(false);
+            }
             SKSE::log::warn("store manifest: {} captured item(s) no longer in storage", lost);
             RE::DebugNotification(std::format(
                 "CostumeFW: {} captured item(s) are no longer in storage - see Recovery",
@@ -6556,6 +6618,7 @@ namespace CostumeFW
         }
         return lost;
     }
+
     int ReconcileRefOnly()
     {
         StoreLock lk;
