@@ -338,6 +338,17 @@ int main()
     CHECK(!LocalIdInRange(0x1000000, false));
     CHECK(LocalIdInRange(0, true) && LocalIdInRange(0, false));
 
+    // --- One record, one id, whatever the spelling (review 2026-09-23 W26) ---
+    CHECK(SameColonId("012345:MyMod.esp", "012345:MyMod.esp"));
+    CHECK(SameColonId("012345:MyMod.esp", "012345:mymod.ESP"));  // Windows ignores case
+    CHECK(SameColonId("801:Mod.esp", "000801:Mod.esp"));         // a number, not a string
+    CHECK(SameColonId("00ABCD:Mod.esp", "abcd:mod.esp"));
+    CHECK(!SameColonId("012345:MyMod.esp", "012346:MyMod.esp"));
+    CHECK(!SameColonId("012345:MyMod.esp", "012345:MyMod2.esp"));
+    CHECK(!SameColonId("012345:MyMod.esp", "012345:MyMod.esm"));  // .esp and .esm are two files
+    CHECK(!SameColonId("801junk:Mod.esp", "000801:Mod.esp"));     // malformed matches nothing else
+    CHECK(SameColonId("garbage", "GARBAGE"));                     // ...but itself, by text
+
     // --- Shipped defaults are what the docs claim ----------------------------
     CHECK(DefaultBlockNames().size() == 1 && DefaultBlockNames()[0] == "CORE Carrier");
     CHECK(DefaultBlockPlugins().size() == 1 && DefaultBlockPlugins()[0] == "MARA");

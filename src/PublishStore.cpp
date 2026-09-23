@@ -464,11 +464,16 @@ namespace CostumeFW
         }
     }
 
+    // Both case-blind on the plugin name, like ContentHolder that asks them
+    // (review 2026-09-23 W26): the four owner sources must agree on what "the
+    // same item" is, or one of them lets a second owner in.
     int PublishedSlotHolding(const std::string& a_content)
     {
+        const auto same = [&a_content](const std::string& a_id) {
+            return policy::SameColonId(a_id, a_content);
+        };
         for (const auto& snap : g_published) {
-            if (snap && std::find(snap->contents.begin(), snap->contents.end(), a_content) !=
-                            snap->contents.end())
+            if (snap && std::any_of(snap->contents.begin(), snap->contents.end(), same))
                 return snap->pubSlot;
         }
         return -1;
@@ -476,16 +481,17 @@ namespace CostumeFW
 
     int NpcPersistSlotHolding(const std::string& a_content)
     {
+        const auto same = [&a_content](const std::string& a_id) {
+            return policy::SameColonId(a_id, a_content);
+        };
         // Unresolved assignments count too: an NPC that has not loaded yet still
         // owns its costume, and its items are still in the hidden store.
         for (const auto& item : g_unresolvedNpr) {
-            if (std::find(item.contents.begin(), item.contents.end(), a_content) !=
-                item.contents.end())
+            if (std::any_of(item.contents.begin(), item.contents.end(), same))
                 return item.poolSlot;
         }
         for (const auto& item : g_nprAssignments) {
-            if (std::find(item.contents.begin(), item.contents.end(), a_content) !=
-                item.contents.end())
+            if (std::any_of(item.contents.begin(), item.contents.end(), same))
                 return item.poolSlot;
         }
         return -1;

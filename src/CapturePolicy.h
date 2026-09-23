@@ -73,6 +73,14 @@ namespace CostumeFW::policy
     // slots further along, at somebody else's record (review 2026-09-23 C11).
     [[nodiscard]] bool LocalIdInRange(std::uint32_t a_local, bool a_light);
 
+    // Whether two colon-ids name the same record: the same local id as a NUMBER
+    // ("801" and "000801" are one id) in the same plugin, compared without case
+    // because Windows file names are. "012345:MyMod.esp" and "012345:mymod.esp"
+    // were two contents to every ownership check, so a preset could put an item
+    // a box already held into a second box (review 2026-09-23 W26). False when
+    // either side does not parse and the two strings differ.
+    [[nodiscard]] bool SameColonId(std::string_view a_lhs, std::string_view a_rhs);
+
     // --- UTF-8 (review 2026-09-23 C1) ----------------------------------------
     // Everything CEF persists is JSON, and nlohmann's dump() THROWS on text that
     // is not valid UTF-8 rather than writing it. Plugin names, mesh paths and

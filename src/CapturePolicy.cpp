@@ -163,6 +163,22 @@ namespace CostumeFW::policy
         return a_local <= (a_light ? 0xFFFu : 0xFFFFFFu);
     }
 
+    bool SameColonId(std::string_view a_lhs, std::string_view a_rhs)
+    {
+        // Canonical ids - every one CEF stores - differ in nothing but case when
+        // they name one record, so this settles almost every call without a
+        // parse; the parse is for a spelling that slipped in unnormalized.
+        if (EqualsCI(a_lhs, a_rhs)) {
+            return true;
+        }
+        std::uint32_t l1 = 0;
+        std::uint32_t l2 = 0;
+        std::string p1;
+        std::string p2;
+        return ParseColonId(a_lhs, l1, p1) && ParseColonId(a_rhs, l2, p2) && l1 == l2 &&
+               EqualsCI(p1, p2);
+    }
+
     namespace
     {
         // Length of the well-formed sequence starting at a_i (1-4), or 0 when

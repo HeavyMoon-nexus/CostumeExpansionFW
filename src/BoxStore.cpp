@@ -2514,12 +2514,16 @@ namespace CostumeFW
         // "Already added" means ACTIVE ON THIS SAVE (M2, CEF_STATE_SCOPE.md §3):
         // capturing a catalog entry on a second character must succeed - only a
         // same-save duplicate fails (so the MCM never swallows the item).
+        // Case-blind like ContentHolder (W26): a second spelling of the same
+        // plugin is the same item, and a second catalog row for it would be a
+        // second registry entry drawing it twice.
         for (const auto& it : ActiveSnapshot()) {
-            if (it.tokenId.empty() && it.id == content) {
+            if (it.tokenId.empty() && policy::SameColonId(it.id, content)) {
                 return false;
             }
         }
-        if (std::find(g_persist.begin(), g_persist.end(), content) == g_persist.end()) {
+        if (std::none_of(g_persist.begin(), g_persist.end(),
+                [&content](const std::string& a_id) { return policy::SameColonId(a_id, content); })) {
             g_persist.push_back(content);  // catalog add (shared across saves)
             WriteJson();
         }
@@ -6648,13 +6652,19 @@ namespace CostumeFW
         if (a_content.empty()) {
             return {};
         }
+        // SameColonId, not ==: a plugin name in another case is the same file
+        // to Windows and the same record to the engine, and a string compare
+        // let a preset spelling "mymod.esp" put an item "MyMod.esp" already
+        // held into a second box (review 2026-09-23 W26).
+        const auto same = [&a_content](const std::string& a_id) {
+            return policy::SameColonId(a_id, a_content);
+        };
         for (const auto& b : g_boxes) {
-            if (std::find(b.contents.begin(), b.contents.end(), a_content) !=
-                b.contents.end()) {
+            if (std::any_of(b.contents.begin(), b.contents.end(), same)) {
                 return b.token;
             }
         }
-        if (std::find(g_persist.begin(), g_persist.end(), a_content) != g_persist.end()) {
+        if (std::any_of(g_persist.begin(), g_persist.end(), same)) {
             return "persist";
         }
         // Published costumes and NPC-persist assignments are OWNERS too (review
@@ -6760,8 +6770,10 @@ namespace CostumeFW
 
         auto& box = g_boxes[idx];
         if (!content.empty()) {
-            if (std::find(box.contents.begin(), box.contents.end(), content) !=
-                box.contents.end()) {
+            if (std::any_of(box.contents.begin(), box.contents.end(),
+                    [&content](const std::string& a_id) {
+                        return policy::SameColonId(a_id, content);  // W26: case-blind
+                    })) {
                 // Duplicate: report failure so the MCM capture flow does NOT move
                 // the physical item into the store (a swallowed extra copy could
                 // never be returned - review A-2 / CEF_STATE_SCOPE.md §4).
