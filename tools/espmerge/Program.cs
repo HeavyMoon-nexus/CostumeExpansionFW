@@ -82,9 +82,7 @@ internal static class Program
         }
         if (args.Length >= 3 && args[0] == "--build-npc") {
             try {
-                var result = BuildNpcAddon(args[1], args[2]);
-                if (result != 0) return result;
-                return VerifyNpcAddon(Path.Combine(args[2], "CostumeFW_NPC.esp"));
+                return BuildNpcAddon(args[1], args[2]);
             } catch (Exception ex) {
                 Console.Error.WriteLine("FATAL: " + ex);
                 return 1;
@@ -163,6 +161,10 @@ internal static class Program
             var addonKey = new FormKey(outKey, (uint)(0x808 + i));
             var armor = armorTemplate.Duplicate(armorKey);
             var addon = addonTemplate.Duplicate(addonKey);
+            // The template is a box token, and from 1.6.4 it carries the
+            // box-token marker - which here would enroll a publish token in the
+            // box pool. This add-on's tokens carry no keywords at all.
+            armor.Keywords = null;
             armor.EditorID = $"CFW_PubToken{i + 1:00}";
             armor.Name = "Costume (unpublished)";
             armor.MajorFlags &= ~Armor.MajorFlag.NonPlayable;
@@ -186,6 +188,7 @@ internal static class Program
             var addonKey = new FormKey(outKey, (uint)(0x818 + i));
             var armor = armorTemplate.Duplicate(armorKey);
             var addon = addonTemplate.Duplicate(addonKey);
+            armor.Keywords = null;  // no box-token marker - see the loop above
             armor.EditorID = $"CFW_NpcPersistTok{i + 1:00}";
             armor.Name = "Costume NPC carrier";
             armor.MajorFlags |= Armor.MajorFlag.NonPlayable;
@@ -202,10 +205,26 @@ internal static class Program
             outMod.ArmorAddons.RecordCache.Set(addon);
         }
 
+        // Stage, verify, and only then replace: the shipped add-on used to be
+        // overwritten first and verified after, so a build that failed the
+        // check had already destroyed the good file (review 2026-09-23 W25).
         Directory.CreateDirectory(outDir);
         var outPath = Path.Combine(outDir, "CostumeFW_NPC.esp");
-        outMod.WriteToBinary(outPath);
-        Console.WriteLine("npc add-on -> " + outPath);
+        var stageDir = Path.Combine(outDir, ".espmerge_stage");
+        Directory.CreateDirectory(stageDir);
+        var stagedPath = Path.Combine(stageDir, "CostumeFW_NPC.esp");
+        outMod.WriteToBinary(stagedPath);
+        if (VerifyNpcAddon(stagedPath) != 0) {
+            Console.Error.WriteLine("the new add-on does not verify - " + outPath +
+                                    " untouched. The rejected result is at " + stagedPath);
+            return 1;
+        }
+        var unchanged = File.Exists(outPath) && Md5Hex(outPath) == Md5Hex(stagedPath);
+        File.Copy(stagedPath, outPath, true);
+        File.Delete(stagedPath);
+        try { Directory.Delete(stageDir); } catch (IOException) { /* not empty: leave it */ }
+        Console.WriteLine("npc add-on -> " + outPath +
+                          (unchanged ? " (byte-identical to the previous file)" : " (changed)"));
         return 0;
     }
 
