@@ -76,7 +76,13 @@ namespace CostumeFW::SmfUI
         // without typing anything handed half a character to the settings write,
         // which crashed (review 2026-09-23 C1 d).
         constexpr std::size_t kEditBufSize = 256;
-        std::unordered_map<std::string, std::array<char, kEditBufSize>> s_editBuf;
+        struct EditBufState
+        {
+            std::array<char, kEditBufSize> buf{};
+            std::string seed;    // the saved value it was last seeded from
+            std::string seeded;  // what that put in buf (a seed may be cut short)
+        };
+        std::unordered_map<std::string, EditBufState> s_editBuf;
         char s_blkValue[128] = "";        // "Blocked" page: add-entry value buffer
         int s_blkKind = 0;                // "Blocked" page: 0=name, 1=plugin, 2=id
         std::string s_status;             // last guard/op feedback line
@@ -112,20 +118,45 @@ namespace CostumeFW::SmfUI
             return true;
         }
 
-        // Seeded from a_seed the first time it is asked for and left alone after
-        // that - a half-typed name is the thing worth keeping. A seed too long
-        // for the buffer is cut at a CHARACTER boundary: snprintf cuts at a byte,
-        // which leaves the front half of a multi-byte character at the end (C1).
+        // Seeded from a_seed the first time it is asked for, and again whenever
+        // the saved value has moved on while the field still shows the old one
+        // untouched - a value changed from the MCM, a preset or the console used
+        // to leave the field showing what it first saw for the whole session
+        // (review 2026-09-23 M8). A field the user has typed into is theirs: a
+        // half-typed name is the thing worth keeping. A seed too long for the
+        // buffer is cut at a CHARACTER boundary: snprintf cuts at a byte, which
+        // leaves the front half of a multi-byte character at the end (C1).
         char* EditBuffer(const std::string& a_key, const std::string& a_seed)
         {
-            auto it = s_editBuf.find(a_key);
-            if (it == s_editBuf.end()) {
-                it = s_editBuf.emplace(a_key, std::array<char, kEditBufSize>{}).first;
+            auto [it, fresh] = s_editBuf.try_emplace(a_key);
+            auto& st = it->second;
+            const bool untouched = std::string_view(st.buf.data()) == st.seeded;
+            if (fresh || (a_seed != st.seed && untouched)) {
                 const std::size_t n = policy::Utf8PrefixLength(a_seed, kEditBufSize - 1);
-                std::memcpy(it->second.data(), a_seed.data(), n);
-                it->second[n] = '\0';
+                std::memcpy(st.buf.data(), a_seed.data(), n);
+                st.buf[n] = '\0';
+                st.seed = a_seed;
+                st.seeded.assign(a_seed.data(), n);
             }
-            return it->second.data();
+            return st.buf.data();
+        }
+
+        // Hide-when-worn "Apply": the store reads the list as whitespace-separated
+        // numbers and stops at the first thing that is not one, so "30,31" saved
+        // just 30 and said nothing (M8). Separators are spaces here, the answer
+        // is shown, and on success the field is re-seeded from what was saved.
+        void ApplyHideSlots(const std::string& a_id, const char* a_text)
+        {
+            std::string slots = a_text;
+            std::replace(slots.begin(), slots.end(), ',', ' ');
+            std::replace(slots.begin(), slots.end(), ';', ' ');
+            if (UiOps::SetHideSlotsStr(a_id, slots)) {
+                const std::string saved = UiOps::GetHideSlotsStr(a_id);
+                s_status = "hide-when-worn: " + (saved.empty() ? std::string("(none)") : saved);
+                s_editBuf.erase("hs:" + a_id);  // next frame shows the saved value
+            } else {
+                s_status = "hide-when-worn: refused (see the CEF log)";
+            }
         }
 
         // --- scrollable list regions (X-SCROLL) ------------------------------
@@ -477,8 +508,7 @@ namespace CostumeFW::SmfUI
                 hideBuf, kEditBufSize);
             ImGui::SameLine();
             if (ImGui::Button(std::format("Apply##hsb{}", a_scope).c_str())) {
-                UiOps::SetHideSlotsStr(a_id, hideBuf);
-                s_status = "hide-when-worn rule updated";
+                ApplyHideSlots(a_id, hideBuf);  // M8: separators, answer shown
             }
 
             bool rb = ShowRealBodyOn(a_id);
@@ -1132,7 +1162,7 @@ namespace CostumeFW::SmfUI
                     persistHide, kEditBufSize);
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("Apply##phb{}", id).c_str())) {
-                    UiOps::SetHideSlotsStr(id, persistHide);
+                    ApplyHideSlots(id, persistHide);  // M8
                 }
                 RenderItemDataFold(id, std::format("p{}", id), false);
                 if (ImGui::Button(std::format("Remove from catalog##prm{}", id).c_str())) {
