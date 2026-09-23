@@ -149,16 +149,37 @@ namespace nifcarrier {
                 HasHdtExtra(nif) ? "True" : "False");
         }
 
-        // Points at the shader's mutable alpha. Only BSLightingShaderProperty
-        // carries a writable one in nifly (NiMaterialProperty's is protected,
-        // LE-only; BSEffectShaderProperty has none) - every other type warns
-        // and skips, matching the C# tool's missing-`_alpha` reflection path.
+        // Points at the shader's mutable alpha: BSLightingShaderProperty's alpha,
+        // or BSEffectShaderProperty's base colour alpha (glowing runes, gems).
+        // NiMaterialProperty's is protected and LE-only; anything else warns and
+        // skips, matching the C# tool's missing-`_alpha` reflection path.
+        //
+        // The effect shader used to be in the skip list, while the reload check
+        // read its GetAlpha() - nifly's default 1.0, which that class does not
+        // override. So a costume with one glowing shape could never pass: the
+        // hash is written only on success, every sync retried and failed, and
+        // the box never got physics (review 2026-09-23 W9). Whether
+        // baseColor.a = 0 truly hides such a shape in game is checked in §T; if
+        // it does not, the shape comes out of the carrier instead.
         float* ShaderAlpha(nifly::NiShader* shader)
         {
             if (auto* l = dynamic_cast<nifly::BSLightingShaderProperty*>(shader)) {
                 return &l->alpha;
             }
+            if (auto* e = dynamic_cast<nifly::BSEffectShaderProperty*>(shader)) {
+                return &e->baseColor.a;
+            }
             return nullptr;
+        }
+
+        // The alpha the reload check judges by - the same field ShaderAlpha
+        // writes, not GetAlpha(), which answers 1.0 for an effect shader.
+        float EffectiveShaderAlpha(nifly::NiShader* shader)
+        {
+            if (auto* e = dynamic_cast<nifly::BSEffectShaderProperty*>(shader)) {
+                return e->baseColor.a;
+            }
+            return shader->GetAlpha();
         }
 
         // Shared reload-side invariant check (ZeroAlpha self-verify + the
@@ -177,7 +198,7 @@ namespace nifcarrier {
                 if (!shader) {
                     continue;  // non-rendered collision proxy - invisible by construction
                 }
-                if (shader->GetAlpha() != 0.0f) {
+                if (EffectiveShaderAlpha(shader) != 0.0f) {
                     allZero = false;
                 }
                 auto* ap = nif.GetAlphaProperty(shape);
@@ -714,6 +735,9 @@ namespace nifcarrier {
                     continue;
                 }
                 *alpha = 0.0f;
+                if (dynamic_cast<nifly::BSEffectShaderProperty*>(shader)) {
+                    Log(r.log, "[zeroalpha] effect shader '%s': baseColor.a -> 0", shapeName.c_str());
+                }
 
                 // 2. ensure a NiAlphaProperty with blending enabled so alpha is honored
                 auto* alphaProp = nif.GetAlphaProperty(shape);
