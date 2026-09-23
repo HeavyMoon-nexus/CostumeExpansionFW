@@ -212,7 +212,11 @@ namespace
                 if (a_event->oldContainer == playerID && a_event->newContainer != playerID &&
                     CostumeFW::IsBoxToken(a_event->baseObj)) {
                     const RE::FormID token = a_event->baseObj;
-                    SKSE::GetTaskInterface()->AddTask([token] { CostumeFW::ReplenishToken(token); });
+                    // Where it went, so a token handed to someone comes back from
+                    // them instead of being minted anew (review 2026-09-23 M7).
+                    const RE::FormID to = a_event->newContainer;
+                    SKSE::GetTaskInterface()->AddTask(
+                        [token, to] { CostumeFW::ReplenishToken(token, to); });
                 }
                 if (CostumeFW::IsPublishToken(a_event->baseObj)) {
                     const auto base = a_event->baseObj;

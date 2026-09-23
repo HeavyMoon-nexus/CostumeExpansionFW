@@ -2459,7 +2459,7 @@ namespace CostumeFW
         return false;
     }
 
-    void ReplenishToken(std::uint32_t a_tokenForm)
+    void ReplenishToken(std::uint32_t a_tokenForm, std::uint32_t a_movedTo)
     {
         StoreLock lk;
         if (a_tokenForm == 0) {
@@ -2472,14 +2472,19 @@ namespace CostumeFW
         }
         // Only replenish a token whose box is ENABLED (distribution on). A disabled
         // box's token is meant to be gone, so don't fight the user removing it.
-        bool enabledBox = false;
+        const BoxDefInfo* box = nullptr;
         for (const auto& b : g_boxes) {
             if (ResolveFormId(b.token) == a_tokenForm) {
-                enabledBox = b.enabled;
+                box = &b;
                 break;
             }
         }
-        if (!enabledBox) {
+        if (!box || !box->enabled) {
+            return;
+        }
+        // W11: a quarantined box's token is not part of any working box (the
+        // contract at the top of BoxStore.h), so nothing hands it out.
+        if (!BoxTokenUsable(*box)) {
             return;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -2487,6 +2492,24 @@ namespace CostumeFW
         auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
         if (!player || !obj) {
             return;
+        }
+        // Given to someone, sold, put in a chest: take THAT one back. Minting a
+        // replacement left the original out there - a second token, with the
+        // box's armour rating, every time (M7). The hidden store is CEF's own
+        // and never a destination to take from.
+        if (a_movedTo != 0 && a_movedTo != StoreFormId()) {
+            auto* destForm = RE::TESForm::LookupByID(a_movedTo);
+            if (auto* dest = destForm ? destForm->As<RE::TESObjectREFR>() : nullptr) {
+                const auto there = dest->GetInventoryCounts();
+                if (const auto t = there.find(obj); t != there.end() && t->second > 0) {
+                    dest->RemoveItem(obj, t->second, RE::ITEM_REMOVE_REASON::kStoreInContainer,
+                        nullptr, player);
+                    SKSE::log::info("boxes: took token {:08X} back from {:08X} - a box token "
+                                    "stays with the player",
+                        a_tokenForm, a_movedTo);
+                    return;
+                }
+            }
         }
         const auto counts = player->GetInventoryCounts();
         const auto it = counts.find(obj);

@@ -264,10 +264,15 @@ namespace CostumeFW
     // for ability-only boxes, and hide-when-worn treats it as "our own".
     bool IsBoxToken(std::uint32_t a_form);
 
-    // Resilience: if a defined box's token has left the player's inventory (sold /
-    // dropped) and the player now has none, give one back. So the box system can
-    // never be permanently broken by losing the token. Main thread.
-    void ReplenishToken(std::uint32_t a_tokenForm);
+    // Resilience: if a defined box's token has left the player's inventory and
+    // the player now has none, get it back. So the box system can never be
+    // permanently broken by losing the token. a_movedTo is where it went (the
+    // container-changed event's newContainer): a follower, a merchant or a chest
+    // hands it back, and only a token with nowhere to take it from - dropped,
+    // destroyed - is replaced by a new one. Replacing it everywhere left the
+    // given-away copy, with its armour rating, in the world each time (review
+    // 2026-09-23 M7). A quarantined box's token is left alone (W11). Main thread.
+    void ReplenishToken(std::uint32_t a_tokenForm, std::uint32_t a_movedTo = 0);
 
     // If the token is currently worn, re-equip it (unequip+equip) so consumer
     // mods that detect worn keywords on the equip event re-scan. Needed only when
