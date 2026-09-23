@@ -368,7 +368,8 @@ namespace CostumeFW
 
         bool SetBoxEnabledNative(RE::StaticFunctionTag*, RE::BSFixedString a_token, bool a_enabled)
         {
-            // Flag + json only; the MCM equips/removes the token to apply visually.
+            // Flag + json now; SetBoxEnabled queues the token move and then the
+            // convergence (W1).
             return SetBoxEnabled(a_token.c_str(), a_enabled);
         }
 

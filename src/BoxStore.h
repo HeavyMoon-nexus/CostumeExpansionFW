@@ -564,6 +564,10 @@ namespace CostumeFW
 
     // Per-box "distribute" flag: whether the token is given to / kept on the
     // player. Off removes it (escape hatch for a slot that conflicts in the LO).
+    // SetBoxEnabled writes the flag, the json and the token's stats at once, and
+    // QUEUES the token move (give one / unequip and remove all) followed by the
+    // ability convergence - in that order, so a worn box can be switched off
+    // (review 2026-09-23 W1). Callers do not move the token themselves.
     bool BoxEnabled(const std::string& a_token);
     bool SetBoxEnabled(const std::string& a_token, bool a_enabled);
 

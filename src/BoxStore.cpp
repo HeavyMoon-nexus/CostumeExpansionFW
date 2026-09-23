@@ -4643,7 +4643,19 @@ namespace CostumeFW
         // event happened to trigger one. Measured 2026-09-14: five minutes
         // between ticking the box back on (01:28:46) and the ability actually
         // landing, which took re-equipping the token (01:33:59).
-        ApplyBoxAbilities();
+        //
+        // But not HERE, synchronously: the token was still on the player at
+        // this point, and ApplyBoxAbilities' "a worn box cannot have its token
+        // withheld" rule switched distribution straight back on and wrote that
+        // - so a worn box could never be switched off, which is exactly when
+        // the switch is the way out of a load-order conflict (review 2026-09-23
+        // W1). Token first, convergence second, in ONE task; this function
+        // does the token move now, so no caller should queue one of its own.
+        const std::string token = a_token;
+        SKSE::GetTaskInterface()->AddTask([token, a_enabled] {
+            GiveOrRemoveToken(token, a_enabled);
+            ApplyBoxAbilities();
+        });
         return true;
     }
 

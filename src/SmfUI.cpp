@@ -752,9 +752,9 @@ namespace CostumeFW::SmfUI
                 ImGui::SameLine();
                 bool dist = b.enabled;
                 if (ImGui::Checkbox(std::format("Distribute token##d{}", scope).c_str(), &dist)) {
-                    const bool want = dist;
-                    UiOps::SetBoxEnabled(token, want);  // flag + json (sync, like the MCM)
-                    SKSE::GetTaskInterface()->AddTask([token, want] { GiveOrRemoveToken(token, want); });
+                    // Flag + json now; the token move and the convergence are
+                    // queued by SetBoxEnabled itself, in that order (W1).
+                    UiOps::SetBoxEnabled(token, dist);
                 }
 
                 static const char* kTypes[3] = { "Clothing", "Light Armor", "Heavy Armor" };
