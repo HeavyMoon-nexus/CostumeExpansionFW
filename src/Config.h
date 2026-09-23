@@ -1,16 +1,25 @@
 #pragma once
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace CostumeFW
 {
     // Read one boolean key from Data\SKSE\Plugins\CostumeExpansionFW.ini.
     // Whitespace/case tolerant ("bEnabled = 0", tabs, CRLF); comments (; #) and
-    // section headers are skipped. Missing file / missing key / unparsable value
-    // -> a_default. a_key must be lower-case and without spaces.
+    // section headers are skipped. Missing file / missing key -> a_default.
+    // a_key must be lower-case and without spaces.
+    //
+    // A comment can also END a line: "bEnabled=0 ; crash" is how people write
+    // ini files, and the value used to be read as "0;crash" - not 0, so the
+    // default (ENABLED) won with nothing in the log. That is the emergency
+    // switch failing silently at the one moment it is needed (review
+    // 2026-09-23 M3). Everything from the first ; or # is dropped now, and a
+    // value that is still not 0/1/true/false is ignored OUT LOUD, once per key.
     inline bool IniFlag(std::string_view a_key, bool a_default)
     {
         std::ifstream f("Data\\SKSE\\Plugins\\CostumeExpansionFW.ini");
@@ -20,13 +29,16 @@ namespace CostumeFW
         bool out = a_default;
         std::string line;
         while (std::getline(f, line)) {
+            if (const auto cut = line.find_first_of(";#"); cut != std::string::npos) {
+                line.erase(cut);
+            }
             std::string t;
             for (const char c : line) {
                 if (c != ' ' && c != '\t' && c != '\r') {
                     t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 }
             }
-            if (t.empty() || t.front() == ';' || t.front() == '#' || t.front() == '[') {
+            if (t.empty() || t.front() == '[') {
                 continue;
             }
             const auto eq = t.find('=');
@@ -38,6 +50,18 @@ namespace CostumeFW
                 out = false;  // last occurrence wins (a duplicated key is user error)
             } else if (v == "1" || v == "true") {
                 out = true;
+            } else {
+                // Read once per process per key (every caller caches), so this
+                // is one line - but a set anyway, so a future caller that reads
+                // twice does not repeat it.
+                static std::vector<std::string> s_warned;
+                if (std::find(s_warned.begin(), s_warned.end(), a_key) == s_warned.end()) {
+                    s_warned.emplace_back(a_key);
+                    SKSE::log::warn(
+                        "ini: CostumeExpansionFW.ini {} = '{}' is not 0, 1, true or false - "
+                        "ignored (the default is {})",
+                        a_key, v, a_default ? 1 : 0);
+                }
             }
         }
         return out;
