@@ -1895,6 +1895,46 @@ namespace nifcarrier {
             return static_cast<bool>(f);
         }
 
+        // A sibling .tmp, flushed, then renamed over the target with
+        // MOVEFILE_WRITE_THROUGH: a sync cut off mid-write (a quit, another
+        // mod's CTD) leaves the old carriers.json whole rather than a torn one
+        // (review 2026-09-23 W10). The .tmp is removed if anything fails.
+        bool WriteTextFileAtomic(const std::filesystem::path& p, const std::string& data)
+        {
+            auto tmp = p;
+            tmp += ".tmp";
+            const HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) {
+                return false;
+            }
+            bool ok = true;
+            const char* at = data.data();
+            std::size_t left = data.size();
+            while (ok && left > 0) {
+                const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(left, std::size_t{ 1 } << 30));
+                DWORD written = 0;
+                ok = ::WriteFile(h, at, chunk, &written, nullptr) && written > 0;
+                at += written;
+                left -= written;
+            }
+            ok = ok && ::FlushFileBuffers(h);
+            ::CloseHandle(h);
+            if (!ok || !::MoveFileExW(tmp.c_str(), p.c_str(),
+                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                ::DeleteFileW(tmp.c_str());
+                return false;
+            }
+            return true;
+        }
+
+        // Hash files a sync owes, written only once carriers.json - the file
+        // that makes the new revisions visible - is in place. A hash says "this
+        // input is built"; written ahead of carriers.json, a sync that died in
+        // between left hashes for builds CEF could not see, and every later
+        // sync skipped them as unchanged and wrote the old entries back (W10).
+        using PendingHashes = std::vector<std::pair<std::filesystem::path, std::string>>;
+
         bool CopyOverwrite(const std::filesystem::path& from, const std::filesystem::path& to)
         {
             std::error_code ec;
@@ -2219,7 +2259,8 @@ namespace nifcarrier {
             const std::vector<std::filesystem::path>& dataRoots, const std::filesystem::path& carrierDir,
             const std::filesystem::path& xmlDir, const std::filesystem::path& tmpDir,
             const std::filesystem::path& emptyNif, std::optional<std::string> oldFragment, int& built,
-            int& skipped, int& failed, int& poolCreated, std::string& log)
+            int& skipped, int& failed, int& poolCreated, std::string& log,
+            PendingHashes& a_pendingHashes)
         {
             const auto basePath = carrierDir / "Persist_carrier.nif";
             const auto hashPath = carrierDir / "Persist_carrier.hash";
@@ -2631,9 +2672,7 @@ namespace nifcarrier {
                 Log(log, "[persist] FAILED to publish part files - previous artifacts kept");
                 return failKeepOld();
             }
-            if (!WriteTextFile(hashPath, hash)) {
-                Log(log, "[persist] WARNING failed to write hash file - persist rebuilds next run");
-            }
+            a_pendingHashes.emplace_back(hashPath, hash);  // after carriers.json (W10)
             ++built;
             ensurePool();
 
@@ -2695,6 +2734,8 @@ namespace nifcarrier {
             std::filesystem::create_directories(tmpDir);
 
             const auto carriersJsonPath = carrierDir / "carriers.json";
+            // Written only after carriers.json is in place (W10).
+            PendingHashes pendingHashes;
             // carrier key -> (rev, file). Keyed by biped slot until v1.6.4; see
             // the migration where it is read.
             std::map<std::string, std::pair<int, std::string>> carriers;
@@ -2938,9 +2979,7 @@ namespace nifcarrier {
                         continue;
                     }
                 }
-                if (!WriteTextFile(hashPath, hash)) {
-                    Log(res.log, "%s WARNING failed to write hash file - box rebuilds next run", tag.c_str());
-                }
+                pendingHashes.emplace_back(hashPath, hash);  // after carriers.json (W10)
                 ++res.built;
                 carriers[key] = { rev, slotNifRel };
                 Log(res.log, "%s rev=%d -> %s", tag.c_str(), rev, slotNifRel.c_str());
@@ -3068,9 +3107,7 @@ namespace nifcarrier {
                         ++res.failed;
                         continue;
                     }
-                    if (!WriteTextFile(hashPath, hash)) {
-                        Log(res.log, "%s WARNING failed to write hash file - rebuilds next run", tag.c_str());
-                    }
+                    pendingHashes.emplace_back(hashPath, hash);  // after carriers.json (W10)
                     nextPublished[key] = { { "rev", rev }, { "fileM", relM }, { "fileF", relF } };
                     ++res.built;
                     Log(res.log, "%s rev=%d -> m=%s f=%s", tag.c_str(), rev, relM.c_str(), relF.c_str());
@@ -3167,8 +3204,7 @@ namespace nifcarrier {
                         ++res.failed;
                         continue;
                     }
-                    if (!WriteTextFile(hashPath, hash))
-                        Log(res.log, "%s WARNING failed to write hash file - rebuilds next run", tag.c_str());
+                    pendingHashes.emplace_back(hashPath, hash);  // after carriers.json (W10)
                     nextNpc[key] = { { "rev", rev }, { "file", rel } };
                     ++res.built;
                     Log(res.log, "%s rev=%d -> %s", tag.c_str(), rev, rel.c_str());
@@ -3183,7 +3219,7 @@ namespace nifcarrier {
                 }
                 persistFragment = SyncPersistBuild(doc["persist"], opts.dataRoots, carrierDir, xmlDir,
                     tmpDir, opts.emptyNif, persistFragment, res.built, res.skipped, res.failed,
-                    poolCreated, res.log);
+                    poolCreated, res.log, pendingHashes);
             }
 
             // carriers.json: always rewrite (pre-existing file = externally
@@ -3220,9 +3256,19 @@ namespace nifcarrier {
                 jsonOut += " \"persist\": " + *persistFragment;
             }
             jsonOut += "\n}\n";
-            if (!WriteTextFile(carriersJsonPath, jsonOut)) {
-                Log(res.log, "[sync] FAILED to write carriers.json - new revisions are invisible to CEF");
+            if (!WriteTextFileAtomic(carriersJsonPath, jsonOut)) {
+                // No hash is written either: what this run built is invisible,
+                // so the next sync has to build it again (W10).
+                Log(res.log, "[sync] FAILED to write carriers.json - new revisions are invisible to "
+                             "CEF; %zu build(s) will be redone next run", pendingHashes.size());
                 ++res.failed;
+            } else {
+                for (const auto& [hashPath, hash] : pendingHashes) {
+                    if (!WriteTextFile(hashPath, hash)) {
+                        Log(res.log, "[sync] WARNING failed to write %s - rebuilds next run",
+                            U8(hashPath).c_str());
+                    }
+                }
             }
 
             {

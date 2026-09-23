@@ -1534,13 +1534,20 @@ namespace CostumeFW
                     SpawnSyncProcess();
                     return;
                 }
-                if (code == 0) {
+                // Same rule as the in-proc path (W10a): a failed exit can
+                // still have built some carriers, and carriers.json names only
+                // what did - applying it is a no-op for the rest. A timeout
+                // (-2 above) is the one case with nothing trustworthy to read.
+                if (code != 0) {
+                    SKSE::log::error("auto-sync: nifcarrier failed (exit {}) - applying whatever it "
+                                     "rebuilt (see CEF_sync.log)",
+                        code);
+                }
+                if (g_lastSyncExit != -2) {
                     SKSE::GetTaskInterface()->AddTask([]() {
                         SKSE::log::info("auto-sync: done - applying carrier revisions");
                         ApplyCarrierOverridesImpl(true);
                     });
-                } else {
-                    SKSE::log::error("auto-sync: nifcarrier failed (exit {}) - carriers unchanged", code);
                 }
             }).detach();
         }
@@ -1655,7 +1662,16 @@ namespace CostumeFW
                                      "carriers unchanged (see CEF_sync.log)",
                         sr.crashCode);
                 }
-                if (sr.ok) {
+                // Apply what was built even when something else failed. One
+                // content that never builds used to hold back every other
+                // box's new carrier until the next save load (review
+                // 2026-09-23 W10a); carriers.json only names what did build.
+                if (!sr.ok && sr.built > 0) {
+                    SKSE::log::error("auto-sync: {} rebuilt, {} failed - applying the rebuilt ones "
+                                     "(see CEF_sync.log)",
+                        sr.built, sr.failed);
+                }
+                if (sr.ok || sr.built > 0) {
                     const int built = sr.built;
                     SKSE::GetTaskInterface()->AddTask([built]() {
                         SKSE::log::info("auto-sync: done - applying carrier revisions");
