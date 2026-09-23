@@ -67,6 +67,15 @@ namespace CostumeFW::abilities
     // is not installed" case, which is a choice and not a fault.
     void ReportStateToUser();
 
+    // After a save loads and BEFORE anything allocates: every pool ability one
+    // of a_actors carries that the registry does not list is reserved (a
+    // tombstone the registry keeps) and the pool is disabled for the session,
+    // with a DO NOT SAVE reason for ReportStateToUser. It catches the registry
+    // that was lost together with its backups, which the load cannot tell from
+    // a first run (review 2026-09-23 C7). Returns how many were reserved. Main
+    // thread.
+    int AuditSaveAbilities(const std::vector<RE::Actor*>& a_actors);
+
     // Pool accounting, for the UI and the log (design 5.2).
     struct Usage
     {

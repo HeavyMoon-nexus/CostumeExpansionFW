@@ -617,11 +617,17 @@ namespace CostumeFW::abilities
             return arr;
         }
 
-        // Rotate two generations before replacing. The registry is the only
-        // record of which ability a save is pointing at: lose it and the saves
-        // are not recoverable by inspection, because a pool spell says nothing
-        // about who it was for. Losing settings loses a preference; losing this
-        // loses the mapping.
+        // Keep two generations of backup. The registry is the only record of
+        // which ability a save is pointing at: lose it and the saves are not
+        // recoverable by inspection, because a pool spell says nothing about who
+        // it was for. Losing settings loses a preference; losing this loses the
+        // mapping.
+        //
+        // Called AFTER a successful write, so .bak1 is always the newest file
+        // that was written - a copy of the current one. Called before, it held
+        // the one before the latest allocation, and `cef abilities restore`
+        // then brought back a registry that did not know that allocation: the
+        // very drift the backup is there to prevent (review 2026-09-23 C7).
         void RotateBackups()
         {
             namespace fs = std::filesystem;
@@ -678,13 +684,23 @@ namespace CostumeFW::abilities
                 return false;
             }
 
-            RotateBackups();
             if (!WriteFileAtomic(kRegistryPath, text)) {
                 SKSE::log::error("abilities: could not write {} - no new allocation is in effect",
                     kRegistryPath);
                 return false;
             }
+            RotateBackups();
             return true;
+        }
+
+        // Whether a file is there at all - as opposed to there and unreadable.
+        bool FileThere(const char* a_path)
+        {
+            if (::GetFileAttributesA(a_path) != INVALID_FILE_ATTRIBUTES) {
+                return true;
+            }
+            const DWORD err = ::GetLastError();
+            return err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND;
         }
 
         bool LoadRegistryEntries(std::string& a_why);  // fwd (below)
@@ -713,6 +729,34 @@ namespace CostumeFW::abilities
         {
             std::ifstream in(kRegistryPath);
             if (!in) {
+                // "No registry" used to mean "first run", and that is only one of
+                // the ways to get here. An Overwrite clean-up in MO2, a profile
+                // move, a file held by a sync client - every one of them made an
+                // empty, Ready pool, and the first convergence then handed the
+                // exact abilities a save was holding to OTHER contents, with no
+                // word anywhere (review 2026-09-23 C7). Only a registry that was
+                // never written is a first run: none of its backups exist either.
+                const std::string bak1 = std::string(kRegistryPath) + ".bak1";
+                if (FileThere(kRegistryPath)) {
+                    a_why = std::format("{} is there but cannot be opened - close whatever is "
+                                        "holding it (a sync client, an editor)",
+                        kRegistryPath);
+                    return false;
+                }
+                if (FileThere(bak1.c_str())) {
+                    a_why = std::format("{} is missing but its backup is not, so this is not a "
+                                        "first run - refusing to start an empty registry",
+                        kRegistryPath);
+                    return false;
+                }
+                if (FileThere(kRegistryPre164Path)) {
+                    a_why = std::format(
+                        "{} is missing but {} (the 1.6.3 copy) is not, so this is not a first "
+                        "run - refusing to start an empty registry. If you have no newer copy, "
+                        "copy that file to CEF_abilities.json",
+                        kRegistryPath, kRegistryPre164Path);
+                    return false;
+                }
                 return true;
             }
             nlohmann::json doc;
@@ -1302,6 +1346,66 @@ namespace CostumeFW::abilities
         // Same delay as the legacy report: a message box thrown at a fading-in
         // UI is a message box nobody sees.
         RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
+    }
+
+    int AuditSaveAbilities(const std::vector<RE::Actor*>& a_actors)
+    {
+        if (!Ready()) {
+            return 0;
+        }
+        // The registry is the only record of which pool ability means what, and
+        // it lives outside the save. When it is lost together with its backups -
+        // an Overwrite folder wiped clean - the load above had no way to tell a
+        // first run from a lost mapping, and the pool starts empty while the
+        // save still holds abilities from it. The first convergence would then
+        // hand exactly those to other contents (review 2026-09-23 C7). The save
+        // is the one witness left: whatever pool ability an actor carries is
+        // reserved, and the pool stops for the session.
+        std::vector<std::string> reserved;
+        for (auto* actor : a_actors) {
+            if (!actor) {
+                continue;
+            }
+            for (auto* spell : actor->GetActorRuntimeData().addedSpells) {
+                const auto* file = spell ? spell->GetFile(0) : nullptr;
+                if (!file) {
+                    continue;
+                }
+                const int generation = tokenid::AbilityPoolGeneration(file->GetFilename());
+                if (generation <= 0) {
+                    continue;
+                }
+                const PoolKey key{ generation, spell->GetLocalFormID() };
+                if (key.local < kPoolBase || key.local >= kPoolBase + kMaxPerGeneration ||
+                    g_entries.contains(key)) {
+                    continue;
+                }
+                Entry e;
+                e.content = "?held-by-save";  // never a real content id
+                e.tombstone = true;
+                g_entries.emplace(key, std::move(e));
+                reserved.push_back(ColonIdOf(key));
+                SKSE::log::error("abilities: this save holds pool ability {} that the registry "
+                                 "does not know - reserved, pool disabled for this session",
+                    ColonIdOf(key));
+            }
+        }
+        if (reserved.empty()) {
+            return 0;
+        }
+        // Written, so the next launch reserves them too. What they were worth
+        // cannot be recovered from here; that record was in the file that went.
+        SaveRegistry();
+        Disable(std::format(
+            "This save holds {} costume enchantment ability(ies) that CEF_abilities.json does "
+            "not list - the file was lost or replaced (an Overwrite clean-up, a profile move).\n\n"
+            "They are now reserved so nothing else can take them, and enchantment passthrough is "
+            "off for this session.\n\n"
+            "DO NOT SAVE. If you have a copy of CEF_abilities.json from before, put it back and "
+            "restart. Without one, the bonuses those abilities gave cannot be told apart and stay "
+            "as they are.",
+            reserved.size()));
+        return static_cast<int>(reserved.size());
     }
 
     std::string NextPoolPluginName()

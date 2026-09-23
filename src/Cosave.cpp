@@ -337,6 +337,26 @@ namespace CostumeFW
             // set (M2, CEF_STATE_SCOPE.md §3/§5 - a character switch changes the
             // set; the compare-skip keeps same-character reloads free).
             SKSE::GetTaskInterface()->AddTask([prePoolSave] {
+                // FIRST, before anything can allocate a pool ability: the save is
+                // the only witness of which abilities it holds when the registry
+                // was lost with its backups (review 2026-09-23 C7). The player,
+                // and every NPC a published costume pays stats to.
+                {
+                    std::vector<RE::Actor*> actors;
+                    if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
+                        actors.push_back(pc);
+                    }
+                    for (const auto& b : PubBindingsSnapshot()) {
+                        if (b.unresolved) {
+                            continue;  // a raw value from another plugin list (C5)
+                        }
+                        auto* form = RE::TESForm::LookupByID(b.actorFormID);
+                        if (auto* actor = form ? form->As<RE::Actor>() : nullptr) {
+                            actors.push_back(actor);
+                        }
+                    }
+                    abilities::AuditSaveAbilities(actors);
+                }
                 Reconcile();
                 SyncPersistManifest();
                 ReapplyNpcBindings();
