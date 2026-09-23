@@ -65,6 +65,14 @@ namespace CostumeFW::policy
     // Rewrites a_id into canonical form; true if it changed.
     bool CanonicalizeColonIdStr(std::string& a_id);
 
+    // Can a_local name a record of a plugin at all? A light (ESL) plugin holds
+    // local ids up to FFF, a full one up to FFFFFF. The engine's own FormID
+    // arithmetic ADDS the local id without masking it, so an id past the end
+    // does not fail - it lands in a DIFFERENT plugin: 012A45 saved against an
+    // ESP that was later ESL-flagged (ESLify, a mod update) points 0x12 light
+    // slots further along, at somebody else's record (review 2026-09-23 C11).
+    [[nodiscard]] bool LocalIdInRange(std::uint32_t a_local, bool a_light);
+
     // --- UTF-8 (review 2026-09-23 C1) ----------------------------------------
     // Everything CEF persists is JSON, and nlohmann's dump() THROWS on text that
     // is not valid UTF-8 rather than writing it. Plugin names, mesh paths and

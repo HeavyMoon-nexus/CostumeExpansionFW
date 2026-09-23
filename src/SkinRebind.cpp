@@ -51,6 +51,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <string_view>
@@ -2686,17 +2687,18 @@ namespace CostumeFW
         // 3P + 1P models for the given wearer race. Every caller supplies one
         // immutable policy generation. If the requested sex has no model, falls
         // back to the other sex so a single-sex-authored accessory still shows.
+        RE::TESForm* LookupLocalForm(std::uint32_t a_local, const std::string& a_plugin);  // fwd (below)
+
         bool ResolveArmaModelsFor(std::uint32_t a_localID, const std::string& a_plugin,
             RE::SEX a_sex, RE::TESRace* a_race,
             const policy::CapturePolicy& a_policy, ModelRef& a_out3p, ModelRef& a_out1p,
             bool a_log)
 
         {
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
-                return false;
-            }
-            RE::TESObjectARMA* arma = dh->LookupForm<RE::TESObjectARMA>(a_localID, a_plugin);
+            // Through the range-checked resolver (C11): LookupForm would hand
+            // back another plugin's record for a local id past this plugin's end.
+            auto* form = LookupLocalForm(a_localID, a_plugin);
+            RE::TESObjectARMA* arma = form ? form->As<RE::TESObjectARMA>() : nullptr;
             const RE::TESFile* armaFile = nullptr;
             bool policyRefused = false;  // X-LOG1: refused by the deny-list, not unresolvable
             if (arma) {
@@ -2704,7 +2706,7 @@ namespace CostumeFW
                 if (!armaFile) {
                     return false;
                 }
-            } else if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
+            } else if (auto* armo = form ? form->As<RE::TESObjectARMO>() : nullptr) {
                 arma = PickAdmittedAddonForRace(
                     armo, a_policy, a_localID, a_plugin, a_log, a_race, &policyRefused);
                 if (arma) {
@@ -2807,23 +2809,97 @@ namespace CostumeFW
 
         // Resolve a colon-form id "XXXXXX:Plugin.esp" to its full runtime FormID
         // (0 on failure). Used for the box token's worn-state check.
-        RE::FormID ResolveFormID(const std::string& a_colonId)
+        //
+        // The ONE place a (local id, plugin) pair becomes a FormID (review
+        // 2026-09-23 C11). CommonLib's LookupFormID adds the local id to the
+        // plugin's base WITHOUT masking it, so a local id past the end of its
+        // plugin did not fail - it named a record in ANOTHER plugin: an id
+        // saved against an ESP that was later ESL-flagged points 0x12 light
+        // slots on, and '1000D62:Skyrim.esm' is Update.esm's 0x000D62. That
+        // was a different mod's armour drawn, its enchantment paid, a fresh
+        // copy of it minted on return - where the answer should have been
+        // "unresolved". Out-of-range ids are refused now, and the parse is the
+        // strict one ("801junk:" is not 0x801, TH8).
+        //
+        // Loaded plugins are cached: this runs for every token and content on
+        // every equip event, and both the plugin lookup and the load order it
+        // reads are fixed once the game has loaded its data. Only a HIT is
+        // cached - a miss latched before kDataLoaded would read exactly like a
+        // plugin that is not installed (trap 3).
+        struct LoadedPlugin
         {
-            const auto colon = a_colonId.find(':');
-            if (colon == std::string::npos) {
-                return 0;
-            }
-            std::uint32_t localID = 0;
-            try {
-                localID = static_cast<std::uint32_t>(std::stoul(a_colonId.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return 0;
+            RE::FormID base{ 0 };        // the plugin's FormID for local id 0
+            bool light{ false };
+        };
+        std::mutex g_pluginCacheMutex;
+        std::unordered_map<std::string, LoadedPlugin> g_pluginCache;
+        std::unordered_set<std::string> g_rangeWarned;  // under g_pluginCacheMutex
+
+        std::optional<LoadedPlugin> FindLoadedPlugin(const std::string& a_plugin)
+        {
+            {
+                std::scoped_lock lk(g_pluginCacheMutex);
+                if (const auto it = g_pluginCache.find(a_plugin); it != g_pluginCache.end()) {
+                    return it->second;
+                }
             }
             auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
+            const auto* file = dh ? dh->LookupModByName(a_plugin) : nullptr;
+            if (!file || file->compileIndex == 0xFF) {
+                return std::nullopt;  // not loaded - nothing of it resolves
+            }
+            // Local id 0 through CommonLib's own arithmetic, so the VR branch
+            // and the light-slot math stay CommonLib's; only the range check is
+            // ours. VR has no light plugins of its own (SkyrimVRESL aside), so
+            // it keeps the full range, as it always has.
+            LoadedPlugin info;
+            info.base = dh->LookupFormID(0, a_plugin);
+            info.light = !REL::Module::IsVR() && file->IsLight();
+            std::scoped_lock lk(g_pluginCacheMutex);
+            g_pluginCache.emplace(a_plugin, info);
+            return info;
+        }
+
+        RE::FormID ResolveLocalFormID(std::uint32_t a_local, const std::string& a_plugin)
+        {
+            const auto info = FindLoadedPlugin(a_plugin);
+            if (!info) {
                 return 0;
             }
-            return dh->LookupFormID(localID, a_colonId.substr(colon + 1));
+            if (!policy::LocalIdInRange(a_local, info->light)) {
+                const std::string id = policy::FormatColonId(a_local, a_plugin);
+                std::scoped_lock lk(g_pluginCacheMutex);
+                if (g_rangeWarned.insert(id).second) {
+                    SKSE::log::warn(
+                        "colon-id '{}' is out of range for {} ({} plugin, local ids up to {:X}) - "
+                        "treated as unresolved. The plugin was most likely ESL-flagged or "
+                        "compacted after this id was saved; left alone, it would have named "
+                        "another plugin's record",
+                        id, a_plugin, info->light ? "a light" : "a full",
+                        info->light ? 0xFFFu : 0xFFFFFFu);
+                }
+                return 0;
+            }
+            return info->base + a_local;
+        }
+
+        RE::FormID ResolveFormID(const std::string& a_colonId)
+        {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(a_colonId, local, plugin)) {
+                return 0;
+            }
+            return ResolveLocalFormID(local, plugin);
+        }
+
+        // (local id, plugin) -> form, through the range-checked resolver above.
+        // Same answer as TESDataHandler::LookupForm for an id in range, and
+        // nullptr instead of another plugin's record for one that is not.
+        RE::TESForm* LookupLocalForm(std::uint32_t a_local, const std::string& a_plugin)
+        {
+            const RE::FormID id = ResolveLocalFormID(a_local, a_plugin);
+            return id ? RE::TESForm::LookupByID(id) : nullptr;
         }
     }
 
@@ -4548,7 +4624,8 @@ namespace CostumeFW
             SKSE::log::error("hair PoC: bad id '{}' (want XXXXXX:Plugin.esp)", a_id);
             return false;
         }
-        auto* hdpt = dh->LookupForm<RE::BGSHeadPart>(localID, plugin);
+        auto* hdptForm = LookupLocalForm(localID, plugin);  // range-checked (C11)
+        auto* hdpt = hdptForm ? hdptForm->As<RE::BGSHeadPart>() : nullptr;
         if (!hdpt) {
             SKSE::log::error("hair PoC: {:X}:{} is not a HeadPart (HDPT)", localID, plugin);
             return false;

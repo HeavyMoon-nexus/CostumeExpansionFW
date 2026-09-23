@@ -80,15 +80,15 @@ namespace CostumeFW
             return id;
         }
 
+        // Through the one range-checked resolver (review 2026-09-23 C11). This
+        // used strtoul, which read "801junk:" as 0x801, and LookupForm, which
+        // turns a local id past its plugin's end into another plugin's record.
         template <class T>
         T* ResolveColonForm(const std::string& a_id)
         {
-            const auto colon = a_id.find(':');
-            auto* data = RE::TESDataHandler::GetSingleton();
-            if (!data || colon == std::string::npos) return nullptr;
-            const auto local = static_cast<std::uint32_t>(
-                std::strtoul(a_id.substr(0, colon).c_str(), nullptr, 16));
-            return data->LookupForm<T>(local, a_id.substr(colon + 1));
+            const std::uint32_t id = ResolveFormId(a_id);
+            auto* form = id ? RE::TESForm::LookupByID(id) : nullptr;
+            return form ? form->As<T>() : nullptr;
         }
 
         bool PublishKeywordAllowed(std::string_view a_editorId)

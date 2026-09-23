@@ -183,20 +183,14 @@ namespace CostumeFW::abilities
         // Forms
         // ---------------------------------------------------------------
 
+        // Through the one range-checked resolver (review 2026-09-23 C11): a
+        // recipe's magic effect or condition form saved against a plugin that
+        // was later ESL-flagged must come back unresolved - which the hydrate
+        // pass already handles - not as another plugin's record.
         RE::TESForm* LookupColon(const std::string& a_id)
         {
-            const auto colon = a_id.find(':');
-            if (colon == std::string::npos) {
-                return nullptr;
-            }
-            std::uint32_t local = 0;
-            try {
-                local = static_cast<std::uint32_t>(std::stoul(a_id.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return nullptr;
-            }
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            return dh ? dh->LookupForm(local, a_id.substr(colon + 1)) : nullptr;
+            const std::uint32_t id = ResolveFormId(a_id);
+            return id ? RE::TESForm::LookupByID(id) : nullptr;
         }
 
         // The canonical colon-id of a pool ability, which is what the registry

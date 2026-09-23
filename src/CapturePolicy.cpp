@@ -158,6 +158,11 @@ namespace CostumeFW::policy
         return true;
     }
 
+    bool LocalIdInRange(std::uint32_t a_local, bool a_light)
+    {
+        return a_local <= (a_light ? 0xFFFu : 0xFFFFFFu);
+    }
+
     namespace
     {
         // Length of the well-formed sequence starting at a_i (1-4), or 0 when

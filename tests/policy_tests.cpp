@@ -322,6 +322,22 @@ int main()
     CHECK(!ParseColonId("", local, plugin));
     CHECK(!ParseColonId("0080 1:Plugin.esp", local, plugin));  // embedded space
 
+    // --- The local id has to fit its plugin (review 2026-09-23 C11) ----------
+    // The parse accepts up to 32 bits; whether the id can name a record of its
+    // plugin is a separate question, because the engine ADDS the local id to
+    // the plugin's base without masking it and an overlong one lands in some
+    // other plugin. A light plugin holds FFF, a full one FFFFFF.
+    CHECK(ParseColonId("1000D62:Skyrim.esm", local, plugin) && local == 0x1000D62u);
+    CHECK(!LocalIdInRange(local, false));  // would have been Update.esm's 0x000D62
+    CHECK(!ParseColonId("123456789:Skyrim.esm", local, plugin));  // more than 32 bits
+    CHECK(LocalIdInRange(0xFFF, true));
+    CHECK(!LocalIdInRange(0x1000, true));
+    CHECK(!LocalIdInRange(0x12A45, true));  // an ESP id kept after the plugin was ESLified
+    CHECK(LocalIdInRange(0x12A45, false));
+    CHECK(LocalIdInRange(0xFFFFFF, false));
+    CHECK(!LocalIdInRange(0x1000000, false));
+    CHECK(LocalIdInRange(0, true) && LocalIdInRange(0, false));
+
     // --- Shipped defaults are what the docs claim ----------------------------
     CHECK(DefaultBlockNames().size() == 1 && DefaultBlockNames()[0] == "CORE Carrier");
     CHECK(DefaultBlockPlugins().size() == 1 && DefaultBlockPlugins()[0] == "MARA");

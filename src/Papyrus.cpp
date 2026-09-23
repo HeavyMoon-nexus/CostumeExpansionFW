@@ -59,22 +59,11 @@ namespace CostumeFW
         // FormKey in Papyrus. TESDataHandler lookup only - no scene graph.
         RE::TESForm* ResolveForm(RE::StaticFunctionTag*, RE::BSFixedString a_colonId)
         {
-            const std::string colonId = a_colonId.c_str();
-            const auto colon = colonId.find(':');
-            if (colon == std::string::npos) {
-                return nullptr;
-            }
-            std::uint32_t localID = 0;
-            try {
-                localID = static_cast<std::uint32_t>(std::stoul(colonId.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return nullptr;
-            }
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
-                return nullptr;
-            }
-            return dh->LookupForm(localID, colonId.substr(colon + 1));
+            // The shared, range-checked resolver (review 2026-09-23 C11) - the
+            // MCM equips what this returns, so another plugin's record here is
+            // another mod's armour on the player.
+            const std::uint32_t id = ResolveFormId(a_colonId.c_str());
+            return id ? RE::TESForm::LookupByID(id) : nullptr;
         }
 
         // --- Mutators (scene-graph touching; deferred to the main thread) ------
