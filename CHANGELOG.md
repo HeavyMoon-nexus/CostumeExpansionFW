@@ -38,8 +38,56 @@ Papyrus limit, not a CEF one - and the Boxes page says so if you ever reach it.
 
 **The MCM's Persist page stops running out of room.** A catalog row costs five of
 SkyUI's option positions, so a long catalog ran off the end of the page and its
-last rows came out with no controls. It shows sixteen at a time now, with Prev
-and Next.
+last rows came out with no controls. It shows ten at a time now, with Prev and
+Next. (A page column holds 64 positions, so sixteen rows still ran off.) The
+Boxes overview and Diagnostics stop at the end of the column the same way and
+say how many more there are in SMF.
+
+**Items stop multiplying.** A piece that a preset only listed, with no original
+behind it, was made new each time you took it out of its box, deleted the box
+or ran "Prepare for uninstall", so one preset could keep filling your inventory.
+It's never made now, and while it sits in a box it adds no armor rating or
+enchantment. Capture the real item into that box and it counts in full. Boxes
+you filled from a preset before this version are checked once when a save loads,
+and their pieces with no original are marked the same way. Running "Prepare for
+uninstall" a second time on the same save used to hand everything back again as
+new copies. Now it returns only what is still in storage, and both menus ask
+before they run it. A persist item that another character had removed from the
+catalog was also handed back while you still had it on, so turning it off later
+gave you a second one. And a box token you give to a follower, sell or put in a
+chest is taken back from there, instead of a new one appearing in your inventory
+each time.
+
+**Text that is not UTF-8 no longer crashes the game.** CEF's settings file is
+UTF-8, and a plugin or mesh file name saved in an older codepage (cp1252,
+Shift-JIS) crashed the game when CEF wrote it there. Once such a name was in the
+file, every save you loaded crashed too. A plugin named that way is now refused
+at capture, with the reason, and a costume whose mesh path is named that way is
+shown without SMP physics. File and folder names that the Windows codepage can't
+spell (an accented preset name on a Japanese system, for example) crashed the
+preset list and preset export, and in the path to your Documents folder they
+crashed the game at startup. In a costume's mesh path, one of them stopped every
+box's physics carrier from being rebuilt. CEF handles those paths as Unicode now.
+
+**An NPC assignment can't land on the wrong NPC any more.** Published costumes and
+NPC persist assignments remember their NPC by form ID. When that NPC's plugin
+wasn't loaded, CEF wrote the raw ID back into the next save, and after a load
+order change it could point at a different NPC. An assignment whose NPC isn't
+loaded is now kept for that session only, and saving releases it. For NPC
+persist you get a notice when the save loads, and the assigned items come back
+to you on the next load. A session in which CEF couldn't read its settings also
+used to drop published costume assignments from the save it wrote. They're kept
+now.
+
+**Losing CEF_abilities.json no longer hands your abilities to other costumes.**
+When the file went missing (an Overwrite clean-up or a profile move is enough),
+CEF started a new one and gave the enchantment abilities your save was still
+using to other costumes, which could leave their bonuses on your character for
+good. A missing file now counts as a first run only when nothing says otherwise.
+If a backup exists, CEF asks you to run `cef abilities restore`. If the save
+carries abilities the file doesn't list, they're reserved, passthrough is off for
+that session, and CEF tells you not to save. `cef abilities restore` also brings
+back the newest copy now, not the one from before the latest change.
 
 ### Added
 
@@ -57,6 +105,15 @@ and Next.
   separate, a helmet with its own hair-hiding part. CEF shows one of them and
   always has; now it says so when you capture the item, naming the slots it is
   showing and the ones it is leaving out.
+- **`cef pub forget <1-8>` and `cef npcpersist forget <1-8>`.** An assignment
+  whose NPC can never come back (its plugin removed, or a non-persistent NPC that
+  died and was cleaned up) could not be settled: it blocked Unpublish for good,
+  and an NPC persist one kept its slot and its items. These let it go, by the
+  number `list` prints. SMF's Recall dialog and NPC page do the same when the NPC
+  can't be reached.
+- Diagnostics lists costumes whose mesh path is not UTF-8, which are shown
+  without physics.
+- The MCM's Main page shows whether CostumeExpansionFW.dll is running.
 
 ### Fixed
 
@@ -100,6 +157,109 @@ and Next.
   happened to be off when the moment came, so a quick off-and-on left the NPC
   undressed until the next time they changed clothes or you loaded a save. It
   waits now.
+- **A damaged NIF no longer crashes the game.** CEF builds physics carriers in
+  the background, and a broken mesh in a box (a zero-size skin partition, a file
+  with no root node) crashed the game on every rebuild while it was there. The
+  builder now stops on it, logs the crash code and leaves the carriers as they
+  were.
+- **A value of the wrong type in one of CEF's files no longer crashes every
+  launch.** A hand-edited or damaged `CEF_abilities.json` or `carriers.json` with,
+  say, text where a number belongs crashed the game at startup, and again when
+  Diagnostics opened. It's treated like any other damaged file now: the registry
+  is refused with a message, and a bad `carriers.json` falls back to the default
+  carriers.
+- **A settings file that was locked for a moment could be wiped.** If
+  `CEF_settings.json` was there but couldn't be opened (held by a sync client or
+  an editor), CEF read it as a fresh install, the next change wrote an empty file
+  over it, and the next start copied that over the backup. Now it loads the
+  backup, and if that fails too, it writes no settings for that session.
+- **Settings and registry writes survive a power cut.** They were atomic but not
+  flushed, so a crash of the whole system right after a write could leave a file
+  of zeros. The new file is flushed to disk before it replaces the old one.
+- **Show real body kept references to bones FSMP had removed.** The real body's
+  skin wasn't part of the bone pinning and clean-up that costume pieces get, so
+  after FSMP rebuilt a skeleton it could point at freed bones, which can crash the
+  game. It's handled like any costume piece now.
+- **An item id that doesn't fit its plugin resolves to nothing.** After a plugin
+  is ESL-flagged or compacted, an id CEF had saved can be too large for it. The
+  game adds it to the plugin's base anyway, so it landed on a record in another
+  plugin. CEF checks the range now and reports the item as missing.
+- **The same item with its plugin name in a different case is one item.**
+  `MyMod.esp` and `mymod.esp` counted as two, so an item could add its stats twice
+  or take another box's original.
+- **The shipped MARA entry on the Blocked list only blocks MARA.** It matched any
+  plugin whose name began with "MARA", which also blocked unrelated mods such as
+  "Marauder.esp". It names MARA.esp, MARA.esm and MARA.esl now. Entries you add
+  yourself still match by prefix.
+- **SMF did things before a save was loaded.** At the main menu, "Prepare for
+  uninstall" returned nothing and still said "safe to uninstall". Everything that
+  changes state waits for a loaded save now.
+- **The MCM's "Prepare for uninstall" did nothing when the DLL wasn't running**
+  (`CEF_DISABLE.txt`, a failed load), and it said nothing either, so removing the
+  mod afterwards lost everything in the hidden storage. It now empties the
+  storage into your inventory itself and says so.
+- **A hidden storage the MCM created is kept by the game now**, not only by the
+  MCM's script, so it no longer depends on the MCM.
+- **"Remove from box" and "Delete box" change nothing when the settings can't be
+  written.** They used to hand the item back while the box definition still
+  listed it, so the next take-out made a second one.
+- **Reloading settings no longer drops an active persist item it can't
+  re-register.** It stayed on your character but left the save's active list, so
+  the next save lost it.
+- **Distribute token can be switched off while its box is worn.** That stopped
+  working in 1.6.4.
+- **`CEF_NOINJECT.txt` really injects nothing.** The persist head carrier was
+  still registered and the head rebuilt while it was there, and the MCM's Enable
+  toggle overwrote the saved on/off setting. The toggle now shows what actually
+  happened and mentions the file.
+- **MCM clicks could land on the wrong control.** After a page change, an option
+  from the previous page could still answer, so a click could toggle another
+  box's setting. Old options are cleared on every page change now. The guard
+  that stops you acting on an out-of-date box page also blocked the Body, persist
+  Preset and Presets menus, and those work again. A quarantined box gets a page of
+  its own with the reason and Delete, and the selection mark shows again (`<` was
+  swallowed as HTML, so it's `*` now).
+- **SMF's "Assign to box" on the Presets page picked boxes by slot**, so on a slot
+  shared by several boxes it could assign to the wrong one. It lists and assigns
+  by box now.
+- **SMF's edit fields show the saved value** instead of what you last typed, and
+  hide slots accept commas between numbers.
+- **SMP costumes with an effect-shader part can get a physics carrier.** A
+  glowing part that uses an effect shader (a rune, a gem) failed the carrier
+  builder's own check on every rebuild, so that box never got physics.
+- **One costume that fails to build no longer freezes every carrier.** A failed
+  or partial carrier build used to leave every box on its old carrier. What did
+  build is applied now.
+- **Physics XML in an older encoding survives the carrier build.** A file declared
+  as Shift-JIS (or anything but UTF-8) came out broken after CEF merged it. It's
+  converted to UTF-8 now, and one that isn't UTF-8 and declares no encoding is
+  refused with a reason. Bone names also match regardless of case, as they do in
+  the game.
+- **A few arrows could get a costume switched off.** The engine adds a hit decal
+  under the shape that was hit, which can sit under CEF's attachment, and CEF
+  read that as corruption. After three hits it parked the costume with "a costume
+  keeps getting damaged by another mod". Those are recognized as the engine's own
+  now.
+- **Texture swaps no longer repaint other actors.** An ARMA color variant or a
+  Show real body skin texture was applied to a material the game shares, so an
+  NPC wearing the same armor, or the item on the ground, changed with it. CEF
+  changes a copy now. On VR it still changes the shared one for the time being.
+- **An LE-format first-person mesh falls back to the third-person model** instead
+  of being injected.
+- **Enchanted items captured into a worn box.** The enchantment CEF recorded
+  could come from a different copy than the one it stored, and every capture into
+  a box you were wearing used up one ability slot for good. Both are fixed.
+- **A quarantined box's token is left alone.** Its stats, name, replacement and
+  carrier were still being updated.
+- **A comment after a value in the ini switched it off.** `bEnabled=0 ; off for
+  now` made CEF ignore the line, so the emergency off switch silently did
+  nothing. Text after `;` or `#` is ignored now.
+- **Less work per frame and per event.** An NPC's 3D load no longer waits for the
+  main thread's lock, a burst of equips runs one reconcile instead of one each,
+  changing one appearance setting is one small write, the dead-bind check walks
+  each actor once per pass, and SMF's Boxes page stops redoing its lookups every
+  frame. The MCM is still slow with many boxes (each call waits a frame), and its
+  Boxes page says the SMF menu is faster.
 
 ## v1.6.4 (2026-09-18)
 

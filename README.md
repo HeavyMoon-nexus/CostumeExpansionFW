@@ -182,9 +182,20 @@ reloading or playing on will not re-apply anything). Save, then remove the mod.
 
 It empties the hidden storage: the persist entries this save has switched off, anything
 left over from a rollback, and the second and later copies of a stack all come back too.
-The one thing it cannot return is an item whose costume plugin is switched off — that item
-is not there to be handed over — so it counts those and tells you to turn the plugin back
-on and run it again rather than saying "safe to uninstall".
+The one thing it cannot return is an item whose costume plugin is switched off. The game
+already took that item out of the storage when the save loaded without its plugin, so CEF
+counts those and tells you, instead of saying "safe to uninstall".
+
+**If it says some items could not be returned, don't save.** Those items are still in
+the save you loaded, but a save made now won't have them. Quit, turn the plugin back on,
+load the same save and run it again.
+
+Running it a second time on the same save is safe. It only hands back what is still in
+storage, and the confirmation says so before you proceed. It needs a loaded save, so the
+SMF button stays disabled at the main menu. If CEF's DLL is not running (`CEF_DISABLE.txt`,
+`bEnabled=0`, or a failed load), the MCM's button empties the storage into your inventory
+itself and says so. If it cannot reach the storage either, it tells you not to remove the
+mod yet.
 
 **"Re-enable from Main" is not an undo.** It turns CEF back on, but your items are already
 back in your inventory. The box definitions still list them, so taking one out of a box
@@ -217,6 +228,10 @@ If you want the boxes working again, capture the items into them again.
   A costume that ships separate meshes per race is built from the player-race
   variant, so it can look wrong on an NPC of another race. Boxes on your own
   character are not affected.
+- **A mesh path that is not UTF-8 gets no physics carrier.** A costume whose mesh folder
+  or file name was saved in a legacy codepage is still captured and shown, but its SMP
+  cloth parts render statically: the carrier build is driven by a JSON manifest, and JSON
+  has to be UTF-8. Diagnostics lists these under "Mesh paths that are not UTF-8 text".
 - **The ability pool is append-only.** A costume whose enchantment changes takes
   a new ability and keeps the old one, because a save may still refer to it. A
   piece that is re-enchanted or tempered often therefore costs more than one.
@@ -244,6 +259,9 @@ does not bundle fonts.
   "CORE Carrier"; add your own on the SMF **Blocked** page), and any armor carrying the
   **`CEF_NoCapture`** keyword — mod authors can tag their utility items via ESP or KID
   (see the included `CostumeFW_NoCapture_KID.ini` template) to keep them out of CEF.
+  Since 1.6.4.1 CEF also refuses, with the reason, an item from a plugin whose **file name
+  is not UTF-8** (a name saved in a legacy codepage such as cp1252 or Shift-JIS). CEF writes
+  the plugin name into its settings file, and that file has to be UTF-8.
 - **MARA (Multiple Amulets and Rings... Automatically).** Its "CORE Carrier" host item
   crashed the game when picked in `+ Add worn item` (report: 2026-07-22); v1.5.0 blocks
   it (all four layers above match it). While MARA is running, CFW also **refuses to
