@@ -32,11 +32,12 @@
 // SKSE Menu Framework v3 consumer header (vendored; pinned commit recorded in
 // SKSEMenuFramework.h.commit.txt). Every call resolves the SMF DLL's exports at
 // runtime (GetProcAddress) - no link dependency, and with SMF absent every
-// wrapper is a safe no-op. Render callbacks run on the game's UI-render path
-// with the game frozen (SMF default FreezeTimeOnMenu) - reads follow the same
-// "read-only snapshot tolerated" contract as the Papyrus VM thread
-// (Papyrus.cpp:27), and every mutation is deferred via AddTask exactly like the
-// CFW_Native mutators.
+// wrapper is a safe no-op. Render callbacks are called from inside Main::Draw -
+// the MAIN thread, the same one the task pump and the natives run on (review
+// 2026-09-23 M1; it was once believed to be the D3D present thread) - with the
+// game frozen (SMF default FreezeTimeOnMenu). Mutations are still deferred via
+// AddTask, like the CFW_Native mutators, so a page never changes state in the
+// middle of drawing itself.
 #pragma warning(push)
 #pragma warning(disable : 4996)  // <codecvt> deprecation (header's UnicodeToUtf8)
 #pragma warning(disable : 4099)  // ImGuiTextFilter struct/class mismatch
@@ -572,6 +573,7 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderMain()
         {
+            Diag::NoteThreadOf("SMF RenderMain");  // M1: which thread SMF draws on
             bool on = CefEnabled();
             // Greyed out while CEF_NOINJECT.txt is there: ticking it could only
             // rewrite the saved choice the file is holding back (W3).
@@ -1319,14 +1321,13 @@ namespace CostumeFW::SmfUI
             EndScrollList();
         }
 
-        // H3 (NPC_AUDIT_2026-08-03): the SMF render callback runs on the D3D
-        // present thread, and the old code DEEP-COPIED the live publish/npr
-        // stores (vector<shared_ptr> + strings + maps) every frame while the
-        // main-thread task pump erases/push_backs them - a vector reallocation
-        // or string destruction mid-copy is a use-after-free. The snapshots are
-        // now taken ON THE MAIN THREAD via a queued task and handed to the
-        // renderer through a mutex-guarded cache (refreshed every ~500ms while
-        // the page is visible). Buttons already mutate via AddTask, so a
+        // H3 (NPC_AUDIT_2026-08-03) believed the SMF render callback ran on the
+        // D3D present thread, racing the task pump while it DEEP-COPIED the live
+        // publish/npr stores every frame. It runs inside Main::Draw on the main
+        // thread (review 2026-09-23 M1), so that race was not real - but the
+        // cache stays: the snapshot is taken in a queued task and refreshed
+        // every ~500ms while the page is visible, which is also what keeps the
+        // copy off the per-frame path. Buttons mutate via AddTask, so a
         // half-second-stale VIEW is harmless.
         struct NpcPageCache
         {

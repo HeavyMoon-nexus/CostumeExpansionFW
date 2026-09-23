@@ -5,9 +5,10 @@
 // The SMF UI's entry into the SAME native-op bodies the Papyrus natives run
 // (defined in Papyrus.cpp; these are forwarding wrappers ONLY - single
 // implementation, two thin UIs, no drift). Every mutator keeps the CFW_Native
-// contract (Papyrus.cpp:27): definition changes are synchronous, scene changes
-// are queued to the main thread - so these are safe from the SMF render thread
-// exactly as they are from the Papyrus VM thread.
+// contract (Papyrus.cpp): definition changes are synchronous, scene changes are
+// queued with AddTask. Both callers are on the MAIN thread - SMF renders from
+// inside Main::Draw, and the natives run synchronized with the frame (review
+// 2026-09-23 M1; StoreLock.h has the whole picture).
 namespace CostumeFW::UiOps
 {
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content);

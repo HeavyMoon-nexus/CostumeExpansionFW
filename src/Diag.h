@@ -5,6 +5,7 @@
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -97,6 +98,26 @@ namespace CostumeFW::Diag
         s_seen.emplace(key, n);
         if (auto logger = spdlog::default_logger()) {
             logger->info("thread census: {} executing on thread #{} (id {:x})", a_fn, n, key);
+        }
+    }
+
+    // Once per TAG (not per thread, like the census above): which census thread
+    // a code path runs on. For the paths whose thread the comments have got
+    // wrong before - SMF render, a native, a task (review 2026-09-23 M1): three
+    // "thread census: X runs on id N" lines with one id settle it.
+    inline void NoteThreadOf(const char* a_tag)
+    {
+        static std::mutex s_m;
+        static std::unordered_map<std::string, bool> s_tags;
+        {
+            std::lock_guard lk{ s_m };
+            if (!s_tags.try_emplace(a_tag, true).second) {
+                return;
+            }
+        }
+        NoteExecutionThread(a_tag);  // puts a new thread into the census too
+        if (auto logger = spdlog::default_logger()) {
+            logger->info("thread census: {} runs on id {:x}", a_tag, ThisThreadKey());
         }
     }
 

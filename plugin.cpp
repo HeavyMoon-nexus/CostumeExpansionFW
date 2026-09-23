@@ -456,6 +456,7 @@ namespace
             // save (a CTD rollback can predate the registration - C §9-18); it
             // rebuilds the head only when something actually changed.
             SKSE::GetTaskInterface()->AddTask([] {
+                CostumeFW::Diag::NoteThreadOf("post-load task");  // M1: a task's thread
                 // Hidden-store handling moved to the co-save (P2): RevertCallback
                 // clears the per-save store id at load START, LoadCallback restores
                 // THIS save's (ROOT A protection preserved). Clearing it here ran

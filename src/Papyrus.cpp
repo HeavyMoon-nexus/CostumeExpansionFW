@@ -2,6 +2,7 @@
 #include "BodyMorph.h"
 #include "BoxStore.h"
 #include "Config.h"  // NoInject - SetEnabled must not write while it is set (W3)
+#include "Diag.h"    // NoteThreadOf (M1)
 #include "Preset.h"
 #include "PublishStore.h"
 #include "SkinRebind.h"
@@ -26,9 +27,13 @@ namespace CostumeFW
     {
         constexpr const char* kClass = "CFW_Native";
 
-        // --- Queries (read-only; safe on the Papyrus VM thread) ---------------
-        // g_active is mutated only by main-thread tasks; while the MCM is open the
-        // game is paused, so no Reconcile/equip task races these reads.
+        // --- Queries ------------------------------------------------------------
+        // Every native here is registered without a_callableFromTasklets, so the
+        // VM runs it on the MAIN thread, synchronized with the frame - not on a VM
+        // thread, whatever older comments in this file say (review 2026-09-23
+        // M1). Each call therefore costs a frame, which is why a big MCM page is
+        // slow. Do not make them NoWait to speed that up: they would then run on
+        // VM threads and genuinely race the task pump and the Update hook.
 
         bool NpcEspLoadedNative(RE::StaticFunctionTag*)
         {
@@ -438,6 +443,7 @@ namespace CostumeFW
         // --- Global on/off (Main page) ---------------------------------------
         bool IsEnabled(RE::StaticFunctionTag*)
         {
+            Diag::NoteThreadOf("native IsEnabled");  // M1: which thread a native runs on
             return CefEnabled();
         }
 
