@@ -1,6 +1,7 @@
 #include "AbilityPool.h"
 
 #include "AtomicWrite.h"
+#include "JsonRead.h"  // typed reads - the registry is read at kDataLoaded (C16)
 #include "AvDiag.h"  // AvConsoleName - the legacy report must name actor values
 #include "BoxStore.h"    // ContentEffectsFor - what a content is really worth
 #include "SkinRebind.h"  // ActiveSnapshot - what is worn RIGHT NOW
@@ -670,15 +671,30 @@ namespace CostumeFW::abilities
             return true;
         }
 
+        bool LoadRegistryEntries(std::string& a_why);  // fwd (below)
+
         // Returns false only for a registry that EXISTS and is broken. A
         // missing file is a first run.
+        //
+        // A refusal leaves NOTHING half-read in memory: every false path clears
+        // the entries it had got through, so a disabled pool lists and counts
+        // nothing rather than whatever came before the line that failed.
         bool LoadRegistry(std::string& a_why)
         {
             g_entries.clear();
             g_byContent.clear();
             g_missingGenerations.clear();
             g_migratedFromSchema1 = false;
+            if (LoadRegistryEntries(a_why)) {
+                return true;
+            }
+            g_entries.clear();
+            g_byContent.clear();
+            return false;
+        }
 
+        bool LoadRegistryEntries(std::string& a_why)
+        {
             std::ifstream in(kRegistryPath);
             if (!in) {
                 return true;
@@ -690,18 +706,36 @@ namespace CostumeFW::abilities
                 a_why = std::format("{} is not readable ({})", kRegistryPath, e.what());
                 return false;
             }
-            const int schema = doc.value("schema", 0);
+            // Every read from here on is typed. This runs synchronously at
+            // kDataLoaded, so a throw out of it is a crash at EVERY launch - and
+            // one the console never gets to see, which puts `cef abilities
+            // restore` out of reach and leaves deleting the file, straight into
+            // the C7 case (review 2026-09-23 C16). value() throws on a root that
+            // is not an object and on a field of the wrong type, so it is not
+            // used on anything that decides whether the file is sound.
+            if (!doc.is_object()) {
+                a_why = std::format("{} is not a JSON object", kRegistryPath);
+                return false;
+            }
+            const auto schemaIt = doc.find("schema");
+            if (schemaIt == doc.end() || !schemaIt->is_number_integer()) {
+                a_why = std::format("{} has no schema number this build can read", kRegistryPath);
+                return false;
+            }
+            const int schema = schemaIt->get<int>();
             if (schema != kSchema && schema != kSchemaLegacy) {
                 a_why = std::format("{} is schema {}, this build reads {} and {}", kRegistryPath,
                     schema, kSchemaLegacy, kSchema);
                 return false;
             }
-            if (!doc.contains("abilities") || !doc["abilities"].is_array()) {
+            const auto listIt = doc.find("abilities");
+            if (listIt == doc.end() || !listIt->is_array()) {
                 a_why = std::format("{} has no abilities list", kRegistryPath);
                 return false;
             }
-            const auto stored = doc.value("checksum", std::string{});
-            const auto actual = std::format("{:016x}", Fnv1a(doc["abilities"].dump()));
+            // A checksum of the wrong type reads as none, which cannot match.
+            const auto stored = JsonStr(doc, "checksum");
+            const auto actual = std::format("{:016x}", Fnv1a(listIt->dump()));
             if (stored != actual) {
                 a_why = std::format("{} does not match its own checksum - it has been edited or "
                                     "truncated (a copy of the last two good ones is beside it)",
@@ -709,7 +743,12 @@ namespace CostumeFW::abilities
                 return false;
             }
 
-            for (const auto& j : doc["abilities"]) {
+            // The checksum says CEF wrote this list, so the entries should all be
+            // well-formed - but a list CEF wrote with a bug in it is exactly the
+            // case that must not become a crash at every launch. Any throw below
+            // is the whole registry refused, like every other reason here.
+            try {
+            for (const auto& j : *listIt) {
                 PoolKey key;
                 if (schema == kSchemaLegacy) {
                     // §7.2. 1.6.3 stored an index into the only pool there was,
@@ -767,6 +806,11 @@ namespace CostumeFW::abilities
                     g_byContent[e.content] = key;
                 }
                 g_entries.emplace(key, std::move(e));
+            }
+            } catch (const nlohmann::json::exception& e) {
+                a_why = std::format("{} has an entry this build cannot read ({})", kRegistryPath,
+                    e.what());
+                return false;
             }
             if (schema == kSchemaLegacy) {
                 g_migratedFromSchema1 = true;

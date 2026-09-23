@@ -6,6 +6,7 @@
 #include "Config.h"     // NoInject (the file form of the gentle master switch)
 #include "StoreLock.h"
 #include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
+#include "JsonRead.h"     // typed reads for carriers.json (C16)
 #include "FormId.h"       // MakeColonId (shared with the ability pool)
 #include "TokenIdentity.h"  // who owns a form, decided from its plugin (v1.6.4)
 #include "AbilityPool.h"  // the audit reports the passthrough state alongside the pools
@@ -2094,13 +2095,21 @@ namespace CostumeFW
                 doc = nlohmann::json::object();
             }
         }
-        if (const auto pj = doc.find("persist"); pj != doc.end() && pj->is_object()) {
-            say("[CEF] persist entry: rev=" + std::to_string(pj->value("rev", -1)) +
-                " count=" + std::to_string(pj->value("count", -1)) +
-                " file=" + pj->value("file", std::string{ "?" }) +
-                " parts=" + std::to_string(pj->value("parts", nlohmann::json::array()).size()));
-        } else {
-            say("[CEF] persist entry: none (no persist build yet)");
+        // Typed reads: carriers.json is written by the builder and edited by
+        // hand when someone is debugging, and value() throws on a field of the
+        // wrong type - "rev": null crashed the console command whose job is to
+        // look at a broken file (review 2026-09-23 C16).
+        try {
+            if (const auto pj = doc.find("persist"); pj != doc.end() && pj->is_object()) {
+                say("[CEF] persist entry: rev=" + std::to_string(JsonInt(*pj, "rev", -1)) +
+                    " count=" + std::to_string(JsonInt(*pj, "count", -1)) +
+                    " file=" + JsonStr(*pj, "file", "?") +
+                    " parts=" + std::to_string(JsonArray(*pj, "parts").size()));
+            } else {
+                say("[CEF] persist entry: none (no persist build yet)");
+            }
+        } catch (const std::exception& e) {
+            say(std::string("[CEF] persist entry: carriers.json unreadable (") + e.what() + ")");
         }
         say("[CEF] persist: catalog=" + std::to_string(g_persist.size()) +
             " active(this save)=" + std::to_string(ActivePersistIds().size()) +
@@ -2626,18 +2635,25 @@ namespace CostumeFW
             }
             // Same pre-1.6.4 fallback as ApplyCarrierOverridesImpl, so the
             // report agrees with the carrier the token is actually pointed at.
-            auto entry = key.empty() ? cj.end() : cj.find(key);
-            if (entry == cj.end() && key == "Box" + std::to_string(slot)) {
-                entry = cj.find(std::to_string(slot));
-            }
-            if (entry != cj.end() && entry->is_object()) {
-                line += ", carrier r" + std::to_string(entry->value("rev", 0));
-                const std::string file = entry->value("file", std::string{});
-                if (!file.empty() && !CarrierFileOnDisk(file)) {
-                    line += " (FILE MISSING)";
+            // Typed reads, and a catch behind them: this is the page someone
+            // opens BECAUSE a file looks wrong, and "rev": null used to crash
+            // it on the spot (review 2026-09-23 C16).
+            try {
+                auto entry = key.empty() ? cj.end() : cj.find(key);
+                if (entry == cj.end() && key == "Box" + std::to_string(slot)) {
+                    entry = cj.find(std::to_string(slot));
                 }
-            } else {
-                line += ", carrier: none built";
+                if (entry != cj.end() && entry->is_object()) {
+                    line += ", carrier r" + std::to_string(JsonInt(*entry, "rev", 0));
+                    const std::string file = JsonStr(*entry, "file");
+                    if (!file.empty() && !CarrierFileOnDisk(file)) {
+                        line += " (FILE MISSING)";
+                    }
+                } else {
+                    line += ", carrier: none built";
+                }
+            } catch (const std::exception&) {
+                line += ", carriers.json unreadable";
             }
             out.push_back(line);
         }
@@ -2645,13 +2661,16 @@ namespace CostumeFW
         out.push_back("# Persist");
         out.push_back("catalog=" + std::to_string(g_persist.size()) +
                       "  active(this save)=" + std::to_string(ActivePersistIds().size()));
-        if (const auto pj = cj.find("persist"); pj != cj.end() && pj->is_object()) {
-            out.push_back("carrier r" + std::to_string(pj->value("rev", -1)) +
-                          ", smp content=" + std::to_string(pj->value("count", -1)) +
-                          ", proxy parts=" +
-                          std::to_string(pj->value("parts", nlohmann::json::array()).size()));
-        } else {
-            out.push_back("carrier: none built");
+        try {
+            if (const auto pj = cj.find("persist"); pj != cj.end() && pj->is_object()) {
+                out.push_back("carrier r" + std::to_string(JsonInt(*pj, "rev", -1)) +
+                              ", smp content=" + std::to_string(JsonInt(*pj, "count", -1)) +
+                              ", proxy parts=" + std::to_string(JsonArray(*pj, "parts").size()));
+            } else {
+                out.push_back("carrier: none built");
+            }
+        } catch (const std::exception&) {
+            out.push_back("carriers.json unreadable");
         }
         {
             const auto pool = PersistPool();
