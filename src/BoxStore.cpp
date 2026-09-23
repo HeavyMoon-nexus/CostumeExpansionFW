@@ -5403,7 +5403,7 @@ namespace CostumeFW
         }
     }
 
-    bool CaptureEnchant(const std::string& a_content)
+    bool CaptureEnchant(const std::string& a_content, bool a_rebuildNow)
     {
         StoreLock lk;
         // v1.3.2 r3 (re-review P2-2): function-boundary admission. The UIs
@@ -5517,9 +5517,17 @@ namespace CostumeFW
         // the persist aggregate builds at load, and the MCM flow runs the add
         // native (which queues its rebuild) BEFORE this capture - a snapshot
         // stored now would silently sit out until the next game load (07-21
-        // finding; the reporter's "enchant not reflected"). Rebuild + re-apply
-        // here so the caller's ordering can't matter.
-        ReapplyStatsForContent(a_content);
+        // finding; the reporter's "enchant not reflected"). So the stats are
+        // rebuilt - but NOT here when the caller moves the item next: at this
+        // point the original is not in storage yet, the rebuild pays from the
+        // flat snapshot, and the one after the move pays from the stored
+        // original's live enchantment. Two different effect sets are two pool
+        // generations, and the first is kept forever for old saves - one slot
+        // burned per capture (review 2026-09-23 W22). CaptureItemToStore
+        // rebuilds once the original is where it will be read from.
+        if (a_rebuildNow) {
+            ReapplyStatsForContent(a_content);
+        }
         return has;
     }
 
@@ -6061,6 +6069,9 @@ namespace CostumeFW
         if (RefOnlyErase(a_id)) {
             SKSE::log::info("custody: '{}' now has its original - no longer reference-only", a_id);
         }
+        // Now that the original is where every stat source reads it from, the
+        // one rebuild of this capture (W22 - see CaptureEnchant).
+        ReapplyStatsForContent(a_id);
         return true;
     }
 

@@ -693,7 +693,12 @@ namespace CostumeFW
         float magnitude{ 0.0f };
     };
     std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content);
-    bool CaptureEnchant(const std::string& a_content);
+    // a_rebuildNow: rebuild the holder's stats at once. A caller that moves the
+    // item with CaptureItemToStore right after passes false - that function
+    // rebuilds once the original is in storage, and a rebuild before the move
+    // would pay from a different source and burn an ability-pool slot (review
+    // 2026-09-23 W22).
+    bool CaptureEnchant(const std::string& a_content, bool a_rebuildNow = true);
 
     // The content's captured tempering multiplier (ExtraHealth at capture; healed
     // from the hidden store's original for older captures). 1.0 = untempered.

@@ -251,8 +251,8 @@ namespace CostumeFW::SmfUI
                     RE::DebugNotification("CostumeFW: already in this box - item not moved");
                     return;
                 }
-                CaptureEnchant(id);       // before the move (worn instance data)
-                CaptureItemToStore(id);
+                CaptureEnchant(id, false);  // before the move (worn instance data)
+                CaptureItemToStore(id);     // ...which rebuilds the stats once (W22)
                 auto* player = RE::PlayerCharacter::GetSingleton();
                 const std::uint32_t tf = ResolveFormId(token);
                 if (player && tf && !player->GetWornArmor(tf)) {
@@ -295,8 +295,8 @@ namespace CostumeFW::SmfUI
                     RE::DebugNotification("CostumeFW: already in persist - item not moved");
                     return;
                 }
-                CaptureEnchant(id);
-                CaptureItemToStore(id);
+                CaptureEnchant(id, false);
+                CaptureItemToStore(id);  // rebuilds the stats once (W22)
                 RE::DebugNotification(("CostumeFW: persist added " + ItemDisplayName(id)).c_str());
             });
         }
