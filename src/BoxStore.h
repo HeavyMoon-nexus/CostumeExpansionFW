@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "CapturePolicy.h"
@@ -974,6 +975,10 @@ namespace CostumeFW
     int FindBoxByToken(const std::string& a_token);
     bool BoxWornAt(int a_index);              // token currently equipped on player
     std::uint32_t BoxTokenFormAt(int a_index);  // resolved token FormID (0 if none)
+    // Every form the player has equipped, in ONE walk of the inventory - for a
+    // list that asks "is this worn?" once per row per frame, which used to walk
+    // the inventory once per row (review 2026-09-23 M14). Main thread.
+    std::unordered_set<std::uint32_t> WornArmorForms();
     std::vector<std::string> BoxContents(const std::string& a_token);  // by token (for detach)
 
     // --- Definition mutators (token-keyed; edit the store + rewrite json ONLY) ---

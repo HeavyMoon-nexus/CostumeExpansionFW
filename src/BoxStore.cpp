@@ -7325,7 +7325,24 @@ namespace CostumeFW
         if (a_index < 0 || a_index >= static_cast<int>(g_boxes.size())) {
             return 0;
         }
-        return ResolveFormId(g_boxes[a_index].token);
+        return TokenFormOf(g_boxes[a_index]);  // cached (W13)
+    }
+
+    std::unordered_set<std::uint32_t> WornArmorForms()
+    {
+        StoreLock lk;
+        std::unordered_set<std::uint32_t> out;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* changes = player ? player->GetInventoryChanges() : nullptr;
+        if (!changes || !changes->entryList) {
+            return out;
+        }
+        for (auto* entry : *changes->entryList) {
+            if (entry && entry->object && entry->IsWorn()) {
+                out.insert(entry->object->GetFormID());
+            }
+        }
+        return out;
     }
 
     std::vector<std::string> BoxContents(const std::string& a_token)

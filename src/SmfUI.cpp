@@ -698,19 +698,33 @@ namespace CostumeFW::SmfUI
             // + New box (free slot picker)
             if (ImGui::BeginCombo("+ New box##cfwnew", "(pick a free slot)")) {
                 // Capacity, inside the combo because that is where it answers a
-                // question and because counting it walks the ARMO array - which
-                // the list below does anyway, but not every frame the page is up.
-                const auto stats = BoxTokenPoolStats();
+                // question. Built when the list OPENS and kept while it is open:
+                // counting walks the ARMO array and every row resolves a name,
+                // and doing that every frame of an open combo was the page's
+                // heaviest work (review 2026-09-23 M14).
+                struct NewBoxRow
+                {
+                    std::string token, name;
+                    int slot;
+                };
+                static TokenPoolStats s_stats{};
+                static std::vector<NewBoxRow> s_rows;
+                if (ImGui::IsWindowAppearing()) {
+                    s_stats = BoxTokenPoolStats();
+                    s_rows.clear();
+                    for (const auto& t : FreeTokens()) {
+                        s_rows.push_back({ t, ItemDisplayName(t), TokenSlot(t) });
+                    }
+                }
                 ImGui::TextDisabled("%d free of %d token(s) - %d in boxes, %d held by published costumes",
-                    stats.free, stats.total, stats.inBoxes, stats.reserved);
+                    s_stats.free, s_stats.total, s_stats.inBoxes, s_stats.reserved);
                 ImGui::Separator();
-                for (const auto& t : FreeTokens()) {
-                    const int slot = TokenSlot(t);
+                for (const auto& row : s_rows) {
                     const std::string lbl =
-                        std::format("{}: {}##nb{}", ItemDisplayName(t), SlotName(slot), t);
+                        std::format("{}: {}##nb{}", row.name, SlotName(row.slot), row.token);
                     if (ImGui::Selectable(lbl.c_str())) {
-                        UiOps::AddBox(ItemDisplayName(t), t, "");
-                        s_status = std::format("box created for {}", SlotName(slot));
+                        UiOps::AddBox(row.name, row.token, "");
+                        s_status = std::format("box created for {}", SlotName(row.slot));
                     }
                 }
                 ImGui::EndCombo();
@@ -736,11 +750,13 @@ namespace CostumeFW::SmfUI
                 slots.push_back(TokenSlot(boxes.back().token));
                 ++boxesPerSlot[slots.back()];
             }
+            // What the player wears, in one walk for the whole list (M14).
+            const auto wornForms = WornArmorForms();
             for (int i = 0; i < n; ++i) {
                 const BoxDefInfo& b = boxes[static_cast<std::size_t>(i)];
                 const std::string token = b.token;
                 const int slot = slots[static_cast<std::size_t>(i)];
-                const bool worn = BoxWornAt(i);
+                const bool worn = wornForms.contains(BoxTokenFormAt(i));
                 // Every "##"/"###" id on this row is keyed by boxId. It used to
                 // be the slot, which was stable against a deletion shifting box
                 // indices (the MCM's ROOT I analog) and unique while one slot
