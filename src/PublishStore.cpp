@@ -1311,6 +1311,10 @@ namespace CostumeFW
         // come FIRST: ContentHolder now answers "publish:<slot>" for these ids,
         // and AddBox refuses a content that any other holder owns.
         g_published.erase(std::remove(g_published.begin(), g_published.end(), snap), g_published.end());
+        // One settings write for the whole restore (W14) - each content's four
+        // or five settings used to rewrite the file on their own. AddBox still
+        // writes at once, carrying what was set before it.
+        SettingsWriteBatch batch;
         bool restored = AddBox(snap->label, token, {});
         if (restored) {
             // Same box, not a new one that happens to look like it (PLAN §2.4).

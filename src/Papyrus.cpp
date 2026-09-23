@@ -561,13 +561,18 @@ namespace CostumeFW
                     preset.name, missing.size());
             }
             const auto oldContents = BoxContents(token);  // before reassign
-            // The FILE identifies the preset; the name is carried for display.
-            if (!AssignPreset(token, preset.file, preset.name, ok)) {  // sync def + json
-                return false;
+            {
+                // One settings write for the assignment and every preference
+                // it restores, not one per value (W14).
+                SettingsWriteBatch batch;
+                // The FILE identifies the preset; the name is carried for display.
+                if (!AssignPreset(token, preset.file, preset.name, ok)) {  // sync def + json
+                    return false;
+                }
+                // Restore the preset's hide rules + gender modes for its resolvable
+                // contents so a distributed costume keeps its hide/gender behavior.
+                RestorePresetPrefs(preset, ok);
             }
-            // Restore the preset's hide rules + gender modes for its resolvable
-            // contents so a distributed costume keeps its hide/gender behavior.
-            RestorePresetPrefs(preset, ok);
             SKSE::GetTaskInterface()->AddTask([token, oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);
@@ -927,10 +932,13 @@ namespace CostumeFW
                     preset.name, missing.size());
             }
             const auto oldContents = PersistContents();  // before reassign
-            if (!AssignPresetToPersist(preset.file, preset.name, ok)) {  // sync def + json
-                return false;
+            {
+                SettingsWriteBatch batch;  // one write for all of it (W14)
+                if (!AssignPresetToPersist(preset.file, preset.name, ok)) {  // sync def + json
+                    return false;
+                }
+                RestorePresetPrefs(preset, ok);
             }
-            RestorePresetPrefs(preset, ok);
             SKSE::GetTaskInterface()->AddTask([oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);  // unregister old persist contents

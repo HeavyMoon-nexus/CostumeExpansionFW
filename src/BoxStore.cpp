@@ -129,6 +129,16 @@ namespace CostumeFW
         // writes normally.
         bool g_settingsUnreadable = false;
 
+        // Settings write batching (review 2026-09-23 W14). A preset restore or
+        // an unpublish set four to a dozen side-map values per content, each
+        // rewriting the whole settings file through usvfs - fifty to a hundred
+        // writes, and a crash part-way left the middle state on disk. Inside a
+        // SettingsWriteBatch a write only marks the file dirty; the outermost
+        // batch's end writes it once.
+        int g_writeBatchDepth = 0;
+        bool g_writeBatchDirty = false;
+        bool g_writeBatchManifest = false;
+
         // The settings file just read was still in the 1.6.3 shape (no box
         // carried a boxId). Set at load, consumed by the first write after it:
         // that write is the moment the old shape stops existing anywhere, so a
@@ -448,8 +458,24 @@ namespace CostumeFW
         // whether to move the physical item into the hidden store. Taking the
         // user's item and then failing to record where it went is the one
         // outcome worth refusing.
-        bool WriteJson(bool a_writeManifest = true)
+        // a_immediate: write now even inside a SettingsWriteBatch, taking every
+        // change the batch has collected with it. For the callers that act on
+        // the ANSWER - AddBox moves an item only if its entry was saved (F05),
+        // the removals return one only then (W12) - since "dirty, written
+        // later" is not an answer.
+        bool WriteJson(bool a_writeManifest = true, bool a_immediate = false)
         {
+            if (g_writeBatchDepth > 0 && !a_immediate) {
+                g_writeBatchDirty = true;
+                g_writeBatchManifest = g_writeBatchManifest || a_writeManifest;
+                return true;  // the batch's end writes it (W14)
+            }
+            if (g_writeBatchDepth > 0) {
+                // This write carries the batch's changes too.
+                a_writeManifest = a_writeManifest || g_writeBatchManifest;
+                g_writeBatchDirty = false;
+                g_writeBatchManifest = false;
+            }
             if (g_settingsUnreadable) {
                 // One line per attempt: the user needs to know their edits are
                 // not sticking, and why, without a log dive.
@@ -3150,7 +3176,7 @@ namespace CostumeFW
             }
             g_hideRules[id] = std::move(clean);
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -3216,7 +3242,7 @@ namespace CostumeFW
         } else {
             g_bodyMorphOn.erase(id);
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -3247,7 +3273,7 @@ namespace CostumeFW
         } else {
             g_showRealBody.erase(id);
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -3307,7 +3333,7 @@ namespace CostumeFW
                 }
             }
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -7557,7 +7583,7 @@ namespace CostumeFW
         // whether to move the physical item into the hidden store, and taking
         // the item while failing to record where it went is the one outcome
         // worth refusing (F05).
-        const bool saved = WriteJson();
+        const bool saved = WriteJson(true, true);  // the answer is needed now (W14)
         if (!saved) {
             // Put memory back where the disk still is. Reporting failure kept
             // the physical item with the player, but the definition went on
@@ -7639,7 +7665,7 @@ namespace CostumeFW
         auto realBody = g_showRealBody.extract(a_content);    // its show-real-body opt-in
         auto enchants = g_contentEnchants.extract(a_content); // its captured enchantment
         auto temper = g_contentTemper.extract(a_content);     // its captured temper multiplier
-        if (!WriteJson()) {
+        if (!WriteJson(true, true)) {  // the answer is needed now (W14)
             // The mirror of AddBox's rollback (F05). Every caller reads false
             // as "hand nothing back", and handing the item back while the file
             // still lists it is a second copy on the next take-out (review
@@ -7674,7 +7700,7 @@ namespace CostumeFW
         }
         BoxDefInfo removed = std::move(g_boxes[idx]);
         g_boxes.erase(g_boxes.begin() + idx);  // caller detaches each content node
-        if (!WriteJson() && a_keepOnWriteFailure) {
+        if (!WriteJson(true, true) && a_keepOnWriteFailure) {  // needed now (W14)
             // Same rule as RemoveBoxContent (W12): the callers return the
             // contents only on true, so the box has to still be there on false.
             g_boxes.insert(g_boxes.begin() + idx, std::move(removed));
@@ -8131,5 +8157,22 @@ namespace CostumeFW
     void SaveGlobalSettings()
     {
         WriteJson();
+    }
+
+    SettingsWriteBatch::SettingsWriteBatch()
+    {
+        StoreLock lk;
+        ++g_writeBatchDepth;
+    }
+
+    SettingsWriteBatch::~SettingsWriteBatch()
+    {
+        StoreLock lk;
+        if (--g_writeBatchDepth == 0 && g_writeBatchDirty) {
+            const bool manifest = g_writeBatchManifest;
+            g_writeBatchDirty = false;
+            g_writeBatchManifest = false;
+            WriteJson(manifest);
+        }
     }
 }

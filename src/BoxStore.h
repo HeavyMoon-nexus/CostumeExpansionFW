@@ -1034,6 +1034,23 @@ namespace CostumeFW
     // AddBox: create the box for a_token if absent (with a_label), then append
     // a_content if non-empty and not already present. Returns false on bad input.
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content);
+
+    // Groups settings writes (review 2026-09-23 W14): while one is alive, a
+    // settings write only marks the file dirty, and the outermost batch's end
+    // writes it once. For flows that set many values in a row - a preset's
+    // per-content settings, an unpublish's restore - which otherwise rewrote
+    // the whole file for each one. AddBox and the removals still write at
+    // once (taking the batch's changes with them): they act on the answer.
+    // Main thread.
+    class SettingsWriteBatch
+    {
+    public:
+        SettingsWriteBatch();
+        ~SettingsWriteBatch();
+        SettingsWriteBatch(const SettingsWriteBatch&) = delete;
+        SettingsWriteBatch& operator=(const SettingsWriteBatch&) = delete;
+    };
+
     // Both return false - and change nothing - when the settings could not be
     // saved: every caller hands the items back only on true, and handing them
     // back while the file still lists them is a second copy on the next
