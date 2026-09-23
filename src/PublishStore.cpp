@@ -145,7 +145,11 @@ namespace CostumeFW
                 (a_snap.armorType == 2 ? AT::kHeavyArmor : AT::kClothing);
         }
 
-        void ResetPublishedTokenState(int a_slot)
+        // a_forgetHidden=false keeps the slot's per-save "hidden" flag. That flag
+        // came from the co-save, not from the settings, so a settings load that
+        // failed has no business erasing it - the save has to write it back
+        // exactly as it read it (C8).
+        void ResetPublishedTokenState(int a_slot, bool a_forgetHidden = true)
         {
             auto* token = PubTokenArmo(a_slot);
             if (token) {
@@ -170,7 +174,9 @@ namespace CostumeFW
             // otherwise have been forgotten while still applied (v1.6.1.1) -
             // a pool ability is never forgotten, so there is nothing to lose
             // track of.
-            g_hidden.erase(a_slot);
+            if (a_forgetHidden) {
+                g_hidden.erase(a_slot);
+            }
         }
 
 
@@ -573,14 +579,21 @@ namespace CostumeFW
 
     void ParsePublishJson(const nlohmann::json& a_doc)
     {
-        g_published.clear();
         // Snapshots are being replaced. Their contents may now be worth
         // something different, or belong to nobody - both are settled by the
         // convergence and by InvalidatePublishAbilities, which re-derives every
         // published content's value. Nothing needs taking off here: a pool
         // ability belongs to a content, not to a slot, so replacing the slots
         // cannot orphan one.
-        g_maxNpcInjected = std::clamp(a_doc.value("npcConfig", nlohmann::json::object())
+        //
+        // Built aside and swapped in only once the WHOLE list has parsed. A
+        // field of the wrong type throws out of here into LoadBoxes' catch,
+        // and this used to clear first and fill as it went - so the session
+        // kept the costumes that came before the bad one and went on treating
+        // that partial set as the truth (review 2026-09-23 M11/C8). The catch
+        // drops the lot instead (DropPublishedSnapshots).
+        std::vector<std::shared_ptr<PubSnapshot>> next;
+        const int maxNpcInjected = std::clamp(a_doc.value("npcConfig", nlohmann::json::object())
             .value("maxNpcInjected", 8), 1, 64);
         std::unordered_set<int> slots;
         for (const auto& item : a_doc.value("published", nlohmann::json::array())) {
@@ -625,8 +638,10 @@ namespace CostumeFW
                     }
                 }
             }
-            g_published.push_back(std::move(snap));
+            next.push_back(std::move(snap));
         }
+        g_maxNpcInjected = maxNpcInjected;
+        g_published = std::move(next);
         // Pool slots this json does NOT publish must not keep the stamp an
         // earlier definition left on them. A reload replaces the published set
         // and only ever restamped the NEW set, so a costume removed from the
@@ -641,6 +656,24 @@ namespace CostumeFW
         }
         MigrateLegacyPublishIdentity();
         InitializeNpcSupport();
+    }
+
+    void DropPublishedSnapshots()
+    {
+        // LoadBoxes' failure path: the settings did not load, the box store is
+        // holding "loaded empty", and published costumes are part of the same
+        // file - so they go too, rather than surviving as whatever an earlier
+        // load (or half of this one) left behind (M11). Nothing on disk is
+        // touched: every settings write refuses for the rest of the session.
+        //
+        // The pool tokens go back to their unpublished state so none of them
+        // keeps a costume's armour and name with no costume behind it. The
+        // per-save hidden flags are KEPT - they belong to the co-save, and the
+        // next save must write them back unchanged (C8).
+        g_published.clear();
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            ResetPublishedTokenState(slot, false);
+        }
     }
 
     // PLAN §5.5. A snapshot written before 1.6.4 records only the biped slot it

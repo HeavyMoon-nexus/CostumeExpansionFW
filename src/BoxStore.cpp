@@ -670,6 +670,16 @@ namespace CostumeFW
 
         void WriteCarrierManifest()
         {
+            // Not while the settings are unreadable. The store is then holding
+            // "loaded empty", which is not the truth, and a manifest built from
+            // it lists no boxes - the sync that follows would rebuild every
+            // carrier to nothing and write that into carriers.json. WriteJson
+            // never reaches here in that state, but SyncPersistManifest and the
+            // settings reload call this directly (review 2026-09-23 M11).
+            if (g_settingsUnreadable) {
+                SKSE::log::info("carrier manifest: not written - the settings did not load");
+                return;
+            }
             // r4: one immutable generation and one resolver for base admission,
             // selected-ARMA hard/id admission, and the exact model path used by
             // injection. No private ARMO->ARMA walk is allowed here.
@@ -1767,6 +1777,10 @@ namespace CostumeFW
                 "Check the warnings above, then restart.",
                 kSettingsPath, boxesDropped, boxesSeen);
             g_boxes.clear();
+            // A reload that lands here leaves the tokens the PREVIOUS load
+            // stamped carrying their armour, weight and name with no box
+            // behind them (M11). Nothing claims them now, so undo them.
+            ResetUnclaimedTokenStats();
             g_settingsUnreadable = true;  // every WriteJson refuses while set
             return;
         }
@@ -1974,21 +1988,33 @@ namespace CostumeFW
             // no crash, and no data-destroying WriteJson of an empty store.
             SKSE::log::error("settings: field type error ({}) - loaded empty; "
                              "CEF_settings.json left intact for repair", e.what());
+            // EVERY map the extraction above can have started filling. This list
+            // used to stop short: the per-content shape hides, the show-real-body
+            // set and the published costumes survived a failed load holding
+            // whatever had been read before the bad field, and the session went
+            // on acting on them (review 2026-09-23 M11).
             g_boxes.clear();
             g_persist.clear();
             g_hideRules.clear();
             g_genderModes.clear();
             g_bodyMorphOn.clear();
-        g_statEnchantOff.clear();
-        g_statWeightOff.clear();
-        g_statArmorOff.clear();
+            g_statEnchantOff.clear();
+            g_statWeightOff.clear();
+            g_statArmorOff.clear();
+            g_hideShapes.clear();
+            g_contentShapes.clear();
+            g_showRealBody.clear();
             g_contentEnchants.clear();
             g_contentTemper.clear();
             g_persistPreset.clear();
             g_persistPresetName.clear();
             g_custody.clear();
+            DropPublishedSnapshots();
             PublishPolicy({});
             g_cefEnabled = true;
+            // Tokens a previous load stamped (a reload from the MCM/SMF) keep
+            // their armour, weight and name otherwise - no box claims them now.
+            ResetUnclaimedTokenStats();
             // g_settingsLoadOk stays false: the orphan sweep must not run - and the
             // empty state we are holding must never reach the file (this is the
             // path a schema mistake of ours took on 2026-09-08, and only the .bak

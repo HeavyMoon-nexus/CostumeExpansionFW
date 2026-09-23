@@ -154,7 +154,14 @@ namespace CostumeFW
     void InvalidatePublishAbilities();
 
     void EmitPublishJson(nlohmann::json& a_doc);
+    // All or nothing: the published list is replaced only once the whole of it
+    // has parsed. A throw leaves the previous list in place for the caller's
+    // failure path to drop.
     void ParsePublishJson(const nlohmann::json& a_doc);
+    // The settings file did not load: forget every published snapshot, as the
+    // box store forgets its boxes, and put the pool tokens back to their
+    // unpublished state. Keeps the co-save's per-save hidden flags.
+    void DropPublishedSnapshots();
     void SaveGlobalSettings();
 
     // By boxId, not by list position. The caller is a UI row whose click and
