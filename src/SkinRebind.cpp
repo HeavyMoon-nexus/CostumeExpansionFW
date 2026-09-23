@@ -1497,14 +1497,22 @@ namespace CostumeFW
             return true;
         }
 
-        // Apply one BGSTextureSet to a geometry's lighting-shader material IN
-        // PLACE (safe: our cloned NIF owns this material). Uses only type-correct
-        // virtuals - NOT the community-REL InitializeShader (ids 99866/106432) or
-        // InvalidateTextures (99865/106431): those RESOLVE on 1.6.1170 but crash
-        // with an access violation in BSLightingShader when called on a cloned
-        // envmap material (and neither id exists in the VR address library).
-        // (skee/po3 pattern, minus the material clone we don't need because the
-        // material is private.)
+        // Apply one BGSTextureSet to a geometry's lighting-shader material. Uses
+        // only type-correct virtuals - NOT the community-REL InitializeShader
+        // (ids 99866/106432) or InvalidateTextures (99865/106431): those RESOLVE
+        // on 1.6.1170 but crash with an access violation in BSLightingShader when
+        // called on a cloned envmap material (and neither id exists in the VR
+        // address library).
+        //
+        // On a COPY of the material, the skee/po3 way: Create -> CopyMembers ->
+        // new textures -> SetMaterial, which hands the property its own. This
+        // used to write the material in place on the belief that the cloned NIF
+        // owned it - but cloning a NIF does not clone its materials, which the
+        // engine shares, so a colour variant or a real-body skin set repainted
+        // every other user of that material: an NPC in the same armour, the
+        // item on the ground, for the rest of the session (review 2026-09-23
+        // W17). VR keeps the in-place write: SetMaterial's VR address could not
+        // be checked against a VR address library, and a wrong one is a crash.
         bool ApplyTextureSet(RE::BSGeometry* a_geom, RE::BGSTextureSet* a_txst)
         {
             if (!a_geom || !a_txst) {
@@ -1517,10 +1525,27 @@ namespace CostumeFW
                 return false;
             }
             auto* material = static_cast<RE::BSLightingShaderMaterialBase*>(ls->material);
-            material->ClearTextures();                                       // vfunc 0x09
-            material->OnLoadTextureSet(0, static_cast<RE::BSTextureSet*>(a_txst));  // vfunc 0x08
-            ls->SetupGeometry(a_geom);        // vfunc 0x27
-            ls->FinishSetupGeometry(a_geom);  // vfunc 0x28
+            if (REL::Module::IsVR()) {
+                material->ClearTextures();                                       // vfunc 0x09
+                material->OnLoadTextureSet(0, static_cast<RE::BSTextureSet*>(a_txst));  // vfunc 0x08
+                ls->SetupGeometry(a_geom);        // vfunc 0x27
+                ls->FinishSetupGeometry(a_geom);  // vfunc 0x28
+                return true;
+            }
+            auto* fresh = static_cast<RE::BSLightingShaderMaterialBase*>(material->Create());
+            if (!fresh) {
+                return false;
+            }
+            fresh->CopyMembers(material);
+            fresh->ClearTextures();
+            fresh->OnLoadTextureSet(0, static_cast<RE::BSTextureSet*>(a_txst));
+            // true: the property takes its own copy of `fresh`, so the scratch
+            // one is ours to destroy right after.
+            ls->SetMaterial(fresh, true);
+            ls->SetupGeometry(a_geom);
+            ls->FinishSetupGeometry(a_geom);
+            fresh->~BSLightingShaderMaterialBase();
+            RE::free(fresh);
             return true;
         }
 
@@ -2128,10 +2153,14 @@ namespace CostumeFW
         // this the injected copy keeps the NIF's baked-in texture paths. Also runs
         // on the idempotent already-attached path, so a TXST-only skin change
         // converges without waiting for a 3D rebuild.
-        void ApplySkinTextures(RE::NiAVObject* a_root3D, const char* a_nodeName,
-            RE::BGSTextureSet* a_txst)
+        //
+        // The holder is the RECORDED one (realBodyHolder3p / 1p). It used to be
+        // found by GetObjectByName on the actor root - a skeleton search, which
+        // this file forbids for good reason (see DetachRecorded): the NPC root is
+        // a BSFlattenedBoneTree, and a miss descends into every holder (W17).
+        void ApplySkinTextures(RE::NiAVObject* a_holder, RE::BGSTextureSet* a_txst)
         {
-            auto* holder = a_root3D ? a_root3D->GetObjectByName(a_nodeName) : nullptr;
+            auto* holder = a_holder;
             if (!holder || !a_txst) {
                 return;
             }
@@ -2252,7 +2281,7 @@ namespace CostumeFW
                     m3p.swap, true, kNoHide, "realbody", false, actor,
                     a_state.realBodyHolder3p, a_state.realBodyParent3p,
                     &a_state.visualRealBody3p, ReferenceEffectActive(a_state, actor, false));
-                ApplySkinTextures(root3p, kRealBodyNode, skinTx);
+                ApplySkinTextures(a_state.realBodyHolder3p.get(), skinTx);
             }
             if (a_state.isPlayer) {
                 if (auto* root1p = actor->Get3D(true); root1p && !m1p.nifPath.empty()) {
@@ -2260,7 +2289,7 @@ namespace CostumeFW
                         m1p.swap, true, kNoHide, "realbody", false, actor,
                         a_state.realBodyHolder1p, a_state.realBodyParent1p,
                         &a_state.visualRealBody1p, ReferenceEffectActive(a_state, actor, true));
-                    ApplySkinTextures(root1p, kRealBodyNode, skinTx);
+                    ApplySkinTextures(a_state.realBodyHolder1p.get(), skinTx);
                 }
             }
             g_boneRefSink = savedSink;
