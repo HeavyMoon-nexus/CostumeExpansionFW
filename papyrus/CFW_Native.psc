@@ -56,10 +56,12 @@ Form Function GetBoxTokenForm(Int index) Global Native
 ; Create the box for token (with label) if absent, then append content if given.
 Bool Function AddBox(String label, String token, String content) Global Native
 
-; Remove one content from a box, or the whole box, or relabel it. returnStored
-; (border audit ROOT A): the MCM passes false - it returns the captured item
-; itself (its store-only-vs-fabricate custody). Another mod calling this native
-; directly passes true so the item is handed back, not stranded in the store.
+; Remove one content from a box, or the whole box, or relabel it. False - and
+; nothing changed - when the settings could not be saved. returnStored (border
+; audit ROOT A): true hands the captured items back once the removal is saved.
+; The MCM deletes a box with true, and removes one content with false followed
+; by ReturnItem (for its notice); either way the item comes back only after the
+; definition is gone (1.6.4.1).
 Bool Function RemoveBoxContent(String token, String content, Bool returnStored = false) Global Native
 Bool Function RemoveBox(String token, Bool returnStored = false) Global Native
 Bool Function SetBoxLabel(String token, String label) Global Native
@@ -155,11 +157,32 @@ Function UninstallNpcCleanup() Global Native
 ; Queued to the main thread; returns immediately. SMF calls the same function.
 Function UninstallCleanup() Global Native
 
+; --- Item custody (1.6.4.1): the one implementation both UIs use --------------
+; Hand back one of aId: this save's stored original, else - with aAllowNew - a
+; new copy, except for an id a preset only listed (there is nothing to give
+; back). aNotify shows the "new copy" / "only listed" notices. True if an item
+; reached the player.
+Bool Function ReturnItem(String aId, Bool aAllowNew, Bool aNotify) Global Native
+
+; Move one of aId from the player into the hidden storage (the copy the enchant
+; snapshot was read from), record it, and rebuild the stats after the move.
+; Call CaptureContentEnchant first, while the item is still on the player.
+Bool Function CaptureToStore(String aId) Global Native
+
+; False for a quarantined box (its token is not a working box token right now).
+Bool Function IsBoxUsable(Int index) Global Native
+
+; Always True while the DLL is running. With the DLL absent (CEF_DISABLE.txt, a
+; failed load) the call returns False, which is how to tell.
+Bool Function IsDllRunning() Global Native
+
 ; Box "distribute" flag: whether the token is given to / kept on the player.
 Bool Function GetBoxEnabled(Int index) Global Native
 
 ; Set the distribute flag (off = the token is removed; escape hatch for a slot
-; that conflicts in the load order). Flag only - caller equips/removes the token.
+; that conflicts in the load order). Writes the flag now and queues the token
+; move (give one / unequip and remove all) and then the stat convergence - the
+; caller does NOT move the token itself (1.6.4.1).
 Bool Function SetBoxEnabled(String token, Bool enabled) Global Native
 
 ; Token armor class: 0=Clothing, 1=Light, 2=Heavy. Clothing gives NO armor even
@@ -287,7 +310,8 @@ Bool Function ClearPersistPreset() Global Native
 ; Snapshot the currently-WORN item's effective enchantment (base OR player/
 ; instance enchantment) for a content, so the token's/persist's synthesized
 ; ability reproduces it. Call at capture time while the item is still equipped
-; (before moving it to the store). Returns True if an enchantment was found.
+; (before moving it to the store), then CaptureToStore - which moves that same
+; copy and rebuilds the stats once. Returns True if an enchantment was found.
 Bool Function CaptureContentEnchant(String content) Global Native
 
 ; True if the content's base form has any Papyrus script attached (VMAD). CEF

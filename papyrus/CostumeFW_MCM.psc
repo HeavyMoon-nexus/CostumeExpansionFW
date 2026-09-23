@@ -201,7 +201,16 @@ function BuildPages()
     while i < n && pageCount < cap
         int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
         string name = "Box " + slot + ": " + SlotName(slot)
-        if CFW_Native.GetBoxesOnSlot(slot) > 1
+        if !CFW_Native.IsBoxUsable(i)
+            ; M12: a quarantined box has no slot to name - its token does not
+            ; resolve, and "Box 0: slot 0" reads as a broken box. Same "Box -"
+            ; the SMF list uses.
+            string qlabel = CFW_Native.GetBoxLabel(i)
+            if qlabel == ""
+                qlabel = "quarantined"
+            endIf
+            name = "Box -: " + qlabel
+        elseIf CFW_Native.GetBoxesOnSlot(slot) > 1
             string label = CFW_Native.GetBoxLabel(i)
             if label != ""
                 name = "Box " + slot + ": " + label
@@ -245,10 +254,11 @@ event OnConfigOpen()
 endEvent
 
 event OnPageReset(string a_page)
-    _contentPrevOpt = -1   ; F2: invalidate stale box-page content-nav options
-    _contentNextOpt = -1
-    _persistPrevOpt = -1   ; F20: same, for the persist catalog window
-    _persistNextOpt = -1
+    ; W4 (review 2026-09-23): every option id from the page drawn before goes.
+    ; Each page only sets the ids it draws, so an id left over from another page
+    ; kept matching - a click on this page could land on a handler that still
+    ; held an id from the last one (another box's Distribute, and worse).
+    ClearOptionIds()
     if a_page == "Boxes"
         ResetBoxesOverviewPage()
     elseIf a_page == "Persist"
@@ -280,18 +290,62 @@ event OnPageReset(string a_page)
     endIf
 endEvent
 
+; Every option id the pages hand out, back to -1 (W4). A page then sets only
+; what it draws, and nothing from the page before can match a click.
+function ClearOptionIds()
+    _optEnable = -1
+    _optReload = -1
+    _optUninstall = -1
+    _optAddPersist = -1
+    _optAddInvPersist = -1
+    _optRemoveAllPersist = -1
+    _persistPresetOpt = -1
+    _persistExportOpt = -1
+    _persistPrevOpt = -1
+    _persistNextOpt = -1
+    _optNewBox = -1
+    _optInvFilter = -1
+    _scanShapesOpt = -1
+    _realBodyOpt = -1
+    _contentPrevOpt = -1
+    _contentNextOpt = -1
+    _persistRemoveOpts = Utility.CreateIntArray(1, -1)
+    _persistHideOpts = Utility.CreateIntArray(1, -1)
+    _persistActiveOpts = Utility.CreateIntArray(1, -1)
+    _persistMorphOpts = Utility.CreateIntArray(1, -1)
+    _persistUncatOpts = Utility.CreateIntArray(1, -1)
+    _persistGenderOpts = Utility.CreateIntArray(1, -1)
+    _equipOpts = Utility.CreateIntArray(1, -1)
+    _addWornOpts = Utility.CreateIntArray(1, -1)
+    _addInvOpts = Utility.CreateIntArray(1, -1)
+    _deleteOpts = Utility.CreateIntArray(1, -1)
+    _removeOpts = Utility.CreateIntArray(1, -1)
+    _hideOpts = Utility.CreateIntArray(1, -1)
+    _morphOpts = Utility.CreateIntArray(1, -1)
+    _genderOpts = Utility.CreateIntArray(1, -1)
+    _contentSelectOpts = Utility.CreateIntArray(1, -1)
+    _shapeOpts = Utility.CreateIntArray(1, -1)
+    _distribOpts = Utility.CreateIntArray(1, -1)
+    _armorTypeOpts = Utility.CreateIntArray(1, -1)
+    _assignOpts = Utility.CreateIntArray(1, -1)
+    _exportOpts = Utility.CreateIntArray(1, -1)
+    _presetAssignOpts = Utility.CreateIntArray(1, -1)
+endFunction
+
 function ResetNpcStubPage()
     SetCursorFillMode(TOP_TO_BOTTOM)
     AddHeaderOption("NPC Distribution")
-    AddTextOption("NPC distribution is managed in the", "")
-    AddTextOption("SKSE Menu Framework (SMF) menu, not in this MCM.", "")
-    AddTextOption("Costume Expansion FW's UI is migrating to", "")
-    AddTextOption("SKSE Menu Framework going forward; this MCM", "")
-    AddTextOption("remains for transition purposes only.", "")
+    ; Disabled rows (W4): they are text, and a clickable row that does nothing
+    ; reads as a broken button.
+    AddTextOption("NPC distribution is managed in the", "", OPTION_FLAG_DISABLED)
+    AddTextOption("SKSE Menu Framework (SMF) menu, not in this MCM.", "", OPTION_FLAG_DISABLED)
+    AddTextOption("Costume Expansion FW's UI is migrating to", "", OPTION_FLAG_DISABLED)
+    AddTextOption("SKSE Menu Framework going forward; this MCM", "", OPTION_FLAG_DISABLED)
+    AddTextOption("remains for transition purposes only.", "", OPTION_FLAG_DISABLED)
     if !CFW_Native.NpcEspLoaded()
         AddEmptyOption()
-        AddTextOption("Note: the NPC token add-on plugin", "")
-        AddTextOption("(CostumeFW_NPC.esp) is not installed.", "")
+        AddTextOption("Note: the NPC token add-on plugin", "", OPTION_FLAG_DISABLED)
+        AddTextOption("(CostumeFW_NPC.esp) is not installed.", "", OPTION_FLAG_DISABLED)
     endif
 endFunction
 
@@ -402,6 +456,13 @@ function ResetMainPage()
     _optReload = AddTextOption("Reload settings from disk", "")
 
     AddHeaderOption("Dependencies")
+    ; C10: with the DLL not running this page still opens (the plugin and the
+    ; scripts are there) and every native quietly answers a default. Say so.
+    string dll = "NOT RUNNING"
+    if CFW_Native.IsDllRunning()
+        dll = "OK"
+    endIf
+    AddTextOption("CostumeExpansionFW.dll", dll, OPTION_FLAG_DISABLED)
     string skee = "MISSING"
     if CFW_Native.IsBodyMorphReady()
         skee = "OK"
@@ -444,10 +505,13 @@ function ResetPersistPage()
     ; row costs FIVE of them, so a long catalog ran off the end - the rows at the
     ; bottom came out with no controls at all, which reads as CEF losing them.
     ; Show a window with prev/next, the same shape the box page uses for its
-    ; contents. Sixteen rows is 80 positions and leaves room for everything else
-    ; on the page, including the uncatalogued list below.
+    ; contents. Ten rows (W2, review 2026-09-23): with TOP_TO_BOTTOM a COLUMN
+    ; holds 64 positions, not the page - sixteen rows were 80 and still ran off.
+    ; 64, less the 6 fixed rows above, the 3 page-navigation rows and the 2 of
+    ; Actions, leaves 53: ten rows of five. The uncatalogued list goes to the
+    ; right column.
     int total = contents.Length
-    int perPage = 16
+    int perPage = 10
     int pageCount = 1
     if total > perPage
         pageCount = (total + perPage - 1) / perPage
@@ -528,6 +592,8 @@ function ResetPersistPage()
         ai += 1
     endWhile
     if uncat > 0
+        ; The right column (W2): the left one is full with the catalog window.
+        SetCursorPosition(1)
         AddHeaderOption("Active but not in catalog (" + uncat + ")")
         ; Bounded for the same reason the catalog above is (F20): this list has
         ; no upper size of its own, and rows that run past the page's option
@@ -579,8 +645,20 @@ function ResetBoxesOverviewPage()
         return
     endIf
     AddTextOption("(each box has its own page in the list on the left)", "", OPTION_FLAG_DISABLED)
+    ; D8: the MCM asks the DLL one question per native call, one frame each.
+    AddTextOption("(the SKSE Menu Framework menu is much faster with many boxes)", "", OPTION_FLAG_DISABLED)
+    ; W2: one column holds 64 positions. Rows past that would be dropped with
+    ; nothing to say so; stop short and point at SMF instead.
+    int budget = 64 - 4
+    if _unpagedBoxes > 0
+        budget -= 2
+    endIf
+    int showN = n
+    if showN > budget
+        showN = budget - 1
+    endIf
     int i = 0
-    while i < n
+    while i < showN
         int slot = CFW_Native.GetTokenSlot(CFW_Native.GetBoxToken(i))
         int cnt = CFW_Native.GetBoxContents(i).Length
         string worn = "off"
@@ -596,6 +674,9 @@ function ResetBoxesOverviewPage()
         AddTextOption(row + " (" + cnt + " items)", worn, OPTION_FLAG_DISABLED)
         i += 1
     endWhile
+    if showN < n
+        AddTextOption("(+" + (n - showN) + " more - see SMF)", "", OPTION_FLAG_DISABLED)
+    endIf
 endFunction
 
 ; Shown when a box page's box is gone (the page list only refreshes on reopen).
@@ -627,6 +708,19 @@ function ResetSingleBoxPage(int a_idx)
     string token = CFW_Native.GetBoxToken(a_idx)
     int slot = CFW_Native.GetTokenSlot(token)
     _curBoxId = CFW_Native.GetBoxId(a_idx)   ; ROOT I: the stable handle to re-resolve from
+    if !CFW_Native.IsBoxUsable(a_idx)
+        ; M12: a quarantined box. Its token is not a working box token right
+        ; now, so every control but Delete would act on something that is not
+        ; there. Say why, offer Delete, nothing else.
+        _deleteOpts   = Utility.CreateIntArray(1, -1)
+        _deleteTokens = Utility.CreateStringArray(1, token)
+        AddHeaderOption("Box -: " + CFW_Native.GetBoxLabel(a_idx))
+        AddTextOption("This box's token is not available right now, so", "", OPTION_FLAG_DISABLED)
+        AddTextOption("the box is quarantined: its contents are kept, but", "", OPTION_FLAG_DISABLED)
+        AddTextOption("it puts nothing on you. SMF's Recovery page says why.", "", OPTION_FLAG_DISABLED)
+        _deleteOpts[0] = AddTextOption("Delete box", "")
+        return
+    endIf
     string[] contents = CFW_Native.GetBoxContents(a_idx)
     int total = contents.Length
     ; Keep the current selection if it still belongs to this box; else pick the first
@@ -719,7 +813,9 @@ function ResetSingleBoxPage(int a_idx)
         int idx = cStart + ci
         string mark = ""
         if contents[idx] == _selectedContent
-            mark = "<"
+            ; M12: not "<" - SkyUI renders option text as HTML, and a lone '<'
+            ; opens a tag that swallows it (the same trap as the page labels).
+            mark = "*"
         endIf
         _contentSelectOpts[ci] = AddTextOption("  " + CFW_Native.GetItemName(contents[idx]), mark)
         _contentSelectIds[ci] = contents[idx]
@@ -812,8 +908,14 @@ endFunction
 function ResetDiagnosticsPage()
     SetCursorFillMode(TOP_TO_BOTTOM)
     string[] lines = CFW_Native.GetDiagLines()
+    ; W2: one column holds 64 positions; the two rows at the bottom and a
+    ; "+N more" row come off that.
+    int showN = lines.Length
+    if showN > 61
+        showN = 60
+    endIf
     int i = 0
-    while i < lines.Length
+    while i < showN
         string l = lines[i]
         if StringUtil.Find(l, "# ") == 0
             AddHeaderOption(StringUtil.Substring(l, 2))
@@ -822,6 +924,9 @@ function ResetDiagnosticsPage()
         endIf
         i += 1
     endWhile
+    if showN < lines.Length
+        AddTextOption("(+" + (lines.Length - showN) + " more - see SMF)", "", OPTION_FLAG_DISABLED)
+    endIf
     AddEmptyOption()
     AddTextOption("(reopen this page to refresh)", "", OPTION_FLAG_DISABLED)
 endFunction
@@ -847,8 +952,14 @@ event OnOptionSelect(int a_option)
     ; --- Main ---
     if a_option == _optEnable
         bool now = !CFW_Native.IsEnabled()
-        CFW_Native.SetEnabled(now)
-        SetToggleOptionValue(a_option, now)
+        ; W3: the answer, not the request. With CEF_NOINJECT.txt in place the
+        ; switch cannot turn CEF on, and the native no longer writes the setting
+        ; while the file is there - so say why the box did not tick.
+        bool got = CFW_Native.SetEnabled(now)
+        SetToggleOptionValue(a_option, got)
+        if got != now
+            ShowMessage("CostumeFW: CEF_NOINJECT.txt is in SKSE\\Plugins - nothing is injected while that file is there, whatever this switch says. Delete it to put the costumes back.", false)
+        endIf
         return
     elseIf a_option == _optReload
         CFW_Native.ReloadSettings()  ; full re-read of CEF_settings.json (queued)
@@ -856,7 +967,11 @@ event OnOptionSelect(int a_option)
         ForcePageReset()
         return
     elseIf a_option == _optUninstall
-        UninstallCleanup()
+        ; C3: asked first. The button used to act on one click - a double click
+        ; was two runs.
+        if ShowMessage("Return every captured item, remove the box tokens and turn CEF off? Do this before removing the mod.", true)
+            UninstallCleanup()
+        endIf
         return
     endIf
 
@@ -869,7 +984,7 @@ event OnOptionSelect(int a_option)
             ; original lives on the capturing character's save - fabricating a
             ; copy here would duplicate it for every character that bulk-removes.
             if CFW_Native.IsPersistActive(pc[pi])
-                ReturnItem(CFW_Native.ResolveForm(pc[pi]), false)
+                ReturnItem(pc[pi], false)
                 CFW_Native.SetPersistActive(pc[pi], false)  ; return pairs with deactivation
             endIf
             CFW_Native.RemovePersist(pc[pi])
@@ -898,14 +1013,14 @@ event OnOptionSelect(int a_option)
         ; original lives with the capturing character. Store-only covers the
         ; capturing character removing after deactivation.
         if CFW_Native.IsPersistActive(rid)
-            ReturnItem(CFW_Native.ResolveForm(rid))
+            ReturnItem(rid)
             ; Pair the return with DEACTIVATION (review round 4): RemovePersist
             ; only deletes the catalog entry, so a returned-but-still-active
             ; entry would surface under "Active but not in catalog" and its
             ; [deactivate] would return a SECOND copy.
             CFW_Native.SetPersistActive(rid, false)
         else
-            ReturnItemStoreOnly(CFW_Native.ResolveForm(rid))
+            ReturnItemStoreOnly(rid)
         endIf
         CFW_Native.RemovePersist(rid)
         ForcePageReset()
@@ -937,7 +1052,7 @@ event OnOptionSelect(int a_option)
         ; so a row whose entry was deactivated meanwhile (e.g. by an active
         ; catalog remove, which now deactivates too) must not return again.
         if CFW_Native.IsPersistActive(_persistUncatIds[p])
-            ReturnItem(CFW_Native.ResolveForm(_persistUncatIds[p]))
+            ReturnItem(_persistUncatIds[p])
             CFW_Native.SetPersistActive(_persistUncatIds[p], false)
         endIf
         ForcePageReset()
@@ -996,23 +1111,29 @@ event OnOptionSelect(int a_option)
 
     k = _equipOpts.Find(a_option)
     if k >= 0
-        ToggleBoxToken(a_option, _equipBoxIdx[k])
+        ; W4: the box re-resolved above, not the index the page was drawn with.
+        ToggleBoxToken(a_option, _curBoxIndex)
         return
     endIf
 
     k = _deleteOpts.Find(a_option)
     if k >= 0
-        string[] cont = CFW_Native.GetBoxContents(_curBoxIndex)
-        int ci = 0
-        while ci < cont.Length
-            ReturnItem(CFW_Native.ResolveForm(cont[ci]), false)
-            ci += 1
-        endWhile
         Form tkn = CFW_Native.GetBoxTokenForm(_curBoxIndex)
+        ; W12: the definition goes FIRST and the items come back only if it did
+        ; (returnStored=true hands them back once the removal is saved). The
+        ; other order returned everything, then a removal that could not be
+        ; saved kept the box listing them - and the next removal returned them
+        ; again.
+        if !CFW_Native.RemoveBox(_deleteTokens[k], true)
+            ShowMessage("CostumeFW: the box could not be deleted (see the CEF log) - nothing was returned.", false)
+            return
+        endIf
         if tkn
             Game.GetPlayer().UnequipItem(tkn, false, true)
         endIf
-        CFW_Native.RemoveBox(_deleteTokens[k])
+        ; W5: this page's box is gone; nothing may act on the old index.
+        _curBoxId = ""
+        _curBoxIndex = -1
         Debug.Notification("CostumeFW: box removed - reopen MCM to refresh the page list")
         ForcePageReset()
         return
@@ -1030,8 +1151,12 @@ event OnOptionSelect(int a_option)
     endIf
     k = _removeOpts.Find(a_option)
     if k >= 0
-        ReturnItem(CFW_Native.ResolveForm(_removeContents[k]))
-        CFW_Native.RemoveBoxContent(_removeTokens[k], _removeContents[k])
+        ; W12: remove first, return only if the removal was saved - see Delete.
+        if CFW_Native.RemoveBoxContent(_removeTokens[k], _removeContents[k])
+            ReturnItem(_removeContents[k])
+        else
+            ShowMessage("CostumeFW: the item could not be removed (see the CEF log) - it stays in the box.", false)
+        endIf
         _selectedContent = ""   ; the shown content is gone; rebuild picks a new one
         ForcePageReset()
         return
@@ -1053,6 +1178,12 @@ endFunction
 string Function HolderLabel(string holder)
     if holder == "persist"
         return "Persist"
+    elseIf StringUtil.Find(holder, "publish:") == 0
+        ; M12: the sentinels are not token ids - an item name lookup printed
+        ; them raw. 1-based, like SMF and the console.
+        return "published costume #" + ((StringUtil.Substring(holder, 8) as int) + 1)
+    elseIf StringUtil.Find(holder, "npr:") == 0
+        return "an NPC (persist)"
     endIf
     return CFW_Native.GetItemName(holder) + " (" + SlotName(CFW_Native.GetTokenSlot(holder)) + ")"
 endFunction
@@ -1070,7 +1201,10 @@ ObjectReference Function GetStore()
     if _store == None
         Form base = Game.GetFormFromFile(0x00080D, "CostumeFW.esp")
         if base
-            _store = Game.GetPlayer().PlaceAtMe(base)
+            ; C12: force-persist (the third argument). Without it the engine
+            ; kept this container only while the script's property pointed at
+            ; it - and the MCM is going away in 1.6.5.
+            _store = Game.GetPlayer().PlaceAtMe(base, 1, true)
             if _store
                 _store.Disable()
                 CFW_Native.SetStoreRef(_store)  ; adopt immediately (not just on next open)
@@ -1080,38 +1214,29 @@ ObjectReference Function GetStore()
     return _store
 endFunction
 
-; Return ONE captured copy of akItem to the player: from this save's hidden
-; store when it has one, else as a NEW copy. The new-copy fallback DUPLICATES
-; across characters (the original stays in the capturing save's store) - that
-; is ACCEPTED BY DESIGN: losing the item is worse (in-game decision 2026-07-06,
+; Return ONE captured copy of aId to the player: from this save's hidden store
+; when it has one, else as a NEW copy. The new-copy fallback DUPLICATES across
+; characters (the original stays in the capturing save's store) - that is
+; ACCEPTED BY DESIGN: losing the item is worse (in-game decision 2026-07-06,
 ; CEF_STATE_SCOPE.md §4). 2026-07-07 refinement: the fallback is reserved for
 ; entries THIS save displays - callers use ReturnItemStoreOnly for persist
 ; entries that were never active here. aNotify=false keeps bulk loops quiet.
-function ReturnItem(Form akItem, bool aNotify = true)
-    if !akItem
-        return
-    endIf
-    ObjectReference store = GetStore()
-    if store && store.GetItemCount(akItem) > 0
-        store.RemoveItem(akItem, 1, true, Game.GetPlayer())
-    else
-        Game.GetPlayer().AddItem(akItem, 1, true)
-        if aNotify
-            Debug.Notification("CostumeFW: returned as a new copy (none stored on this character)")
-        endIf
+;
+; 1.6.4.1 (R7): both go through the DLL's one implementation. This used to be
+; its own copy in Papyrus, and it knew nothing of what the DLL learned since:
+; an item a preset only LISTED was minted on every take-out (C2).
+function ReturnItem(string aId, bool aNotify = true)
+    if aId != ""
+        CFW_Native.ReturnItem(aId, true, aNotify)
     endIf
 endFunction
 
 ; Store-only return: hand back this save's stored original if present; never
 ; fabricate a new copy. For persist entries this save does not display
 ; (2026-07-07 P1 refinement - see the single-remove handler).
-function ReturnItemStoreOnly(Form akItem)
-    if !akItem
-        return
-    endIf
-    ObjectReference store = GetStore()
-    if store && store.GetItemCount(akItem) > 0
-        store.RemoveItem(akItem, 1, true, Game.GetPlayer())
+function ReturnItemStoreOnly(string aId)
+    if aId != ""
+        CFW_Native.ReturnItem(aId, false, false)
     endIf
 endFunction
 
@@ -1125,7 +1250,6 @@ function ReturnDroppedContents(string[] aOld, string[] aNew, bool aPersist, stri
     int i = 0
     while i < aOld.Length
         if aNew.Find(aOld[i]) < 0
-            Form itm = CFW_Native.ResolveForm(aOld[i])
             ; A-4 (border audit ROOT A): preset-dropped BOX contents were possibly
             ; never physically captured (a preset just lists ids), so the new-copy
             ; fallback minted a free item on every preset swap. Store-only for box
@@ -1136,9 +1260,9 @@ function ReturnDroppedContents(string[] aOld, string[] aNew, bool aPersist, stri
                 allowNew = aPreActive.Length > 0 && aPreActive.Find(aOld[i]) >= 0
             endIf
             if allowNew
-                ReturnItem(itm, false)
+                ReturnItem(aOld[i], false)
             else
-                ReturnItemStoreOnly(itm)
+                ReturnItemStoreOnly(aOld[i])
             endIf
         endIf
         i += 1
@@ -1188,27 +1312,30 @@ endFunction
 ; The native queues itself onto the main thread, so the page reset below runs
 ; while it works - same as SMF's button, and this page is rebuilt on entry.
 function UninstallCleanup()
+    ; C10: with the DLL not running (CEF_DISABLE.txt, a failed load) the native
+    ; below answers nothing and does nothing - and removing the mod then takes
+    ; the hidden storage, with every captured original in it. So empty it here,
+    ; in Papyrus, and say what happened.
+    if !CFW_Native.IsDllRunning()
+        if _store
+            _store.RemoveAllItems(Game.GetPlayer(), true, true)
+            ShowMessage("CostumeFW: the DLL is not running. The hidden storage was emptied into your inventory - save, then remove the mod.", false)
+        else
+            ShowMessage("CostumeFW: the DLL is not running and nothing could be returned. Do NOT remove the mod yet.", false)
+        endIf
+        return
+    endIf
     CFW_Native.UninstallCleanup()  ; returns, removes, detaches, disables, notifies
     ForcePageReset()
 endFunction
 
 function ToggleDistribute(int a_option, int a_boxIndex)
     string token = CFW_Native.GetBoxToken(a_boxIndex)
-    Form tokenForm = CFW_Native.GetBoxTokenForm(a_boxIndex)
     bool wasOn = CFW_Native.GetBoxEnabled(a_boxIndex)
-    Actor player = Game.GetPlayer()
-    if wasOn
-        CFW_Native.SetBoxEnabled(token, false)
-        if tokenForm
-            player.UnequipItem(tokenForm, false, true)
-            player.RemoveItem(tokenForm, 99, true)
-        endIf
-    else
-        CFW_Native.SetBoxEnabled(token, true)
-        if tokenForm && player.GetItemCount(tokenForm) <= 0
-            player.AddItem(tokenForm, 1, true)
-        endIf
-    endIf
+    ; W1: the native moves the token and then converges, in one task, in that
+    ; order. Doing the move here as well raced it - and the convergence saw the
+    ; token still worn and switched distribution straight back on.
+    CFW_Native.SetBoxEnabled(token, !wasOn)
     SetToggleOptionValue(a_option, !wasOn)
     ForcePageReset()
 endFunction
@@ -1358,8 +1485,15 @@ event OnOptionMenuOpen(int a_option)
         int i = 0
         while i < n
             string tk = CFW_Native.GetBoxToken(i)
-            boxOpts[i + 1] = CFW_Native.GetItemName(tk) + ": " + SlotName(CFW_Native.GetTokenSlot(tk))
-            _presetBoxTokens[i + 1] = tk
+            if CFW_Native.IsBoxUsable(i)
+                boxOpts[i + 1] = CFW_Native.GetItemName(tk) + ": " + SlotName(CFW_Native.GetTokenSlot(tk))
+                _presetBoxTokens[i + 1] = tk
+            else
+                ; M12: listed so the rows still line up, but not assignable - a
+                ; quarantined box's token is not a working box token right now.
+                boxOpts[i + 1] = "Box -: " + CFW_Native.GetBoxLabel(i) + " (quarantined)"
+                _presetBoxTokens[i + 1] = ""
+            endIf
             i += 1
         endWhile
         SetMenuDialogOptions(boxOpts)
@@ -1420,13 +1554,73 @@ event OnOptionMenuAccept(int a_option, int a_index)
         ; move (the item is still owned/worn here). Forced gender is no longer
         ; picked at capture - the per-content "Body" menu sets it later.
         CFW_Native.CaptureContentEnchant(contentId)
-        Form contentForm = CFW_Native.ResolveForm(contentId)
-        if contentForm
-            Game.GetPlayer().RemoveItem(contentForm, 1, true, GetStore())
-        endIf
+        ; W21/W22: the DLL moves the item - the same copy the snapshot above was
+        ; read from - and rebuilds the stats after the move, once.
+        CFW_Native.CaptureToStore(contentId)
         Debug.Notification("CostumeFW: persist added " + CFW_Native.GetItemName(contentId))
         WarnIfScripted(contentId)
         ForcePageReset()
+        return
+    endIf
+
+    ; W5 (review 2026-09-23): the handlers that are NOT about the open box page
+    ; come before its guard. The guard stops everything when the page's box is
+    ; gone, and it used to stop these too - the persist preset, the Presets
+    ; page's box picker and the Body menu of a persist row all went dead after
+    ; a box page's box was deleted or published.
+    ; --- per-content "Body" (forced-gender NIF) menu (box + persist rows) ---
+    int gk = _genderOpts.Find(a_option)
+    string genderId = ""
+    if gk >= 0
+        genderId = _removeContents[gk]
+    else
+        gk = _persistGenderOpts.Find(a_option)
+        if gk >= 0
+            genderId = _persistRemoveContents[gk]
+        endIf
+    endIf
+    if genderId != ""
+        if a_index >= 0 && a_index <= 2
+            CFW_Native.SetContentGender(genderId, a_index)  ; re-resolves + re-injects
+            SetMenuOptionValue(a_option, GenderName(a_index))
+        endIf
+        return
+    endIf
+
+    ; --- Persist "Preset" assign menu (0 = manual/clear) ---
+    if a_option == _persistPresetOpt
+        if a_index <= 0
+            CFW_Native.ClearPersistPreset()
+        else
+            ; Snapshot BEFORE the assign: the old catalog for the drop diff,
+            ; the pre-assign actives for the return policy (P1 2026-07-07).
+            string[] oldP = CFW_Native.GetPersistContents()
+            string[] preAct = CFW_Native.GetPersistActive()
+            if !CFW_Native.AssignPersistPreset(_presetFilesCache[a_index])
+                ShowMessage("CostumeFW: preset not assigned - already used by a box, or it contains items captured in a box (see log).", false)
+            else
+                ReturnDroppedContents(oldP, CFW_Native.GetPersistContents(), true, preAct)
+            endIf
+        endIf
+        ForcePageReset()
+        return
+    endIf
+
+    ; --- Presets page "Assign to box" menu (0 = cancel) ---
+    int pk = _presetAssignOpts.Find(a_option)
+    if pk >= 0
+        if a_index > 0 && a_index < _presetBoxTokens.Length && _presetBoxTokens[a_index] != ""
+            string btok = _presetBoxTokens[a_index]
+            int pbi = BoxIndexOfToken(btok)
+            string[] oldPB = CFW_Native.GetBoxContents(pbi)
+            if !CFW_Native.AssignPreset(btok, _presetAssignFiles[pk])
+                Debug.Notification("CostumeFW: assign failed (already used, box invalid, or items captured elsewhere)")
+            else
+                Debug.Notification("CostumeFW: preset assigned")
+                ReturnDroppedContents(oldPB, CFW_Native.GetBoxContents(pbi), false, None)
+            endIf
+            ForcePageReset()
+        endIf
         return
     endIf
 
@@ -1480,11 +1674,8 @@ event OnOptionMenuAccept(int a_option, int a_index)
         ; Enchant snapshot only AFTER the add succeeded (P1-3), before the move.
         ; Forced gender moved to the per-content "Body" menu.
         CFW_Native.CaptureContentEnchant(contentId)
-        Form contentForm = CFW_Native.ResolveForm(contentId)
+        CFW_Native.CaptureToStore(contentId)  ; W21/W22 - see the persist capture
         Actor player = Game.GetPlayer()
-        if contentForm
-            player.RemoveItem(contentForm, 1, true, GetStore())
-        endIf
         Form tokenForm = CFW_Native.GetBoxTokenForm(boxIdx)
         if tokenForm && !CFW_Native.IsBoxWorn(boxIdx)
             if player.GetItemCount(tokenForm) <= 0
@@ -1514,44 +1705,6 @@ event OnOptionMenuAccept(int a_option, int a_index)
         return
     endIf
 
-    ; --- per-content "Body" (forced-gender NIF) menu (box + persist rows) ---
-    int gk = _genderOpts.Find(a_option)
-    string genderId = ""
-    if gk >= 0
-        genderId = _removeContents[gk]
-    else
-        gk = _persistGenderOpts.Find(a_option)
-        if gk >= 0
-            genderId = _persistRemoveContents[gk]
-        endIf
-    endIf
-    if genderId != ""
-        if a_index >= 0 && a_index <= 2
-            CFW_Native.SetContentGender(genderId, a_index)  ; re-resolves + re-injects
-            SetMenuOptionValue(a_option, GenderName(a_index))
-        endIf
-        return
-    endIf
-
-    ; --- Persist "Preset" assign menu (0 = manual/clear) ---
-    if a_option == _persistPresetOpt
-        if a_index <= 0
-            CFW_Native.ClearPersistPreset()
-        else
-            ; Snapshot BEFORE the assign: the old catalog for the drop diff,
-            ; the pre-assign actives for the return policy (P1 2026-07-07).
-            string[] oldP = CFW_Native.GetPersistContents()
-            string[] preAct = CFW_Native.GetPersistActive()
-            if !CFW_Native.AssignPersistPreset(_presetFilesCache[a_index])
-                ShowMessage("CostumeFW: preset not assigned - already used by a box, or it contains items captured in a box (see log).", false)
-            else
-                ReturnDroppedContents(oldP, CFW_Native.GetPersistContents(), true, preAct)
-            endIf
-        endIf
-        ForcePageReset()
-        return
-    endIf
-
     ; --- Box "Preset" assign menu (0 = manual/clear) ---
     k = _assignOpts.Find(a_option)
     if k >= 0
@@ -1571,23 +1724,6 @@ event OnOptionMenuAccept(int a_option, int a_index)
         return
     endIf
 
-    ; --- Presets page "Assign to box" menu (0 = cancel) ---
-    k = _presetAssignOpts.Find(a_option)
-    if k >= 0
-        if a_index > 0 && a_index < _presetBoxTokens.Length
-            string btok = _presetBoxTokens[a_index]
-            int pbi = BoxIndexOfToken(btok)
-            string[] oldPB = CFW_Native.GetBoxContents(pbi)
-            if !CFW_Native.AssignPreset(btok, _presetAssignFiles[k])
-                Debug.Notification("CostumeFW: assign failed (already used, box invalid, or items captured elsewhere)")
-            else
-                Debug.Notification("CostumeFW: preset assigned")
-                ReturnDroppedContents(oldPB, CFW_Native.GetBoxContents(pbi), false, None)
-            endIf
-            ForcePageReset()
-        endIf
-        return
-    endIf
 endEvent
 
 event OnOptionInputOpen(int a_option)
