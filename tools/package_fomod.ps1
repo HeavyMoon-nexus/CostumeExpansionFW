@@ -65,6 +65,13 @@ if (-not (Test-Path -LiteralPath $policyTests)) {
 }
 & $policyTests | Select-Object -Last 1
 if ($LASTEXITCODE -ne 0) { throw "policy_tests.exe failed (exit $LASTEXITCODE) - nothing was packaged." }
+# ...and the two that drive release binaries from Python: the carrier namespace
+# (nifcarrier_cli.exe runs the real Sync) and the registry checksum (cefjson.py,
+# which the test tools edit the registry with, against the DLL's own code).
+foreach ($t in 'tests\nifcarrier\carrier_namespace_test.py', 'tests\registry_checksum_test.py') {
+    & python (Join-Path $repo $t) | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0) { throw "$t failed (exit $LASTEXITCODE) - nothing was packaged." }
+}
 
 # The DLL must be THIS repo's release build. What gets staged is the deployed
 # copy, and every build.cmd overwrites that one - a worktree's, or a

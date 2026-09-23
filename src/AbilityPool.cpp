@@ -7,6 +7,7 @@
 #include "SkinRebind.h"  // ActiveSnapshot - what is worn RIGHT NOW
 #include "ConsoleOut.h"
 #include "FormId.h"
+#include "RegistryChecksum.h"  // shared with the host test (M13)
 #include "TokenIdentity.h"  // which generation a pool plugin name is
 
 #include "RE/E/Effect.h"
@@ -517,16 +518,6 @@ namespace CostumeFW::abilities
         // Registry
         // ---------------------------------------------------------------
 
-        std::uint64_t Fnv1a(std::string_view a_text)
-        {
-            std::uint64_t h = 1469598103934665603ull;
-            for (const unsigned char c : a_text) {
-                h ^= c;
-                h *= 1099511628211ull;
-            }
-            return h;
-        }
-
         nlohmann::json ToJson(const RecipeCondition& a_c)
         {
             nlohmann::json j;
@@ -678,8 +669,7 @@ namespace CostumeFW::abilities
             // Allocate takes its entry back out, the rest simply do not persist.
             std::string text;
             try {
-                const auto body = arr.dump();
-                doc["checksum"] = std::format("{:016x}", Fnv1a(body));
+                doc["checksum"] = RegistryChecksum(arr);
                 doc["abilities"] = arr;
                 text = doc.dump(2);
             } catch (const nlohmann::json::exception& e) {
@@ -800,7 +790,7 @@ namespace CostumeFW::abilities
             }
             // A checksum of the wrong type reads as none, which cannot match.
             const auto stored = JsonStr(doc, "checksum");
-            const auto actual = std::format("{:016x}", Fnv1a(listIt->dump()));
+            const auto actual = RegistryChecksum(*listIt);
             if (stored != actual) {
                 a_why = std::format("{} does not match its own checksum - it has been edited or "
                                     "truncated (a copy of the last two good ones is beside it)",

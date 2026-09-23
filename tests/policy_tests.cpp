@@ -11,6 +11,8 @@
 #include "TokenIdentity.h"
 
 #include <cstdio>
+#include <filesystem>
+#include <set>
 #include <string>
 
 namespace
@@ -157,6 +159,51 @@ namespace
         CHECK(CarrierKeyFor("000811:CostumeFW.esp", 0).empty());
         CHECK(CarrierKeyFor("000811:CostumeFW.esp", 29).empty());
         CHECK(CarrierKeyFor("000811:CostumeFW.esp", 62).empty());
+    }
+
+    // Three programs spell a carrier key: this DLL (tokenid::CarrierKeyFor),
+    // espmerge's CarrierKey (C#, which writes the key into each pool ARMA's
+    // model path) and gen_boxpool_placeholders.ps1 (which names the shipped
+    // placeholder files). --verify-pool already holds the C# side to the files
+    // in package_assets; this holds the DLL to the same files, so all three
+    // agree through what actually ships (review 2026-09-23 M13). Generation 1:
+    // 27 slots x 3 tokens, ARMO local ids 0x800 + 2 * index.
+    void CarrierKeyFileChecks()
+    {
+        using namespace CostumeFW;
+        namespace fs = std::filesystem;
+        const fs::path carriers = fs::path{ CEF_SOURCE_DIR } / "package_assets" / "meshes" / "CostumeFW";
+        const bool haveAssets = fs::is_directory(carriers);
+        CHECK(haveAssets);
+        if (!haveAssets) {
+            return;
+        }
+
+        std::set<std::string> fromDll;
+        bool allPresent = true;
+        for (std::uint32_t i = 0; i < 27 * 3; ++i) {
+            const auto token = policy::FormatColonId(0x800 + i * 2, "CostumeFW_BoxPool1.esp");
+            const auto key = tokenid::CarrierKeyFor(token, 55);
+            fromDll.insert(key);
+            if (key.empty() || !fs::exists(carriers / (key + "_carrier_r0.nif")) ||
+                !fs::exists(carriers / "XML" / (key + "_physics_r0.xml"))) {
+                allPresent = false;
+                std::printf("  no shipped carrier for %s -> '%s'\n", token.c_str(), key.c_str());
+            }
+        }
+        CHECK(allPresent);
+        CHECK(fromDll.size() == 27 * 3);
+
+        // ...and nothing shipped under a BP01 key the DLL would never produce.
+        std::set<std::string> shipped;
+        for (const auto& entry : fs::directory_iterator(carriers)) {
+            const auto name = entry.path().filename().string();
+            const auto cut = name.find("_carrier_r0.nif");
+            if (name.rfind("BP01_", 0) == 0 && cut != std::string::npos) {
+                shipped.insert(name.substr(0, cut));
+            }
+        }
+        CHECK(shipped == fromDll);
     }
 
     // Review 2026-09-23 C1 / R2. IsStrictUtf8 has to accept exactly what
@@ -389,6 +436,7 @@ int main()
     CHECK(PluginDenied(pol, "BadMod_Extra.esp"));
 
     TokenIdentityChecks();
+    CarrierKeyFileChecks();
     Utf8Checks();
     ReturnChecks();
 

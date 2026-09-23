@@ -38,3 +38,12 @@ echo === BUILD (%PRESET%) ===
 cmake --build build/%PRESET% || exit /b 1
 echo === DONE: produced DLL(s) ===
 dir /b build\%PRESET%\*.dll
+
+rem Release builds are what ships, so the host tests gate them: a failure here
+rem fails the build instead of waiting for someone to remember to run them
+rem (review 2026-09-23 M13). The DLL is already deployed by this point - the
+rem exit code is what tells the caller not to trust it.
+if /i "%PRESET%"=="release" (
+    echo === HOST TESTS ===
+    build\release\policy_tests.exe || exit /b 1
+)

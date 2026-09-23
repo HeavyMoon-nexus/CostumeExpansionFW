@@ -66,7 +66,17 @@ if(CEF_BUILD_POLICY_TESTS)
     add_executable(policy_tests tests/policy_tests.cpp src/CapturePolicy.cpp src/TokenIdentity.cpp)
     target_include_directories(policy_tests PRIVATE src)
     target_compile_features(policy_tests PRIVATE cxx_std_23)
+    # The carrier-key checks compare against the files the PS and C# generators
+    # put in package_assets (review 2026-09-23 M13).
+    target_compile_definitions(policy_tests PRIVATE CEF_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     add_test(NAME capture_policy COMMAND policy_tests)
+
+    # The registry checksum as the DLL computes it, for
+    # tests/registry_checksum_test.py (cefjson.py vs nlohmann, M13).
+    add_executable(registry_checksum tests/registry_checksum.cpp)
+    target_include_directories(registry_checksum PRIVATE src)
+    target_link_libraries(registry_checksum PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_features(registry_checksum PRIVATE cxx_std_23)
 endif()
 
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES
