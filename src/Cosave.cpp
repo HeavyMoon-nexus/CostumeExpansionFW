@@ -4,8 +4,10 @@
 #include "PublishStore.h"
 #include "AbilityPool.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace CostumeFW
@@ -368,6 +370,22 @@ namespace CostumeFW
     std::vector<std::string> UnresolvedActiveIds()
     {
         return g_unresolvedActives;
+    }
+
+    void CarryPersistActive(const std::string& a_id)
+    {
+        if (a_id.empty() ||
+            std::find(g_unresolvedActives.begin(), g_unresolvedActives.end(), a_id) !=
+                g_unresolvedActives.end()) {
+            return;
+        }
+        g_unresolvedActives.push_back(a_id);
+        SKSE::log::warn("cosave: '{}' could not be registered - carried for next save", a_id);
+    }
+
+    std::vector<std::string> TakeUnresolvedActives()
+    {
+        return std::exchange(g_unresolvedActives, {});
     }
 
     // NOT called when Config.h's HardDisabled() trips - SKSEPluginLoad returns

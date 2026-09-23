@@ -2579,8 +2579,18 @@ namespace CostumeFW
     {
         StoreLock lk;
         // Snapshot this save's persist actives BEFORE the registry is wiped -
-        // they are co-save state, invisible to the settings JSON.
-        const auto actives = ActivePersistIds();
+        // they are co-save state, invisible to the settings JSON. The carried
+        // ones (their plugin was off at load, or the policy refused them) are
+        // re-tried with the rest: a reload is often the moment the reason went
+        // away - a blacklist entry lifted - and whatever fails again is carried
+        // again below (review 2026-09-23 W20).
+        auto actives = ActivePersistIds();
+        for (auto& id : TakeUnresolvedActives()) {
+            if (std::none_of(actives.begin(), actives.end(),
+                    [&id](const std::string& a_id) { return policy::SameColonId(a_id, id); })) {
+                actives.push_back(std::move(id));
+            }
+        }
         // The re-derive used to be HERE, before LoadBoxes, and that was right
         // while RebuildBoxAbility meant "drop the synthesized spell and mark it
         // stale" - dropping it early, refilling it from the reloaded file
@@ -2612,6 +2622,11 @@ namespace CostumeFW
         for (const auto& id : actives) {
             if (RegisterBoxById(id, {})) {
                 ++restored;
+            } else {
+                // Not dropped (W20): the next save keeps it, the held set keeps
+                // its original out of the sweep, and a later load or reload
+                // that can register it brings it back.
+                CarryPersistActive(id);
             }
         }
         // ClearRegistry above wiped EVERY actor, not just the player - published
