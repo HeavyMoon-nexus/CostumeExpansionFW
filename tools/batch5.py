@@ -12,11 +12,21 @@ that writes nothing.
   python batch5.py verify         after the game run: file unchanged?
   python batch5.py stamp          just record the current md5 (for 5-1, 5-3,
                                   5-10, 5-11 - the items broken outside JSON)
+  python batch5.py unbreak        put back what an 8-8x item moved or edited
+                                  outside the settings (registry, ini)
+
+The 8-8x items are the review's T5 (CEF_ADVERSARIAL_REVIEW_2026-09-23, part 2
+section T). 8-83/84/85 break CEF_abilities.json and 8-88 the ini, which
+restore.ps1 does not cover (the ini lives in the mod folder), so those keep
+their own way back: a file moved away keeps its name + .batch5aside, a file
+edited in place leaves its original as + .batch5orig, and `unbreak` puts both
+back. 8-91 edits the settings like the 5-x items, and restore.ps1 undoes it.
 """
 import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 
 SETTINGS = r'K:\Mo2_SkyrimSE1170\overwrite\SKSE\Plugins\CEF_settings.json'
@@ -29,6 +39,21 @@ STAMP = SETTINGS + '.batch5stamp'
 VICTIM = '000803:CostumeFW.esp'   # "Costume Box 45"
 TWIN = '000801:CostumeFW.esp'     # "Costume Box 44", for the casing-duplicate
 EMPTY = '000A15:CostumeFW.esp'    # "Costume Box 43", 0 contents
+
+REGISTRY = r'K:\Mo2_SkyrimSE1170\overwrite\SKSE\Plugins\CEF_abilities.json'
+# What CEF checks before it will call a missing registry a first run
+# (AbilityPool.cpp LoadRegistryEntries: .bak1 and the 1.6.3 copy), plus .bak2,
+# which rotates with them. All of them gone is "lost with its backups" (8-85).
+REGISTRY_BACKUPS = [
+    REGISTRY + '.bak1',
+    REGISTRY + '.bak2',
+    r'K:\Mo2_SkyrimSE1170\overwrite\SKSE\Plugins\CEF_abilities.pre164.json',
+]
+# The ini the game reads is the mod folder's - nothing in overwrite shadows it.
+INI = r'K:\Mo2_SkyrimSE1170\mods\CostumeExpansionFW\SKSE\Plugins\CostumeExpansionFW.ini'
+ASIDE = '.batch5aside'  # a file moved out of the way
+ORIG = '.batch5orig'    # the untouched copy of a file edited in place
+RUN = '.batch5run'      # what CEF wrote where a moved file was, kept by unbreak
 
 
 def load():
@@ -139,10 +164,122 @@ def i_5_8(d):
     retoken(d, VICTIM, '000800:CostumeFW_NPC.esp', 'CFW_PubToken01 (foreign)')
 
 
+def set_aside(path):
+    if os.path.exists(path + ASIDE):
+        raise SystemExit('%s is already set aside - run "batch5.py unbreak" first' % path)
+    if os.path.exists(path):
+        os.replace(path, path + ASIDE)
+        print('  moved aside: %s' % os.path.basename(path))
+    else:
+        print('  not there  : %s' % os.path.basename(path))
+
+
+def keep_original(path):
+    if os.path.exists(path + ORIG):
+        raise SystemExit('%s already has a %s copy - run "batch5.py unbreak" first'
+                         % (path, ORIG))
+    shutil.copy2(path, path + ORIG)
+
+
+def unbreak():
+    put_back = 0
+    for path in [REGISTRY] + REGISTRY_BACKUPS + [INI]:
+        if os.path.exists(path + ASIDE):
+            # CEF may have written a file of its own there during the run (the
+            # 8-85 audit writes a registry, and every write rotates a .bak1 in).
+            # Keep it for a look rather than lose it.
+            if os.path.exists(path):
+                os.replace(path, path + RUN)
+                print("  kept the run's file as %s" % os.path.basename(path + RUN))
+            os.replace(path + ASIDE, path)
+            print('  put back   : %s' % os.path.basename(path))
+            put_back += 1
+        if os.path.exists(path + ORIG):
+            os.replace(path + ORIG, path)
+            print('  restored   : %s' % os.path.basename(path))
+            put_back += 1
+    print(('%d file(s) put back' % put_back) if put_back else 'nothing to put back')
+    return 0
+
+
+@item('8-83', 'C16: the registry\'s "schema" becomes the string "2" -> refused, no CTD')
+def i_8_83(d):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import cefjson
+    keep_original(REGISTRY)
+    doc = cefjson.load(REGISTRY)
+    doc['schema'] = '2'
+    with io.open(REGISTRY, 'w', encoding='utf-8', newline='') as f:
+        f.write(cefjson.pretty(doc))
+    print('  schema -> "2" (a string); the abilities and their checksum are untouched')
+    print('  expect: no CTD, "abilities: DISABLED - ... has no schema number this build')
+    print('          can read". Undo with "batch5.py unbreak"')
+
+
+@item('8-84', 'C7: the registry is missing but its backups are not -> no empty start')
+def i_8_84(d):
+    set_aside(REGISTRY)
+    print('  expect: "... is missing but its backup is not, so this is not a first run".')
+    print('          "cef abilities restore" + restart fixes it. Then "batch5.py unbreak"')
+
+
+@item('8-85', 'C7: the registry AND its backups are gone -> the save audit reserves')
+def i_8_85(d):
+    for path in [REGISTRY] + REGISTRY_BACKUPS:
+        set_aside(path)
+    print('  load a save wearing an enchanted box. expect: "this save holds pool ability')
+    print('  ... that the registry does not know - reserved" and DO NOT SAVE.')
+    print('  DO NOT SAVE. Quit, then "batch5.py unbreak"')
+
+
+@item('8-88', 'M3: "bEnabled=0 ; comment" in the ini -> CEF is disabled')
+def i_8_88(d):
+    keep_original(INI)
+    with io.open(INI, encoding='utf-8', newline='') as f:
+        text = f.read()
+    eol = '\r\n' if '\r\n' in text else '\n'
+    lines = text.split(eol)
+    hit = [i for i, l in enumerate(lines) if l.strip().lower().startswith('benabled')]
+    if len(hit) != 1:
+        os.remove(INI + ORIG)
+        raise SystemExit('expected one bEnabled line in %s, found %d' % (INI, len(hit)))
+    lines[hit[0]] = 'bEnabled=0 ; batch5 8-88 - an inline comment must not void this'
+    with io.open(INI, 'w', encoding='utf-8', newline='') as f:
+        f.write(eol.join(lines))
+    print('  ini line %d -> %s' % (hit[0] + 1, lines[hit[0]]))
+    print('  expect: "CostumeExpansionFW is DISABLED via external config - doing nothing".')
+    print('          Undo with "batch5.py unbreak"')
+
+
+@item('8-91', 'W11: one more box, on a publish token -> quarantined and left alone')
+def i_8_91(d):
+    token = '000800:CostumeFW_NPC.esp'
+    if any(b.get('token') == token for b in d['boxes']):
+        raise SystemExit('a box already holds %s - run restore.ps1 first' % token)
+    # Shaped like the boxes CEF writes today: the first one's keys, minus the
+    # preset link, with this item's values.
+    box = {k: v for k, v in d['boxes'][0].items() if k not in ('preset', 'presetName')}
+    box.update({
+        'boxId': 'B5B5B5B5B5B50891',
+        'contents': [],
+        'enabled': True,
+        'label': 'batch5 8-91 (publish token)',
+        'token': token,
+        'wear': False,
+    })
+    d['boxes'].append(box)
+    print('  added "%s" on %s' % (box['label'], token))
+    print('  expect: quarantined (foreign plugin); toggling the master switch leaves')
+    print('          the NPC wearing CFW_PubToken01 alone ("cef tokens")')
+
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
     cmd = sys.argv[1]
+
+    if cmd == 'unbreak':
+        return unbreak()
 
     if cmd == 'verify':
         if not os.path.exists(STAMP):
