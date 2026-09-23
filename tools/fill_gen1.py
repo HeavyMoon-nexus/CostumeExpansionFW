@@ -14,7 +14,10 @@ would then have to guess at.
 
 Usage:  python fill_gen1.py            (self-test + dry run)
         python fill_gen1.py --write    (apply; keeps a .before-4-3 copy)
-        python fill_gen1.py --restore  (put the .before-4-3 copy back)
+        python fill_gen1.py --restore  (move the .before-4-3 copy back)
+
+The copy exists exactly while a fill is in effect: --write refuses while it is
+there, and --restore moves it back rather than copying it.
 """
 import argparse
 import io
@@ -41,9 +44,18 @@ def main():
         if not os.path.exists(BAK):
             print('no backup at', BAK)
             return 1
-        shutil.copy2(BAK, REG)
-        print('restored', REG, 'from .before-4-3')
+        os.replace(BAK, REG)
+        print('restored', REG, 'from .before-4-3 (the copy is used up)')
         return 0
+
+    # The .before-4-3 copy is the ONLY registry from before the test. A second
+    # --write would copy the already-filled registry over it, and --restore
+    # could then only bring back the filled one (review 2026-09-23 M15).
+    if args.write and os.path.exists(BAK):
+        print('%s already exists - it is the only copy from before the test,' % BAK)
+        print('and writing again would replace it with the filled registry.')
+        print('Run --restore first (it puts that copy back), then --write.')
+        return 1
 
     doc = cefjson.load(REG)
     arr = doc['abilities']

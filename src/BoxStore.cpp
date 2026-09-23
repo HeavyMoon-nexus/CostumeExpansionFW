@@ -1525,20 +1525,52 @@ namespace CostumeFW
                 si.hStdError = hLog;
                 si.hStdInput = INVALID_HANDLE_VALUE;
             }
+            // The child runs in a job that dies with its handle (review
+            // 2026-09-23 M15). A .cmd command is cmd.exe starting the real
+            // tool, and TerminateProcess on a timeout only ever stopped
+            // cmd.exe: the wedged tool kept running and raced the rerun on the
+            // same carrier files. Terminating the JOB takes the whole tree, and
+            // KILL_ON_JOB_CLOSE means nothing it started outlives the game
+            // either. Not inheritable, so the child cannot hold it open.
+            HANDLE job = CreateJobObjectA(nullptr, nullptr);
+            if (job) {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits,
+                        sizeof(limits))) {
+                    CloseHandle(job);
+                    job = nullptr;
+                }
+            }
+            // Suspended until it is in the job, so nothing it starts is born
+            // outside it.
             BOOL ok = CreateProcessA(nullptr, buf.data(), nullptr, nullptr, inherit,
-                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+                CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0), nullptr, nullptr, &si, &pi);
             if (hLog != INVALID_HANDLE_VALUE) {
                 CloseHandle(hLog);  // child holds its own inherited copy
             }
             if (!ok) {
                 SKSE::log::error("auto-sync: CreateProcess failed ({}) for: {}", GetLastError(), cmd);
+                if (job) {
+                    CloseHandle(job);
+                }
                 g_lastSyncExit = -3;
                 g_syncRunning = false;
                 return;
             }
+            if (job) {
+                if (!AssignProcessToJobObject(job, pi.hProcess)) {
+                    SKSE::log::warn("auto-sync: could not put the sync command in a job ({}) - a "
+                                    "timeout will stop only its first process",
+                        GetLastError());
+                    CloseHandle(job);
+                    job = nullptr;
+                }
+                ResumeThread(pi.hThread);
+            }
             SKSE::log::info("auto-sync: rebuilding carriers ({})", cmd);
             CloseHandle(pi.hThread);
-            std::thread([h = pi.hProcess]() {
+            std::thread([h = pi.hProcess, job]() {
                 DWORD code = 1;
                 if (WaitForSingleObject(h, kSyncTimeoutMs) == WAIT_OBJECT_0) {
                     GetExitCodeProcess(h, &code);
@@ -1549,12 +1581,20 @@ namespace CostumeFW
                     // carrier slots + sync log (review A-3). nifcarrier
                     // publishes atomically, so a mid-build kill cannot leave a
                     // partial carrier behind.
-                    SKSE::log::warn("auto-sync: nifcarrier timed out - terminating child");
-                    TerminateProcess(h, 1);
+                    SKSE::log::warn("auto-sync: nifcarrier timed out - terminating {}",
+                        job ? "the sync command and everything it started" : "the child");
+                    if (job) {
+                        TerminateJobObject(job, 1);
+                    } else {
+                        TerminateProcess(h, 1);
+                    }
                     WaitForSingleObject(h, 5000);
                     g_lastSyncExit = -2;
                 }
                 CloseHandle(h);
+                if (job) {
+                    CloseHandle(job);  // KILL_ON_JOB_CLOSE: whatever it left running stops here
+                }
                 g_syncRunning = false;
                 if (g_syncRerun.exchange(false)) {
                     SpawnSyncProcess();
