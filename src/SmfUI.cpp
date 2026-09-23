@@ -87,6 +87,31 @@ namespace CostumeFW::SmfUI
         // the override. The MCM did the same via SetToggleOptionValue.
         std::unordered_map<std::string, bool> s_pendingWear;  // token -> desired
 
+        // A save is loaded: the player stands in a cell and the main menu is
+        // gone. SMF opens from its hotkey at the main menu too, and there the
+        // player is a throwaway: "Prepare for uninstall" found no store, minted
+        // every box's contents onto it, switched CEF off in the global settings
+        // and said "safe to uninstall" - and deleting the mod then lost every
+        // save's stored originals (review 2026-09-23 C9). Everything that
+        // changes state waits for a save.
+        bool SaveLoaded()
+        {
+            auto* pc = RE::PlayerCharacter::GetSingleton();
+            auto* ui = RE::UI::GetSingleton();
+            return pc && pc->GetParentCell() && ui && !ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
+        }
+
+        // For the pages that change things: says why and answers true (stop
+        // drawing) until a save is loaded.
+        bool NeedsSave()
+        {
+            if (SaveLoaded()) {
+                return false;
+            }
+            ImGui::TextWrapped("Load a save first - storage, tokens and assignments live in the save.");
+            return true;
+        }
+
         // Seeded from a_seed the first time it is asked for and left alone after
         // that - a half-typed name is the thing worth keeping. A seed too long
         // for the buffer is cut at a CHARACTER boundary: snprintf cuts at a byte,
@@ -589,8 +614,16 @@ namespace CostumeFW::SmfUI
             }
 
             ImGui::SeparatorText("Maintenance");
+            // Not before a save is loaded (C9): there is no store to return
+            // from, and the run would mint everything onto a throwaway player.
+            ImGui::BeginDisabled(!SaveLoaded());
             if (ImGui::Button("Prepare for uninstall##cfwun")) {
                 ImGui::OpenPopup("Prepare for uninstall?###cfwunp");
+            }
+            ImGui::EndDisabled();
+            if (!SaveLoaded()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(load a save first)");
             }
             ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
             if (ImGui::BeginPopupModal("Prepare for uninstall?###cfwunp")) {
@@ -629,6 +662,9 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderBoxes()
         {
+            if (NeedsSave()) {
+                return;  // C9
+            }
             // + New box (free slot picker)
             if (ImGui::BeginCombo("+ New box##cfwnew", "(pick a free slot)")) {
                 // Capacity, inside the combo because that is where it answers a
@@ -948,6 +984,9 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderPersist()
         {
+            if (NeedsSave()) {
+                return;  // C9
+            }
             if (ImGui::BeginCombo("+ Add worn item##pw", "(pick)")) {
                 static std::vector<WornItem> s_worn;
                 if (ImGui::IsWindowAppearing()) {
@@ -1171,6 +1210,9 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderPresets()
         {
+            if (NeedsSave()) {
+                return;  // C9
+            }
             static std::vector<Preset::PresetInfo> s_list;
             static bool s_loaded = false;
             if (ImGui::Button("Refresh##cfwprl") || !s_loaded) {
@@ -1344,6 +1386,9 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderNpc()
         {
+            if (NeedsSave()) {
+                return;  // C9
+            }
             NpcPageCache view;
             {
                 std::scoped_lock lk(g_npcPageCacheMutex);
@@ -1751,6 +1796,9 @@ namespace CostumeFW::SmfUI
 
         void __stdcall RenderRecovery()
         {
+            if (NeedsSave()) {
+                return;  // C9
+            }
             std::vector<CustodyRow> log;
             bool valid = false;
             {

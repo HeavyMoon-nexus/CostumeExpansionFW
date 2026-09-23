@@ -7218,6 +7218,21 @@ namespace CostumeFW
         // stretch it needs, which is what the SMF version did, and holding it
         // across the detach and the re-apply would be a new lock order nothing
         // else uses.
+        //
+        // Only with a save loaded (review 2026-09-23 C9). At the main menu the
+        // player is a throwaway with no store: every box's contents were minted
+        // onto it, CEF was switched off in the global settings, and the notice
+        // said "safe to uninstall" while every save's originals were still in
+        // storage. SMF greys the button out; this covers any other caller.
+        {
+            auto* pc = RE::PlayerCharacter::GetSingleton();
+            auto* ui = RE::UI::GetSingleton();
+            if (!pc || !pc->GetParentCell() || !ui || ui->IsMenuOpen(RE::MainMenu::MENU_NAME)) {
+                SKSE::log::warn("uninstall: refused - no save is loaded");
+                RE::DebugNotification("CostumeFW: load a save first - nothing was returned");
+                return;
+            }
+        }
         const UninstallReturnReport rep = UninstallReturnAll();
         // Tokens AFTER the returns - the recall inside them hands publish tokens
         // back to the player, so a loop that ran first would leave those behind.
