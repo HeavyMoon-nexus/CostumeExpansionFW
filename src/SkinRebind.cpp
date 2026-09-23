@@ -2338,6 +2338,7 @@ namespace CostumeFW
             if (!pins.empty()) {
                 auto& refs = a_state.bonePins[kRealBodyNode];
                 refs.insert(refs.end(), pins.begin(), pins.end());
+                SKSE::log::info("realbody: pinned {} bone(s)", pins.size());
             }
             if (any) {
                 SKSE::log::info("realbody: injected player body addon {:08X}", bodyAA->GetFormID());
