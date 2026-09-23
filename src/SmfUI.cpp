@@ -1463,11 +1463,11 @@ namespace CostumeFW::SmfUI
                 }
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("Remove assignment##nprm{}", item.poolSlot).c_str())) {
-                    const RE::FormID actorID = item.actorFormID;
-                    SKSE::GetTaskInterface()->AddTask([actorID] {
-                        auto* form = RE::TESForm::LookupByID(actorID);
-                        RemoveNpcPersist(form ? form->As<RE::Actor>() : nullptr);
-                    });
+                    // By pool slot, so an assignment whose NPC cannot be found
+                    // (its plugin is gone) can be removed too - by actor it
+                    // silently did nothing (review 2026-09-23 W19).
+                    const int poolSlot = item.poolSlot;
+                    SKSE::GetTaskInterface()->AddTask([poolSlot] { ForgetNprAssignment(poolSlot); });
                 }
                 ImGui::TreePop();
             }
@@ -1601,7 +1601,14 @@ namespace CostumeFW::SmfUI
                         ImGui::TextWrapped("Warning: %d unresolved binding(s) are outside the recovery net and will be dropped.", unresolved);
                     if (ImGui::Button("Recall")) {
                         const int slot = snap.pubSlot;
-                        SKSE::GetTaskInterface()->AddTask([slot] { RecallPublished(slot); });
+                        const bool forget = unresolved > 0;
+                        SKSE::GetTaskInterface()->AddTask([slot, forget] {
+                            RecallPublished(slot);
+                            // Do what the warning above says (review 2026-09-23
+                            // W19): Recall on its own keeps them as pending, and
+                            // an NPC whose plugin is gone never settles one.
+                            if (forget) ForgetUnreachablePub(slot);
+                        });
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();

@@ -184,6 +184,15 @@ namespace CostumeFW
     // (Unresolved bindings never ride it since review 2026-09-23 C5 - they live
     // for the session, as the Unpublish guard.)
     bool RecallPublished(int a_slot, bool a_forgetUnreachable = false);
+    // Let go of the bindings on a_slot that cannot be reached: unresolved ones,
+    // ones whose actor is not in the game, and ones carried without a costume.
+    // An actor that never loads again otherwise blocks Unpublish for good
+    // (review 2026-09-23 W19). Returns how many went. Main thread.
+    int ForgetUnreachablePub(int a_slot);
+    // Remove the NPC-persist assignment on a pool slot, resolved or not - the
+    // way to free a slot whose NPC's plugin is gone (W19). A reachable actor
+    // goes through RemoveNpcPersist. Main thread.
+    bool ForgetNprAssignment(int a_poolSlot);
     bool PubHidden(int a_slot);
     bool UnpublishToBox(int a_slot);
     void RefreshPubWearers(int a_slot);

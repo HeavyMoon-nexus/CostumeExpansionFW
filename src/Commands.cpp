@@ -481,6 +481,18 @@ namespace CostumeFW
                 }
                 return;
             }
+            // By the number `list` prints, with no NPC selected - it exists for
+            // the assignment whose NPC cannot be selected any more (W19).
+            if (op == "forget") {
+                int slot = -1;
+                try { slot = std::stoi(split == std::string::npos ? "" : rest.substr(split + 1)) - 1; }
+                catch (...) { Print("[CEF] usage: cef npcpersist forget <1-8>"); return; }
+                SKSE::GetTaskInterface()->AddTask([slot] {
+                    Print(ForgetNprAssignment(slot) ? "[CEF] NPC persist assignment removed" :
+                                                      "[CEF] no NPC persist assignment on that slot");
+                });
+                return;
+            }
             // The engine hands the console-selected reference straight into
             // CompileAndRun (a_target). RE::Console::GetSelectedRef() is kept
             // only as a fallback - its NG implementation reads a raw offset
@@ -554,11 +566,16 @@ namespace CostumeFW
                 const auto op = Lower(split == std::string::npos ? rest : rest.substr(0, split));
                 int slot = -1;
                 try { slot = std::stoi(split == std::string::npos ? "" : rest.substr(split + 1)) - 1; }
-                catch (...) { Print("[CEF] usage: cef pub refresh|recall <1-8>"); return; }
+                catch (...) { Print("[CEF] usage: cef pub refresh|recall|forget <1-8>"); return; }
                 if (op == "refresh")
                     SKSE::GetTaskInterface()->AddTask([slot] { RefreshPubWearers(slot); });
                 else if (op == "recall")
                     SKSE::GetTaskInterface()->AddTask([slot] { RecallPublished(slot); });
+                else if (op == "forget")  // W19: bindings no recall can settle
+                    SKSE::GetTaskInterface()->AddTask([slot] {
+                        Print(std::format("[CEF] pub {}: forgot {} binding(s) that cannot be reached",
+                            slot + 1, ForgetUnreachablePub(slot)).c_str());
+                    });
             }
         } else if (sub == "invisdiag") {
             // Invisibility-propagation groundwork: run once per stage

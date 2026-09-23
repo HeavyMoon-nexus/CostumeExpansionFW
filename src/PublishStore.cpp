@@ -949,7 +949,9 @@ namespace CostumeFW
         const auto* snap = PubByTokenForm(a_base);
         if (!actor || !snap) return;
         auto& binding = EnsureBinding(snap->pubSlot, actor);
-        binding.holder = true;
+        // An unequip is also what happens when the token LEAVES the actor, so
+        // holding it has to be looked up, not assumed (review 2026-09-23 W19).
+        binding.holder = a_equipped || ActorHasItem(actor, PubTokenArmo(snap->pubSlot));
         binding.wearer = a_equipped;
         const bool allowed = g_hidden[snap->pubSlot] || HasActorBindings(actor) ||
             InjectedNpcCount() < static_cast<std::size_t>(g_maxNpcInjected);
@@ -1570,6 +1572,53 @@ namespace CostumeFW
         RegisterNpr(a_actor, *item);
         SyncPersistManifest();
         RefreshNpcPersist(a_actor);
+        return true;
+    }
+
+    int ForgetUnreachablePub(int a_slot)
+    {
+        if (a_slot < 0 || a_slot >= kPoolSize) return 0;
+        // Recall keeps what it cannot reach as pending, so the ability comes off
+        // when the actor loads (F07). An actor whose plugin is gone, or who died
+        // and was cleaned up, never loads: the pending record then blocks
+        // Unpublish for good, and there was no way to let go of it (W19).
+        const auto unresolved = std::erase_if(g_unresolved,
+            [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
+        const auto unreachable = std::erase_if(g_bindings,
+            [a_slot](PubBinding& b) { return b.pubSlot == a_slot && !ResolveActor(b); });
+        const auto carried = std::erase_if(g_carriedBindings,
+            [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
+        const int total = static_cast<int>(unresolved + unreachable + carried);
+        SKSE::log::info("publish: slot {} - forgot {} binding(s) that cannot be reached "
+                        "({} unresolved, {} not in the game, {} without a costume)",
+            a_slot, total, unresolved, unreachable, carried);
+        return total;
+    }
+
+    bool ForgetNprAssignment(int a_poolSlot)
+    {
+        if (a_poolSlot < 0 || a_poolSlot >= kPoolSize) return false;
+        // One the game can still reach goes the normal way - its token comes off.
+        for (const auto& item : g_nprAssignments) {
+            if (item.poolSlot != a_poolSlot) continue;
+            auto* form = RE::TESForm::LookupByID(item.actorFormID);
+            if (auto* actor = form ? form->As<RE::Actor>() : nullptr) {
+                return RemoveNpcPersist(actor);
+            }
+            break;
+        }
+        // Otherwise there is no actor to take anything off: the record goes, the
+        // pool slot is free again, and the next load's sweep hands the contents
+        // back (W19).
+        const auto live = std::erase_if(g_nprAssignments,
+            [a_poolSlot](const NprAssignmentInfo& i) { return i.poolSlot == a_poolSlot; });
+        const auto unresolved = std::erase_if(g_unresolvedNpr,
+            [a_poolSlot](const NprSaveAssignment& i) { return i.poolSlot == a_poolSlot; });
+        if (live + unresolved == 0) return false;
+        RefreshNprGate();
+        SyncPersistManifest();
+        SKSE::log::info("npc persist: slot {} forgotten - its actor cannot be reached; the "
+                        "contents come back on the next load", a_poolSlot);
         return true;
     }
 
