@@ -875,6 +875,13 @@ namespace CostumeFW
             };
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
+                // No carrier for a quarantined box (W11). A no-marker token gets
+                // the same "Box<slot>" key as the real generation-0 box on that
+                // slot, and the two fought over one carrier - a full rebuild on
+                // every sync, and each could end up wearing the other's.
+                if (!BoxTokenUsable(b)) {
+                    continue;
+                }
                 // Several boxes share one biped slot from v1.6.4 on, so the slot
                 // cannot name the artifacts any more - they would overwrite each
                 // other's NIF, XML, hash and revision pool. The carrier key names
@@ -1242,6 +1249,9 @@ namespace CostumeFW
             try {
             bool anyChanged = false;
             for (const auto& b : g_boxes) {
+                if (!BoxTokenUsable(b)) {
+                    continue;  // W11: never repoint an ARMA CEF does not own
+                }
                 auto* armoA = ResolveArmo(b.token);
                 if (!armoA || armoA->armorAddons.empty()) {
                     continue;
@@ -2424,6 +2434,9 @@ namespace CostumeFW
         // makes it see the new answer: off writes zeroes, on writes the sums back.
         // Main thread only - it edits ARMO forms.
         for (const auto& b : g_boxes) {
+            if (!BoxTokenUsable(b)) {
+                continue;  // W11
+            }
             SetTokenStats(b);
         }
         SKSE::log::info("boxes: re-stamped {} token(s) for master {}", g_boxes.size(),
@@ -2456,7 +2469,9 @@ namespace CostumeFW
             return false;
         }
         for (const auto& b : g_boxes) {
-            if (ResolveFormId(b.token) == a_form) {
+            // A quarantined box's token is not a box token to the equip and
+            // container sinks (W11): it may be a publish token an NPC wears.
+            if (BoxTokenUsable(b) && ResolveFormId(b.token) == a_form) {
                 return true;
             }
         }
@@ -5217,6 +5232,14 @@ namespace CostumeFW
         // drops the passthrough keywords / stats a consumer mod reads on the token.
         void SetTokenStats(const BoxDefInfo& a_box)
         {
+            // A quarantined box's token is not ours to stamp (the contract at
+            // the top of BoxStore.h). The case that bites: a box an old build
+            // put on 000800:CostumeFW_NPC.esp - a PUBLISH token an NPC may be
+            // wearing - had its armour, weight, keywords and name overwritten at
+            // every master switch, uninstall and removal (review 2026-09-23 W11).
+            if (!BoxTokenUsable(a_box)) {
+                return;
+            }
             float armorSum = 0.0f;
             float weightSum = 0.0f;
             // a_box.enabled is the box's own Distribute toggle; CefEnabled() is
@@ -5640,7 +5663,8 @@ namespace CostumeFW
         // can be stated once.
         if (cefOn) {
             for (const auto& b : g_boxes) {
-                if (b.enabled || b.contents.empty() || !TokenWorn(b.token)) {
+                if (!BoxTokenUsable(b) || b.enabled || b.contents.empty() ||
+                    !TokenWorn(b.token)) {
                     continue;
                 }
                 SKSE::log::info("boxes: '{}'{} is WORN, so its token distribution is turned back "
@@ -5659,7 +5683,10 @@ namespace CostumeFW
             // ability only asked whether the token was worn - so a token put
             // on by any other means still granted the enchantments of a box
             // the user had turned off (review 2026-09-11 N2).
-            const bool worn = cefOn && b.enabled && TokenWorn(b.token);
+            // A quarantined box pays nothing even if its token is on the player
+            // - it can be a publish token someone else's costume uses (W11). Not
+            // skipped outright: its manual ability still has to come off.
+            const bool worn = cefOn && b.enabled && BoxTokenUsable(b) && TokenWorn(b.token);
             if (worn) {
                 admit(b.contents, "a worn box");
             }
@@ -7642,6 +7669,11 @@ namespace CostumeFW
 
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box)
         {
+            // Not a quarantined box's token either - it may be someone else's
+            // item entirely (W11, see SetTokenStats).
+            if (!BoxTokenUsable(a_box)) {
+                return;
+            }
             auto* token = ResolveArmo(a_box.token);
             if (!token) {
                 return;
