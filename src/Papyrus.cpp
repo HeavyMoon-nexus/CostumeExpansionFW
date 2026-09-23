@@ -1,6 +1,7 @@
 #include "Papyrus.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "Config.h"  // NoInject - SetEnabled must not write while it is set (W3)
 #include "Preset.h"
 #include "PublishStore.h"
 #include "SkinRebind.h"
@@ -447,6 +448,13 @@ namespace CostumeFW
 
         bool SetEnabled(RE::StaticFunctionTag*, bool a_on)
         {
+            // CEF_NOINJECT.txt overrides the setting without touching it, so a
+            // user who deletes the file gets back what they last chose. The MCM
+            // writing its checkbox through here broke that: it stored ON over
+            // the saved OFF while the file was in place (review 2026-09-23 W3).
+            if (NoInject()) {
+                return CefEnabled();
+            }
             SetCefEnabled(a_on);  // sync def + json
             SKSE::GetTaskInterface()->AddTask([] {
                 Reconcile();  // master off hides everything; on re-shows

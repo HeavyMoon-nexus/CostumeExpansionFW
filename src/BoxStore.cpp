@@ -1144,7 +1144,11 @@ namespace CostumeFW
                 const int count = pj->value("count", -1);
                 // M2: keyed off the per-save ACTIVE set (not the catalog) - a
                 // character with nothing activated must not carry the head parts.
-                const bool active = count != 0 && g_cefEnabled && AnyPersistActive();
+                // CefEnabled(), not the stored flag: CEF_NOINJECT.txt has to
+                // keep the head carriers off too, and it did not - the persist
+                // head part stayed registered and the head rebuilt under a
+                // switch that promises nothing is injected (W3).
+                const bool active = count != 0 && CefEnabled() && AnyPersistActive();
                 const std::string file = pj->value("file", "");
                 if (!file.empty() && !CarrierFileOnDisk(file)) {
                     // Fail-safe (mirrors the box carriers): never point a HDPT at
@@ -2356,7 +2360,7 @@ namespace CostumeFW
         }
         say("[CEF] persist: catalog=" + std::to_string(g_persist.size()) +
             " active(this save)=" + std::to_string(ActivePersistIds().size()) +
-            std::string(g_cefEnabled ? "" : " (CEF disabled)"));
+            std::string(CefEnabled() ? "" : " (CEF disabled)"));
         for (auto* part : pool) {
             const char* ed = part->GetFormEditorID();
             const bool reg = PlayerHasHeadPart(part);

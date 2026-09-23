@@ -518,7 +518,12 @@ namespace CostumeFW::SmfUI
         void __stdcall RenderMain()
         {
             bool on = CefEnabled();
-            if (ImGui::Checkbox("Enable CEF##cfw", &on)) {
+            // Greyed out while CEF_NOINJECT.txt is there: ticking it could only
+            // rewrite the saved choice the file is holding back (W3).
+            ImGui::BeginDisabled(NoInject());
+            const bool toggled = ImGui::Checkbox("Enable CEF##cfw", &on);
+            ImGui::EndDisabled();
+            if (toggled) {
                 const bool want = on;
                 SKSE::GetTaskInterface()->AddTask([want] {
                     SetCefEnabled(want);  // def + json
