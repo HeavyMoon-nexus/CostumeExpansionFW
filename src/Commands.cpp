@@ -613,11 +613,20 @@ namespace CostumeFW
             // Read-only. Acts on the console's selected reference when it is an
             // actor - so an NPC's stranded modifiers are reachable by clicking
             // them - and on the player otherwise.
-            auto* targetActor = a_target ? a_target->As<RE::Actor>() : nullptr;
-            SKSE::GetTaskInterface()->AddTask(
-                [targetActor, rest] { AvReport(targetActor, rest); });
+            // A handle, resolved in the task (review 2026-09-23 M5): the raw
+            // pointer this captured could name an actor that unloaded before
+            // the task ran - a frame is enough when the console closes.
+            const auto handle = a_target ? a_target->GetHandle() : RE::ObjectRefHandle{};
+            SKSE::GetTaskInterface()->AddTask([handle, rest] {
+                auto ref = handle.get();
+                AvReport(ref ? ref.get()->As<RE::Actor>() : nullptr, rest);
+            });
         } else if (sub == "abilities") {
-            SKSE::GetTaskInterface()->AddTask([a_target, rest] { abilities::AbilitiesCommand(a_target, rest); });
+            const auto handle = a_target ? a_target->GetHandle() : RE::ObjectRefHandle{};
+            SKSE::GetTaskInterface()->AddTask([handle, rest] {
+                auto ref = handle.get();  // M5: see "av" above
+                abilities::AbilitiesCommand(ref.get(), rest);
+            });
         } else {
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
                   "repair | persist | "
