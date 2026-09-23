@@ -101,4 +101,22 @@ namespace CostumeFW::policy
     // unchanged, and the result is always well-formed. Deterministic, so two
     // different byte strings never share an escape.
     [[nodiscard]] std::string EscapeInvalidUtf8(std::string_view a_s);
+
+    // --- Handing a captured item back (review 2026-09-23 C2 / C3) -------------
+    // What one return request comes to. The whole "may CEF mint a copy" rule is
+    // this one function, so every path that returns items follows it and the
+    // host tests pin the table.
+    enum class ReturnAction
+    {
+        kFromStore,  // the captured original comes back out of the store
+        kRecreate,   // a plain copy is minted - the store has nothing to return
+        kNothing,    // nothing to hand back, and minting a copy would duplicate
+    };
+    // a_inStore     this save's store holds the item
+    // a_fabricate   the caller allows a plain copy when the store misses
+    // a_refOnly     the id is only LISTED - a preset named it, CEF never held it
+    // a_uninstallContext / a_uninstallRan
+    //               an uninstall pass is asking, and one already ran on this save
+    [[nodiscard]] ReturnAction DecideReturn(bool a_inStore, bool a_fabricate, bool a_refOnly,
+        bool a_uninstallContext, bool a_uninstallRan);
 }

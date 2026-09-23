@@ -5580,6 +5580,11 @@ namespace CostumeFW
     // SetStoreRef (MCM OnConfigOpen); cleared on game load (per-save ref).
     static std::uint32_t g_storeFormId = 0;
 
+    // "Prepare for uninstall" already ran on the loaded save (co-save 'UNIN').
+    // Per save, like the store whose originals it says went back. Atomic because
+    // SMF reads it while drawing the uninstall dialog.
+    static std::atomic<bool> g_uninstallRan{ false };
+
     void SetStoreRef(RE::TESObjectREFR* a_store)
     {
         StoreLock lk;
@@ -5613,6 +5618,23 @@ namespace CostumeFW
     {
         StoreLock lk;
         g_storeFormId = a_id;
+    }
+
+    bool UninstallRanOnThisSave()
+    {
+        return g_uninstallRan.load(std::memory_order_relaxed);
+    }
+
+    void RestoreUninstallRan(bool a_ran)
+    {
+        g_uninstallRan.store(a_ran, std::memory_order_relaxed);
+    }
+
+    bool MayRecreate(const std::string&, RecreateContext a_ctx)
+    {
+        StoreLock lk;
+        return policy::DecideReturn(false, true, false, a_ctx == RecreateContext::kUninstall,
+                   UninstallRanOnThisSave()) == policy::ReturnAction::kRecreate;
     }
 
     RE::TESObjectREFR* EnsureStoreRef()
@@ -5736,7 +5758,8 @@ namespace CostumeFW
         }
     }
 
-    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate, bool* a_wasRecreated)
+    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate, bool* a_wasRecreated,
+        RecreateContext a_ctx)
     {
         StoreLock lk;
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -5748,24 +5771,26 @@ namespace CostumeFW
         }
         // Prefer the captured original in the hidden store (keeps tempering /
         // player-enchant instance data), exactly like the MCM's ReturnItem.
-        if (g_storeFormId) {
-            auto* sform = RE::TESForm::LookupByID(g_storeFormId);
-            auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr;
-            if (store) {
-                const auto counts = store->GetInventoryCounts();
-                const auto it = counts.find(obj);
-                if (it != counts.end() && it->second > 0) {
-                    store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
-                    SKSE::log::info("custody: returned stored '{}' to player", a_id);
-                    RecordCustody(a_id, "returned");
-                    if (a_wasRecreated) {
-                        *a_wasRecreated = false;
-                    }
-                    return true;
-                }
-            }
+        auto* sform = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+        auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr;
+        bool inStore = false;
+        if (store) {
+            const auto counts = store->GetInventoryCounts();
+            const auto it = counts.find(obj);
+            inStore = it != counts.end() && it->second > 0;
         }
-        if (a_fabricate) {
+        const bool uninstall = a_ctx == RecreateContext::kUninstall;
+        switch (policy::DecideReturn(inStore, a_fabricate, false, uninstall,
+            UninstallRanOnThisSave())) {
+        case policy::ReturnAction::kFromStore:
+            store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
+            SKSE::log::info("custody: returned stored '{}' to player", a_id);
+            RecordCustody(a_id, "returned");
+            if (a_wasRecreated) {
+                *a_wasRecreated = false;
+            }
+            return true;
+        case policy::ReturnAction::kRecreate:
             player->AddObjectToContainer(obj, nullptr, 1, nullptr);
             SKSE::log::info("custody: fabricated 1x '{}' (none stored on this save)", a_id);
             RecordCustody(a_id, "recreated");
@@ -5773,6 +5798,13 @@ namespace CostumeFW
                 *a_wasRecreated = true;
             }
             return true;
+        case policy::ReturnAction::kNothing:
+            break;
+        }
+        if (a_fabricate && uninstall && UninstallRanOnThisSave()) {
+            SKSE::log::info("custody: '{}' is not in storage and this save was already prepared "
+                            "for uninstall - not recreated",
+                a_id);
         }
         return false;
     }
@@ -6482,9 +6514,13 @@ namespace CostumeFW
         const auto actives = ActivePersistIds();
         const std::unordered_set<std::string> activeSet(actives.begin(), actives.end());
 
+        // kUninstall: the first run on a save mints what is missing, as it always
+        // has; a later one is store-only (C3). The flag is set at the very end,
+        // so every pass of THIS run - the NPC arm included - still counts as the
+        // first.
         const auto give = [&rep](const std::string& a_id, bool a_fabricate) {
             bool recreated = false;
-            if (ReturnStoredItem(a_id, a_fabricate, &recreated)) {
+            if (ReturnStoredItem(a_id, a_fabricate, &recreated, RecreateContext::kUninstall)) {
                 recreated ? ++rep.recreated : ++rep.returned;
             }
         };
@@ -6516,10 +6552,17 @@ namespace CostumeFW
             }
         }
         WriteJson(false);  // the custody rows above
+        const bool again = UninstallRanOnThisSave();
+        // Marked even when some ids could not be read: what WAS returned went
+        // back, and a second run must not mint it again. The way to retry the
+        // unreadable ones is to NOT save, fix the plugin and reload - the reload
+        // brings back an unmarked save (the notice says exactly that).
+        RestoreUninstallRan(true);
         SKSE::log::info(
             "uninstall: returned {} original(s), recreated {}, emptied {} more item(s) out of "
-            "the store, {} could not be read",
-            rep.returned, rep.recreated, rep.drained, rep.unreadable);
+            "the store, {} could not be read{}",
+            rep.returned, rep.recreated, rep.drained, rep.unreadable,
+            again ? " (run again on this save - store only)" : "");
         return rep;
     }
 
@@ -6555,13 +6598,19 @@ namespace CostumeFW
         ApplyCarrierOverrides(false);
         if (rep.unreadable > 0) {
             // "Safe to uninstall" is a claim, so it is only made when it is true.
-            // An unreadable id is a costume plugin that is switched off: its
-            // captured original is still in the save, and deleting CEF now takes
-            // it along.
+            // An unreadable id is a costume plugin that is switched off. The
+            // engine already took those items out of storage when this save
+            // loaded without the plugin, so SAVING now is what loses them for
+            // good - that is the step the notice has to stop. It used to say
+            // "turn it back on and run this again", which did neither: nothing
+            // said not to save, and a re-run in the same session found the
+            // store empty and minted everything a second time (review
+            // 2026-09-23 C3). Reloading the unsaved save brings back one this
+            // run never marked, so the re-run it describes is a first run.
             RE::DebugNotification(
                 ("CostumeFW: " + std::to_string(rep.unreadable) +
-                    " item(s) could NOT be returned - a costume plugin is turned off. Turn it "
-                    "back on and run this again before deleting the mod.")
+                    " item(s) could not be returned because their plugin is off. Don't save. "
+                    "Quit, turn the plugin back on, load this save and run this again.")
                     .c_str());
         } else {
             RE::DebugNotification(

@@ -36,6 +36,11 @@ namespace CostumeFW
         constexpr std::uint32_t kStoreManifestVersion = 1;
         constexpr std::uint32_t kRecordNprState = 'NPRS';
         constexpr std::uint32_t kNprVersion = 1;
+        // "Prepare for uninstall" ran on this save (1 byte). A second run is
+        // store-only (review 2026-09-23 C3). An older DLL skips the record, so
+        // going back a version is safe; it just loses the guard.
+        constexpr std::uint32_t kRecordUninstall = 'UNIN';
+        constexpr std::uint32_t kUninstallVersion = 1;
         constexpr std::uint32_t kMaxBindCount = 1024;
 
         void WriteString(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
@@ -152,6 +157,13 @@ namespace CostumeFW
             } else {
                 SKSE::log::error("cosave: OpenRecord(NPRS) failed");
             }
+
+            if (a_intfc->OpenRecord(kRecordUninstall, kUninstallVersion)) {
+                a_intfc->WriteRecordData(
+                    static_cast<std::uint8_t>(UninstallRanOnThisSave() ? 1 : 0));
+            } else {
+                SKSE::log::error("cosave: OpenRecord(UNIN) failed");
+            }
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intfc)
@@ -194,6 +206,17 @@ namespace CostumeFW
                     }
                     SKSE::log::info("cosave: store manifest restored ({} entry(ies))", ids.size());
                     RestoreStoreManifest(std::move(ids));
+                    continue;
+                }
+                if (type == kRecordUninstall) {
+                    std::uint8_t ran = 0;
+                    if (a_intfc->ReadRecordData(ran) == sizeof(ran)) {
+                        RestoreUninstallRan(ran != 0);
+                        if (ran) {
+                            SKSE::log::info("cosave: this save was prepared for uninstall - a "
+                                            "second run returns stored items only");
+                        }
+                    }
                     continue;
                 }
                 if (type == kRecordPubState) {
@@ -324,6 +347,7 @@ namespace CostumeFW
             // task - which ran AFTER LoadCallback and wiped the restored id).
             RestoreStoreFormId(0);
             RestoreStoreManifest({});  // same per-save rule as the store id above
+            RestoreUninstallRan(false);  // and again: a save without 'UNIN' was never prepared
             SKSE::log::info("cosave: reverted (registry cleared)");
         }
     }

@@ -580,17 +580,40 @@ namespace CostumeFW
     // return it too. Cleared on game load (the ref is per-save). Main thread.
     void SetStoreRef(RE::TESObjectREFR* a_store);
 
+    // Who is asking for a return. kUninstall marks the "prepare for uninstall"
+    // passes: once one has run on the loaded save, the next only hands back what
+    // is still in storage (review 2026-09-23 C3).
+    enum class RecreateContext
+    {
+        kNormal,
+        kUninstall,
+    };
+
+    // May CEF mint a plain copy of a_id when this save's store does not hold it?
+    // No once an uninstall pass ran on this save and another is asking, and no
+    // for an id a preset only listed (R6) - both would hand out an item that
+    // already went back, or never existed on this character. The rule itself is
+    // policy::DecideReturn; this feeds it the live state. Main thread.
+    bool MayRecreate(const std::string& a_id, RecreateContext a_ctx);
+
+    // Whether "prepare for uninstall" has run on the loaded save. Per save, in
+    // the co-save ('UNIN'), because the thing it guards is per save: which
+    // originals THIS character already got back. Lock-free (SMF reads it).
+    bool UninstallRanOnThisSave();
+    void RestoreUninstallRan(bool a_ran);  // co-save load / revert
+
     // Return one captured copy of a_id to the player: the hidden store's original
-    // if it holds one (keeps instance data), else - only if a_fabricate - a fresh
-    // base copy (the accepted cross-save duplication, CEF_STATE_SCOPE.md §4).
-    // Returns true if a copy reached the player. Main thread (touches inventory).
+    // if it holds one (keeps instance data), else - only if a_fabricate and
+    // MayRecreate agrees - a fresh base copy (the accepted cross-save duplication,
+    // CEF_STATE_SCOPE.md §4). Returns true if a copy reached the player. Main
+    // thread (touches inventory).
     // a_wasRecreated (optional) reports HOW the request was met: false = the
     // captured original came back with its tempering and enchantment, true = the
     // store did not have it and a plain copy was minted instead. Only the
     // single-item user paths tell the player about it; the bulk return loops
     // (uninstall, catalog removal) would turn that into a wall of pop-ups.
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate,
-        bool* a_wasRecreated = nullptr);
+        bool* a_wasRecreated = nullptr, RecreateContext a_ctx = RecreateContext::kNormal);
 
     // --- SMF-era custody (P2): the native layer OWNS the hidden store ---------
     // The store FormID is co-save persisted ('STOR'), so an SMF-only session can
@@ -824,6 +847,11 @@ namespace CostumeFW
     // cannot duplicate what the first pass just handed over), then a count of
     // what could not be read. Also runs the NPC arm (UninstallNpcCleanup): the
     // published costumes' contents, the recall, and the npc-persist assignments.
+    //
+    // Idempotent per save: the first run marks the save (UninstallRanOnThisSave),
+    // and every later run is store-only. The definitions outlive the first run on
+    // purpose (§7.11), so a second run used to find them all naming items the
+    // store no longer had and mint every one again (review 2026-09-23 C3).
     //
     // Does NOT remove tokens, detach or disable - the caller owns that half, and
     // the token loop has to run after this one so the recall has somewhere to put

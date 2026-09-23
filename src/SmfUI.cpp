@@ -583,10 +583,18 @@ namespace CostumeFW::SmfUI
             }
             ImGui::SetNextWindowSize(ImGui::ImVec2(460, 0), ImGui::ImGuiCond_Appearing);
             if (ImGui::BeginPopupModal("Prepare for uninstall?###cfwunp")) {
-                ImGui::TextWrapped(
-                    "Return all captured items, remove all box tokens, detach everything and "
-                    "disable CEF (re-enable from this page to restore). Do this before removing "
-                    "the mod.");
+                // A second run on the same save only empties the store; say so,
+                // so nobody runs it again expecting what the first run did
+                // (review 2026-09-23 C3).
+                if (UninstallRanOnThisSave()) {
+                    ImGui::TextWrapped("Already prepared on this save. Running it again only "
+                                       "hands back what is still in storage.");
+                } else {
+                    ImGui::TextWrapped(
+                        "Return all captured items, remove all box tokens, detach everything and "
+                        "disable CEF (re-enable from this page to restore). Do this before "
+                        "removing the mod.");
+                }
                 if (ImGui::Button("Proceed")) {
                     SKSE::GetTaskInterface()->AddTask([] { UninstallCleanup(); });
                     ImGui::CloseCurrentPopup();

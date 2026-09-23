@@ -220,6 +220,36 @@ namespace
         CHECK(IsStrictUtf8(EscapeInvalidUtf8("\x88\xDF\x91\x95")));
         CHECK(EscapeInvalidUtf8("\x88\xDF\x91\x95") != EscapeInvalidUtf8("\x89\xDF\x91\x95"));
     }
+
+    // Handing a captured item back (review 2026-09-23 C2 / C3). The argument
+    // order is DecideReturn(inStore, fabricate, refOnly, uninstallContext,
+    // uninstallRan).
+    void ReturnChecks()
+    {
+        using namespace CostumeFW::policy;
+        constexpr auto kStore = ReturnAction::kFromStore;
+        constexpr auto kNew = ReturnAction::kRecreate;
+        constexpr auto kNone = ReturnAction::kNothing;
+
+        // A stored original always comes back - nothing below outranks it.
+        CHECK(DecideReturn(true, false, false, false, false) == kStore);
+        CHECK(DecideReturn(true, true, true, true, true) == kStore);
+        // Store miss: the caller decides whether a copy is wanted at all...
+        CHECK(DecideReturn(false, false, false, false, false) == kNone);
+        CHECK(DecideReturn(false, true, false, false, false) == kNew);
+        // ...the FIRST uninstall pass on a save mints as it always has (a second
+        // character's first run included)...
+        CHECK(DecideReturn(false, true, false, true, false) == kNew);
+        // ...a second one does not (C3)...
+        CHECK(DecideReturn(false, true, false, true, true) == kNone);
+        // ...and the mark only binds uninstall passes: a normal take-out on a
+        // prepared save still gets its copy.
+        CHECK(DecideReturn(false, true, false, false, true) == kNew);
+        // An id a preset only listed has no original to stand in for (C2),
+        // whoever asks.
+        CHECK(DecideReturn(false, true, true, false, false) == kNone);
+        CHECK(DecideReturn(false, true, true, true, false) == kNone);
+    }
 }
 
 int main()
@@ -355,6 +385,7 @@ int main()
 
     TokenIdentityChecks();
     Utf8Checks();
+    ReturnChecks();
 
     std::printf("policy_tests: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

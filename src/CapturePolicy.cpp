@@ -264,4 +264,28 @@ namespace CostumeFW::policy
         }
         return out;
     }
+
+    ReturnAction DecideReturn(bool a_inStore, bool a_fabricate, bool a_refOnly,
+        bool a_uninstallContext, bool a_uninstallRan)
+    {
+        // Store-first, always: a stored original is the user's own item, and
+        // handing it back never duplicates anything - whatever else is true.
+        if (a_inStore) {
+            return ReturnAction::kFromStore;
+        }
+        if (!a_fabricate) {
+            return ReturnAction::kNothing;
+        }
+        // The first uninstall pass on a save returned the originals; a second
+        // finds the store empty and would mint every one of them again (C3).
+        if (a_uninstallContext && a_uninstallRan) {
+            return ReturnAction::kNothing;
+        }
+        // Listed by a preset, never handed over: there is no original anywhere
+        // for a copy to stand in for (C2).
+        if (a_refOnly) {
+            return ReturnAction::kNothing;
+        }
+        return ReturnAction::kRecreate;
+    }
 }

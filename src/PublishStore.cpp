@@ -1443,12 +1443,14 @@ namespace CostumeFW
         // needs their items back more than most, not less. Fabricate fallback to
         // match the box and persist loops: a plain copy beats nothing when the
         // original is gone, and no content id is in both a box and a snapshot
-        // for it to hand back twice.
+        // for it to hand back twice. In the uninstall context like those loops,
+        // so a second run on the same save is store-only (review 2026-09-23 C3).
         int returned = 0;
         for (int slot = 0; slot < kPoolSize; ++slot) {
             if (const auto* snap = PubBySlot(slot)) {
                 for (const auto& id : snap->contents) {
-                    returned += ReturnStoredItem(id, true) ? 1 : 0;
+                    returned +=
+                        ReturnStoredItem(id, true, nullptr, RecreateContext::kUninstall) ? 1 : 0;
                 }
             }
         }
