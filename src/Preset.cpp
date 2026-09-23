@@ -66,7 +66,10 @@ namespace CostumeFW::Preset
                 p.name = it->get<std::string>();
             }
             if (p.name.empty()) {
-                p.name = a_file;
+                // The file name, which is not necessarily UTF-8 text the way the
+                // json's own "name" is - and the display name is what an
+                // assignment writes into the settings (review 2026-09-23 C1).
+                p.name = EnsureUtf8(a_file);
                 if (auto dot = p.name.rfind(".json"); dot != std::string::npos) {
                     p.name.erase(dot);
                 }
@@ -258,7 +261,10 @@ namespace CostumeFW::Preset
         const std::unordered_map<std::string, ContentPrefs>& a_prefs,
         const std::string& a_author, const std::string& a_description)
     {
-        std::string base = Sanitize(a_name);
+        // UTF-8 first (C1): the name goes into the json and into the file name,
+        // and the MCM can hand it over in the game's codepage. SMF's text is
+        // UTF-8 already and passes through unchanged.
+        std::string base = Sanitize(EnsureUtf8(a_name));
         if (base.empty()) {
             base = "preset";
         }
@@ -283,8 +289,8 @@ namespace CostumeFW::Preset
         nlohmann::json doc;
         doc["schema"] = kSchema;
         doc["name"] = stem;
-        doc["author"] = a_author;
-        doc["description"] = a_description;
+        doc["author"] = EnsureUtf8(a_author);
+        doc["description"] = EnsureUtf8(a_description);
         // Record the defining plugins so an importer can warn on missing masters.
         std::vector<std::string> plugins;
         for (const auto& c : a_contents) {

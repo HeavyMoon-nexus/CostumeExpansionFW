@@ -557,9 +557,12 @@ namespace CostumeFW
     // Resolve a colon-form id to its in-game item name (falls back to the id).
     std::string ItemDisplayName(const std::string& a_colonId);
 
-    // UI-boundary encoding guard: returns the text as valid UTF-8 for ImGui.
-    // Valid UTF-8 passes through untouched; raw ANSI-codepage bytes (legacy
-    // cp932/cp936/cp1252 plugins) are converted via the system codepage.
+    // Encoding guard: returns the text as STRICTLY valid UTF-8 - for ImGui, and
+    // for anything that goes into a JSON file (nlohmann throws on anything else,
+    // review 2026-09-23 C1). Valid UTF-8 passes through untouched; raw
+    // ANSI-codepage bytes (legacy cp932/cp936/cp1252 plugins) are converted via
+    // the system codepage; a byte even that cannot place becomes \xNN. Never
+    // returns invalid UTF-8.
     std::string EnsureUtf8(const std::string& a_text);
 
     // `cef recover <id>`: deliberately grant ONE copy of a content item to the

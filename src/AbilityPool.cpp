@@ -411,6 +411,16 @@ namespace CostumeFW::abilities
                     a_why = std::format("magic effect {} has no defining plugin", re.mgef);
                     return false;
                 }
+                // The recipe is written into the registry, which is JSON, and an
+                // id carries its plugin's file name - in a legacy codepage it is
+                // not UTF-8 text and the write throws (review 2026-09-23 C1). The
+                // whole recipe goes, like any other field that cannot be saved.
+                if (!policy::IsStrictUtf8(re.mgef)) {
+                    a_why = std::format(
+                        "magic effect {} comes from a plugin whose name is not UTF-8 text",
+                        re.mgef);
+                    return false;
+                }
                 re.magnitude = e ? e->effectItem.magnitude : se.magnitude;
                 re.area = e ? e->effectItem.area : 0u;
                 re.duration = e ? e->effectItem.duration : 0u;
@@ -442,6 +452,12 @@ namespace CostumeFW::abilities
                             a_why = "a condition compares against a global that cannot be identified";
                             return false;
                         }
+                        if (!policy::IsStrictUtf8(it->second)) {  // C1, as above
+                            a_why = std::format(
+                                "a condition compares against {}, whose plugin name is not "
+                                "UTF-8 text", it->second);
+                            return false;
+                        }
                         rc.compareGlobal = it->second;
                     } else {
                         rc.compareFloat = c->data.comparisonValue.f;
@@ -452,6 +468,12 @@ namespace CostumeFW::abilities
                             reinterpret_cast<std::uint64_t>(c->data.functionData.params[i]);
                         const auto it = resolved.find(raw);
                         if (it != resolved.end()) {
+                            if (!policy::IsStrictUtf8(it->second)) {  // C1, as above
+                                a_why = std::format(
+                                    "a condition names {}, whose plugin name is not UTF-8 text",
+                                    it->second);
+                                return false;
+                            }
                             rc.params[i].isForm = true;
                             rc.params[i].form = it->second;
                         } else {
@@ -983,6 +1005,14 @@ namespace CostumeFW::abilities
         RE::SpellItem* Allocate(const std::string& a_contentId,
             const std::vector<SourceEffect>& a_effects, std::uint32_t a_generation)
         {
+            // The content id is written into the registry too (C1). A capture
+            // cannot produce one that is not UTF-8 text, but the console's
+            // `cef abilities alloc` takes whatever is typed.
+            if (!policy::IsStrictUtf8(a_contentId)) {
+                SKSE::log::warn("abilities: '{}' is not UTF-8 text - no ability allocated",
+                    a_contentId);
+                return nullptr;
+            }
             std::vector<RecipeEffect> effects;
             std::string why;
             if (!BuildRecipe(a_effects, effects, why)) {

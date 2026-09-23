@@ -1383,6 +1383,13 @@ namespace CostumeFW
             // catalog entry (NPC_AUDIT_2026-08-03 F2). CanResolveContent is the
             // same ARMA/ARMO gate the registration path applies (IMPL 10.3).
             if (id.empty() || !CanResolveContent(id)) return false;
+            // The id reaches the carrier manifest, which is JSON (C1). These come
+            // straight from the inventory picker - not through the capture gate -
+            // so an item from a plugin named in a legacy codepage stops here.
+            if (!policy::IsStrictUtf8(id)) {
+                SKSE::log::warn("npcpersist: '{}' is not UTF-8 text - not assigned", id);
+                return false;
+            }
             if (std::find(item.contents.begin(), item.contents.end(), id) == item.contents.end())
                 item.contents.push_back(std::move(id));
         }
@@ -1496,6 +1503,10 @@ namespace CostumeFW
         for (auto id : a_contents) {
             CanonicalizeColonId(id);
             if (id.empty() || !CanResolveContent(id)) return false;
+            if (!policy::IsStrictUtf8(id)) {  // C1 - see AssignNpcPersist
+                SKSE::log::warn("npcpersist: '{}' is not UTF-8 text - not assigned", id);
+                return false;
+            }
             if (std::find(next.begin(), next.end(), id) == next.end())
                 next.push_back(std::move(id));
         }

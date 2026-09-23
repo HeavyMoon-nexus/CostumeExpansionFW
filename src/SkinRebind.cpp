@@ -1551,6 +1551,21 @@ namespace CostumeFW
             return rd.numPartitions > 0 ? static_cast<int>(rd.partitions[0].slot) : -1;
         }
 
+        // The name a shape is known by in CEF: what the hide list stores, what the
+        // UIs list and what injection compares against - one function so the
+        // three can never disagree. A NIF's shape name is raw bytes, often in the
+        // author's codepage, and the hide list lives in a JSON file whose writer
+        // throws on anything that is not UTF-8 (review 2026-09-23 C1: ticking
+        // such a shape crashed the game). Valid UTF-8 - every ASCII name, and
+        // every name already saved - passes through unchanged. Anything else goes
+        // through the ANSI codepage the way item names do, and a byte even that
+        // cannot place becomes \xNN, so the key is the same on every load on
+        // this PC and a hide rule keeps matching.
+        std::string ShapeKey(const char* a_raw)
+        {
+            return EnsureUtf8(a_raw ? std::string(a_raw) : std::string{});
+        }
+
         // Find a non-empty "BODYTRI" NiStringExtraData anywhere in a subtree.
         // BodySlide puts it on the NIF root, but some outfits carry it on a child
         // node - and the caller also retries on the PRE-CLONE original, since
@@ -1656,7 +1671,7 @@ namespace CostumeFW
                 [&](RE::BSGeometry* a_geom) {
                     auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
                     if (skin) {
-                        const std::string sname = a_geom->name.c_str();
+                        const std::string sname = ShapeKey(a_geom->name.c_str());
                         // Record the shape (name + dismember slot, BEFORE
                         // RebindGeometry neutralizes it) so the MCM can list it.
                         shapeList.emplace_back(sname, ShapeSlot(skin.get()));
@@ -3443,7 +3458,8 @@ namespace CostumeFW
             [&](RE::BSGeometry* a_geom) {
                 auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
                 if (skin) {
-                    out.emplace_back(std::string(a_geom->name.c_str()), ShapeSlot(skin.get()));
+                    // The same key injection matches on (see ShapeKey).
+                    out.emplace_back(ShapeKey(a_geom->name.c_str()), ShapeSlot(skin.get()));
                 }
                 return RE::BSVisit::BSVisitControl::kContinue;
             });

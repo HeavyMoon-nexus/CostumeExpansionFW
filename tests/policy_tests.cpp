@@ -158,6 +158,68 @@ namespace
         CHECK(CarrierKeyFor("000811:CostumeFW.esp", 29).empty());
         CHECK(CarrierKeyFor("000811:CostumeFW.esp", 62).empty());
     }
+
+    // Review 2026-09-23 C1 / R2. IsStrictUtf8 has to accept exactly what
+    // nlohmann's dump() accepts: anything it waves through that dump() refuses
+    // is a crash, and anything it refuses that dump() would take is a costume
+    // somebody cannot capture for nothing. Bytes are spelled out so the source
+    // encoding cannot change what is being tested.
+    void Utf8Checks()
+    {
+        using namespace CostumeFW::policy;
+
+        // Accepted: ASCII, CJK, an emoji (4-byte), the edges of each range.
+        CHECK(IsStrictUtf8(""));
+        CHECK(IsStrictUtf8("Iron Armor.esp"));
+        CHECK(IsStrictUtf8("\xE8\xA1\xA3\xE8\xA3\x85"));        // U+8863 U+88C5 (the word used in 8-28)
+        CHECK(IsStrictUtf8("\xF0\x9F\x98\x80"));                // U+1F600
+        CHECK(IsStrictUtf8("\xC2\x80\xDF\xBF"));                // U+0080, U+07FF
+        CHECK(IsStrictUtf8("\xE0\xA0\x80\xED\x9F\xBF"));        // U+0800, U+D7FF
+        CHECK(IsStrictUtf8("\xEE\x80\x80\xEF\xBF\xBF"));        // U+E000, U+FFFF
+        CHECK(IsStrictUtf8("\xF0\x90\x80\x80\xF4\x8F\xBF\xBF"));  // U+10000, U+10FFFF
+
+        // Refused: overlong forms.
+        CHECK(!IsStrictUtf8("\xC0\x80"));
+        CHECK(!IsStrictUtf8("\xC1\xBF"));
+        CHECK(!IsStrictUtf8("\xE0\x80\x80"));
+        CHECK(!IsStrictUtf8("\xE0\x9F\xBF"));
+        CHECK(!IsStrictUtf8("\xF0\x80\x80\x80"));
+        CHECK(!IsStrictUtf8("\xF0\x8F\xBF\xBF"));
+        // Refused: surrogates, and past U+10FFFF - the three the OLD check let
+        // through while dump() did not.
+        CHECK(!IsStrictUtf8("\xED\xA0\x80"));
+        CHECK(!IsStrictUtf8("\xED\xBF\xBF"));
+        CHECK(!IsStrictUtf8("\xF4\x90\x80\x80"));
+        CHECK(!IsStrictUtf8("\xF5\x80\x80\x80"));
+        CHECK(!IsStrictUtf8("\xFF"));
+        // Refused: cut short, and a lone continuation byte.
+        CHECK(!IsStrictUtf8("\xE8\xA1"));
+        CHECK(!IsStrictUtf8("\xF0\x9F\x98"));
+        CHECK(!IsStrictUtf8("ab\xC3"));
+        CHECK(!IsStrictUtf8("a\x80" "b"));
+        // Refused: the same word in cp932 (the bytes a Japanese-locale mod
+        // author's tools write), and cp1252's n-tilde.
+        CHECK(!IsStrictUtf8("\x88\xDF\x91\x95"));
+        CHECK(!IsStrictUtf8("Se\xF1ora"));
+
+        // Cut to a buffer without leaving half a character behind.
+        CHECK(Utf8PrefixLength("abc", 10) == 3);
+        CHECK(Utf8PrefixLength("abc", 2) == 2);
+        CHECK(Utf8PrefixLength("\xE8\xA1\xA3\xE8\xA3\x85", 6) == 6);
+        CHECK(Utf8PrefixLength("\xE8\xA1\xA3\xE8\xA3\x85", 5) == 3);
+        CHECK(Utf8PrefixLength("\xE8\xA1\xA3\xE8\xA3\x85", 4) == 3);
+        CHECK(Utf8PrefixLength("\xE8\xA1\xA3\xE8\xA3\x85", 2) == 0);
+        CHECK(Utf8PrefixLength("\xE8\xA1\xA3", 0) == 0);
+
+        // Escaping: well-formed text is untouched, anything else becomes \xNN,
+        // and the result is always something dump() will write.
+        CHECK(EscapeInvalidUtf8("Iron Armor") == "Iron Armor");
+        CHECK(EscapeInvalidUtf8("\xE8\xA1\xA3") == "\xE8\xA1\xA3");
+        CHECK(EscapeInvalidUtf8("Se\xF1ora") == "Se\\xF1ora");
+        CHECK(EscapeInvalidUtf8("\xED\xA0\x80") == "\\xED\\xA0\\x80");
+        CHECK(IsStrictUtf8(EscapeInvalidUtf8("\x88\xDF\x91\x95")));
+        CHECK(EscapeInvalidUtf8("\x88\xDF\x91\x95") != EscapeInvalidUtf8("\x89\xDF\x91\x95"));
+    }
 }
 
 int main()
@@ -265,6 +327,7 @@ int main()
     CHECK(DefaultBlockPlugins().size() == 1 && DefaultBlockPlugins()[0] == "MARA");
 
     TokenIdentityChecks();
+    Utf8Checks();
 
     std::printf("policy_tests: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

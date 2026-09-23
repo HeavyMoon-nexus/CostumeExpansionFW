@@ -64,4 +64,25 @@ namespace CostumeFW::policy
     [[nodiscard]] std::string FormatColonId(std::uint32_t a_local, std::string_view a_plugin);
     // Rewrites a_id into canonical form; true if it changed.
     bool CanonicalizeColonIdStr(std::string& a_id);
+
+    // --- UTF-8 (review 2026-09-23 C1) ----------------------------------------
+    // Everything CEF persists is JSON, and nlohmann's dump() THROWS on text that
+    // is not valid UTF-8 rather than writing it. Plugin names, mesh paths and
+    // NIF shape names are raw bytes in whatever codepage their author used, so
+    // these are the checks that keep such text out of the files.
+
+    // Well-formed per Unicode Table 3-7 - the exact set dump() accepts. Refuses
+    // the overlong lead bytes C0/C1, overlong E0 80-9F and F0 80-8F, the
+    // surrogate range ED A0-BF, anything past U+10FFFF (F4 90+ and F5+), lone
+    // continuation bytes and a sequence cut short.
+    [[nodiscard]] bool IsStrictUtf8(std::string_view a_s);
+    // The longest prefix of a_s, at most a_maxBytes long, that does not end in
+    // the middle of a multi-byte sequence - for cutting text to fit a fixed
+    // buffer without leaving half a character at the end.
+    [[nodiscard]] std::size_t Utf8PrefixLength(std::string_view a_s, std::size_t a_maxBytes);
+    // a_s with every byte that is not part of a well-formed sequence written as
+    // the four characters \xNN (upper-case hex). Well-formed text comes back
+    // unchanged, and the result is always well-formed. Deterministic, so two
+    // different byte strings never share an escape.
+    [[nodiscard]] std::string EscapeInvalidUtf8(std::string_view a_s);
 }

@@ -56,6 +56,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string_view>
 #include <thread>
 #include <tuple>
@@ -256,6 +257,50 @@ namespace CostumeFW
         // the FILE is the identity, the name is for display.
         std::string g_persistPreset;
         std::string g_persistPresetName;
+
+        // --- text that reaches the settings file (review 2026-09-23 C1) ------
+        // Every settings write is a JSON dump, and dump() throws on text that is
+        // not UTF-8. Catching that (WriteJson) only stops the crash: the bad
+        // text stays in memory and every write after it fails too, for the rest
+        // of the session. So nothing that could carry such text is let in -
+        // these are the entrances.
+
+        // A box label, as stored. Labels come from SMF (UTF-8, but a seed that
+        // used to be cut mid-character by a 64-byte buffer), from the MCM and
+        // from item names, which are in their plugin's codepage. Converted to
+        // UTF-8 and capped at a character boundary.
+        constexpr std::size_t kMaxLabelBytes = 255;
+
+        std::string SanitizeLabel(const std::string& a_label)
+        {
+            std::string out = EnsureUtf8(a_label);  // strictly valid by contract
+            out.resize(policy::Utf8PrefixLength(out, kMaxLabelBytes));
+            return out;
+        }
+
+        // True when a_text can go into the settings. An id carries its plugin's
+        // file name, and a magic effect's id its plugin's - bytes in whatever
+        // codepage that plugin was named in. Said once per text per session:
+        // the heal pass meets the same one on every load.
+        bool WritableText(const std::string& a_text, const char* a_what)
+        {
+            if (policy::IsStrictUtf8(a_text)) {
+                return true;
+            }
+            static std::unordered_set<std::string> s_said;
+            if (s_said.insert(a_text).second) {
+                SKSE::log::warn(
+                    "{}: '{}' is not UTF-8 text, which CEF's settings cannot hold - left out",
+                    a_what, a_text);
+            }
+            return false;
+        }
+
+        // Contents the last carrier manifest left out because their mesh path
+        // (or an NPC assignment's id) is not UTF-8 text. Decision D6: they are
+        // still captured and still SHOWN - the engine reads the path as raw
+        // bytes - they only get no physics carrier. Diagnostics lists them.
+        std::set<std::string> g_nonUtf8Mesh;
 
         int FindBox(const std::string& a_token)
         {
@@ -690,10 +735,32 @@ namespace CostumeFW
             // key off it - "Box<slot>" is exactly what version 1 was already
             // producing, so the fallback is byte-exact.
             doc["version"] = 2;
+            // Decision D6 (review 2026-09-23 C1): a mesh path in a legacy
+            // codepage cannot go into this JSON - dump() throws - so such a
+            // content is left out of the manifest. It stays captured and stays
+            // SHOWN (the engine reads the path as raw bytes); it just gets no
+            // physics carrier. Recomputed on every pass, said once per content.
+            g_nonUtf8Mesh.clear();
+            const auto writable = [](const std::string& a_id, const std::string& a_nif) {
+                if (policy::IsStrictUtf8(a_id) && policy::IsStrictUtf8(a_nif)) {
+                    return true;
+                }
+                static std::unordered_set<std::string> s_said;
+                if (g_nonUtf8Mesh.insert(a_id).second && s_said.insert(a_id).second) {
+                    SKSE::log::warn(
+                        "carrier manifest: '{}' has a mesh path that is not UTF-8 text ('{}') - "
+                        "shown, but it gets no physics carrier",
+                        a_id, a_nif);
+                }
+                return false;
+            };
             const auto resolveContent = [&](const std::string& id) -> nlohmann::json {
                 std::string nif;
                 if (!ResolveAdmittedModelPath(
                         id, EffectiveSexFor(id), *pol, nif, false)) {
+                    return nullptr;
+                }
+                if (!writable(id, nif)) {
                     return nullptr;
                 }
                 return { { "id", id }, { "nif", nif } };
@@ -709,6 +776,9 @@ namespace CostumeFW
                 }
                 std::string nif;
                 if (!ResolveAdmittedModelPath(id, sex, *pol, nif, false)) {
+                    return nullptr;
+                }
+                if (!writable(id, nif)) {
                     return nullptr;
                 }
                 return { { "id", id }, { "nif", nif } };
@@ -2722,6 +2792,16 @@ namespace CostumeFW
             out.push_back("# Legacy (LE) meshes - captured, kept, NOT injected");
             out.insert(out.end(), legacy.begin(), legacy.end());
         }
+        // Same rule: a section only when there is something in it (decision D6).
+        if (!g_nonUtf8Mesh.empty()) {
+            out.push_back("# Mesh paths that are not UTF-8 text");
+            out.push_back(std::format(
+                "{} item(s): mesh path is not UTF-8 - shown, but no physics carrier",
+                g_nonUtf8Mesh.size()));
+            for (const auto& id : g_nonUtf8Mesh) {
+                out.push_back("  " + EnsureUtf8(id));
+            }
+        }
         const auto npc = NpcDiagLines();
         out.insert(out.end(), npc.begin(), npc.end());
         out.push_back("# Churn (this session)");
@@ -2927,6 +3007,16 @@ namespace CostumeFW
     {
         StoreLock lk;
         if (a_id.empty() || a_shape.empty()) {
+            return false;
+        }
+        // Shape names reach here already converted (SkinRebind's ShapeKey is
+        // what the UIs list and what injection compares against), so this only
+        // refuses raw bytes typed or passed in by something else - which would
+        // otherwise sit in the hide list and fail every settings write after
+        // it (review 2026-09-23 C1).
+        if (!policy::IsStrictUtf8(a_shape)) {
+            SKSE::log::warn("hideshape: '{}' - shape name '{}' is not UTF-8 text - refused", a_id,
+                a_shape);
             return false;
         }
         std::string id = a_id;
@@ -3175,6 +3265,22 @@ namespace CostumeFW
         if (!IsContentAdmissible(a_id, *pol, a_why)) {
             return false;
         }
+        // The id is written into the settings file, and it carries the plugin's
+        // file name verbatim. A name in a legacy codepage ('Rüstung.esp' saved
+        // as cp1252, a Japanese name as cp932) is not UTF-8 text, and the JSON
+        // write throws on it - review 2026-09-23 C1, where this was a crash on
+        // every load. Refused here, at the one gate every capture passes
+        // through (AddBox, AddPersistContent, a preset's Validate), so the item
+        // never leaves the player. Loading data that is already stored does not
+        // come through here: nothing stored can hold such an id.
+        if (!policy::IsStrictUtf8(a_id)) {
+            SKSE::log::warn("capture: '{}' refused - its plugin's file name is not UTF-8 text",
+                a_id);
+            if (a_why) {
+                *a_why = "its plugin's file name is not UTF-8 text, which CEF cannot store";
+            }
+            return false;
+        }
         // M4-J guard (capture gate ONLY - registration, load of already-
         // captured contents and preset validation are unaffected): while MARA
         // is running, refuse to capture jewelry the player is WEARING. The
@@ -3337,7 +3443,10 @@ namespace CostumeFW
         // Copy-and-publish (review P1-5).
         auto next = *CapturePolicySnapshot();
         auto* bucket = BlacklistBucket(next, a_kind);
-        std::string value = TrimCopy(a_value);
+        // UTF-8 before it is stored (C1): the list is written into the settings,
+        // and a value typed in the MCM or the console can arrive in the game's
+        // codepage - which would then fail every settings write after it.
+        std::string value = EnsureUtf8(TrimCopy(a_value));
         if (!bucket || value.empty()) {
             return false;
         }
@@ -3366,8 +3475,9 @@ namespace CostumeFW
         if (!bucket) {
             return false;
         }
+        const std::string value = EnsureUtf8(a_value);  // the spelling Add stored
         const auto it = std::find_if(bucket->begin(), bucket->end(),
-            [&](const std::string& a_e) { return policy::EqualsCI(a_e, a_value); });
+            [&](const std::string& a_e) { return policy::EqualsCI(a_e, value); });
         if (it == bucket->end()) {
             return false;
         }
@@ -4328,43 +4438,6 @@ namespace CostumeFW
         return AddBox(a_label, token, {});  // definition only
     }
 
-    namespace
-    {
-        // Strict UTF-8 validity scan (no decode, no allocation).
-        bool IsValidUtf8(std::string_view a_s)
-        {
-            std::size_t i = 0;
-            const auto n = a_s.size();
-            while (i < n) {
-                const auto c = static_cast<unsigned char>(a_s[i]);
-                std::size_t need = 0;
-                if (c < 0x80) {
-                    ++i;
-                    continue;
-                } else if ((c & 0xE0) == 0xC0 && c >= 0xC2) {
-                    need = 1;
-                } else if ((c & 0xF0) == 0xE0) {
-                    need = 2;
-                } else if ((c & 0xF8) == 0xF0 && c <= 0xF4) {
-                    need = 3;
-                } else {
-                    return false;
-                }
-                if (i + need >= n + 1 && need > n - i - 1) {
-                    return false;
-                }
-                for (std::size_t k = 1; k <= need; ++k) {
-                    if (i + k >= n ||
-                        (static_cast<unsigned char>(a_s[i + k]) & 0xC0) != 0x80) {
-                        return false;
-                    }
-                }
-                i += need + 1;
-            }
-            return true;
-        }
-    }
-
     std::string EnsureUtf8(const std::string& a_text)
     {
         // ImGui expects UTF-8; a byte sequence it cannot decode renders as one
@@ -4373,13 +4446,21 @@ namespace CostumeFW
         // If the text is not valid UTF-8, reinterpret it in the SYSTEM codepage
         // - on the machine playing a cp932 mod that is almost always cp932 -
         // and convert. Valid UTF-8 (the common case) passes through untouched.
-        if (a_text.empty() || IsValidUtf8(a_text)) {
+        //
+        // "Valid" is the STRICT test now (review 2026-09-23 C1). The old scan
+        // passed overlong three-byte forms, surrogates and code points past
+        // U+10FFFF, which nlohmann's dump() refuses - so a name could come out
+        // of here "clean" and still crash the settings write it went into.
+        // And the result is always valid: a conversion that fails, or yields
+        // something still not well-formed, falls back to \xNN escapes instead
+        // of returning the raw bytes. Every caller can put the answer in JSON.
+        if (a_text.empty() || policy::IsStrictUtf8(a_text)) {
             return a_text;
         }
         const int wlen = ::MultiByteToWideChar(CP_ACP, 0, a_text.data(),
             static_cast<int>(a_text.size()), nullptr, 0);
         if (wlen <= 0) {
-            return a_text;
+            return policy::EscapeInvalidUtf8(a_text);
         }
         std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
         ::MultiByteToWideChar(CP_ACP, 0, a_text.data(),
@@ -4387,12 +4468,12 @@ namespace CostumeFW
         const int ulen = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen,
             nullptr, 0, nullptr, nullptr);
         if (ulen <= 0) {
-            return a_text;
+            return policy::EscapeInvalidUtf8(a_text);
         }
         std::string out(static_cast<std::size_t>(ulen), '\0');
         ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen, out.data(), ulen,
             nullptr, nullptr);
-        return out;
+        return policy::IsStrictUtf8(out) ? out : policy::EscapeInvalidUtf8(a_text);
     }
 
     std::string ItemDisplayName(const std::string& a_colonId)
@@ -5025,6 +5106,7 @@ namespace CostumeFW
 
     std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content)
     {
+        StoreLock lk;
         std::vector<EnchantEffectInfo> out;
         if (const auto it = g_contentEnchants.find(a_content); it != g_contentEnchants.end()) {
             for (const auto& effect : it->second)
@@ -5033,8 +5115,13 @@ namespace CostumeFW
         }
         if (auto* armor = ResolveArmo(a_content); armor && armor->formEnchanting) {
             for (auto* effect : armor->formEnchanting->effects) {
-                if (effect && effect->baseEffect) {
-                    out.push_back({ MakeColonId(effect->baseEffect), effect->effectItem.magnitude });
+                if (!effect || !effect->baseEffect) {
+                    continue;
+                }
+                // A published costume freezes this list into the settings (C1).
+                std::string mgef = MakeColonId(effect->baseEffect);
+                if (WritableText(mgef, "published enchant")) {
+                    out.push_back({ std::move(mgef), effect->effectItem.magnitude });
                 }
             }
         }
@@ -5172,8 +5259,16 @@ namespace CostumeFW
         std::vector<EnchEffect> effs;
         if (ench) {
             for (auto* e : ench->effects) {
-                if (e && e->baseEffect) {
-                    effs.push_back({ MakeColonId(e->baseEffect), e->effectItem.magnitude });
+                if (!e || !e->baseEffect) {
+                    continue;
+                }
+                // The snapshot is written into the settings, and a magic effect
+                // from a plugin named in a legacy codepage has an id that is not
+                // UTF-8 text (C1). Left out rather than stored and failing every
+                // write after it; the live form still pays it where it can.
+                std::string mgef = MakeColonId(e->baseEffect);
+                if (WritableText(mgef, "enchant snapshot")) {
+                    effs.push_back({ std::move(mgef), e->effectItem.magnitude });
                 }
             }
         }
@@ -5791,8 +5886,14 @@ namespace CostumeFW
                 std::vector<EnchEffect> effs;
                 if (ench) {
                     for (auto* e : ench->effects) {
-                        if (e && e->baseEffect) {
-                            effs.push_back({ MakeColonId(e->baseEffect), e->effectItem.magnitude });
+                        if (!e || !e->baseEffect) {
+                            continue;
+                        }
+                        // Same rule as CaptureEnchant (C1): only what the
+                        // settings can hold.
+                        std::string mgef = MakeColonId(e->baseEffect);
+                        if (WritableText(mgef, "enchant heal")) {
+                            effs.push_back({ std::move(mgef), e->effectItem.magnitude });
                         }
                     }
                 }
@@ -5830,6 +5931,13 @@ namespace CostumeFW
         void RecordCustody(const std::string& a_id, const char* a_event)
         {
             if (a_id.empty()) {
+                return;
+            }
+            // The custody log is part of the settings file (C1). Nothing CEF
+            // captures can carry such an id - the capture gate refuses it - so
+            // this only meets an item something else put in the store, and a
+            // row for it would fail every settings write after this one.
+            if (!WritableText(a_id, "custody")) {
                 return;
             }
             auto& row = g_custody[a_id];
@@ -6635,16 +6743,19 @@ namespace CostumeFW
         int idx = FindBox(token);
         bool madeBox = false;   // this call created the definition
         bool tookContent = false;  // this call put the content in it
+        const std::string label = SanitizeLabel(a_label);  // C1: UTF-8, capped
+        std::string priorLabel;
         if (idx < 0) {
             BoxDefInfo fresh;
             fresh.boxId = NewBoxId();  // issued once; survives rename and publish
-            fresh.label = a_label;
+            fresh.label = label;
             fresh.token = token;
             g_boxes.push_back(std::move(fresh));
             idx = static_cast<int>(g_boxes.size()) - 1;
             madeBox = true;
-        } else if (!a_label.empty()) {
-            g_boxes[idx].label = a_label;
+        } else if (!label.empty()) {
+            priorLabel = g_boxes[idx].label;
+            g_boxes[idx].label = label;
         }
 
         auto& box = g_boxes[idx];
@@ -6680,16 +6791,18 @@ namespace CostumeFW
             }
             if (madeBox) {
                 g_boxes.erase(g_boxes.begin() + idx);
+            } else if (!label.empty()) {
+                g_boxes[idx].label = priorLabel;  // a rename that was not saved either
             }
             SKSE::log::error(
                 "boxes: AddBox label='{}' token='{}' content='{}' could NOT save the settings - "
                 "reporting failure and rolling the definition back, so nothing is moved into "
                 "storage on the strength of it",
-                a_label, token, content);
+                label, token, content);
             return false;
         }
         SetTokenStats(g_boxes[idx]);  // write armor/weight onto the token now
-        SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, token, content);
+        SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", label, token, content);
         return true;
     }
 
@@ -6965,7 +7078,12 @@ namespace CostumeFW
         if (idx < 0) {
             return false;
         }
-        g_boxes[idx].label = a_label;
+        // C1: a label is written into the settings and stamped on the token's
+        // name, so it goes in as UTF-8 cut at a character boundary. The SMF
+        // rename used to hand over a 64-byte buffer that had cut a long
+        // Japanese label mid-character - and that half character crashed the
+        // write (review 2026-09-23 C1 d).
+        g_boxes[idx].label = SanitizeLabel(a_label);
         ApplyBoxLabelToToken(g_boxes[idx]);  // inventory name follows the label
         WriteJson();
         return true;
@@ -7068,6 +7186,12 @@ namespace CostumeFW
         if (a_file.empty()) {
             return false;
         }
+        // Both are written into the settings (C1). The file name comes from a
+        // folder scan and the display name from the file, so a name that is
+        // not UTF-8 text is refused here rather than failing every write after.
+        if (!WritableText(a_file, "preset file") || !WritableText(a_presetName, "preset name")) {
+            return false;
+        }
         // Shared exclusivity pool with boxes, keyed by FILE: reject if a box
         // already holds this preset.
         const std::string holder = PresetAssignedTo(a_file);
@@ -7124,6 +7248,10 @@ namespace CostumeFW
         StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0 || a_file.empty()) {
+            return false;
+        }
+        // Written into the settings (C1) - see AssignPresetToPersist.
+        if (!WritableText(a_file, "preset file") || !WritableText(a_presetName, "preset name")) {
             return false;
         }
         // Exclusivity: a preset FILE may be assigned to only one box at a time.

@@ -157,4 +157,90 @@ namespace CostumeFW::policy
         a_id = std::move(canonical);
         return true;
     }
+
+    namespace
+    {
+        // Length of the well-formed sequence starting at a_i (1-4), or 0 when
+        // the byte there does not start one. Unicode Table 3-7, row by row.
+        std::size_t WellFormedLength(std::string_view a_s, std::size_t a_i)
+        {
+            const auto at = [&](std::size_t k) {
+                return static_cast<unsigned char>(a_s[a_i + k]);
+            };
+            const auto in = [](unsigned char c, unsigned char lo, unsigned char hi) {
+                return c >= lo && c <= hi;
+            };
+            const std::size_t left = a_s.size() - a_i;
+            const unsigned char b0 = at(0);
+            if (b0 < 0x80) {
+                return 1;
+            }
+            if (in(b0, 0xC2, 0xDF)) {
+                return left >= 2 && in(at(1), 0x80, 0xBF) ? 2 : 0;
+            }
+            if (in(b0, 0xE0, 0xEF)) {
+                if (left < 3) {
+                    return 0;
+                }
+                const unsigned char lo = b0 == 0xE0 ? 0xA0 : 0x80;  // no overlongs
+                const unsigned char hi = b0 == 0xED ? 0x9F : 0xBF;  // no surrogates
+                return in(at(1), lo, hi) && in(at(2), 0x80, 0xBF) ? 3 : 0;
+            }
+            if (in(b0, 0xF0, 0xF4)) {
+                if (left < 4) {
+                    return 0;
+                }
+                const unsigned char lo = b0 == 0xF0 ? 0x90 : 0x80;  // no overlongs
+                const unsigned char hi = b0 == 0xF4 ? 0x8F : 0xBF;  // nothing past U+10FFFF
+                return in(at(1), lo, hi) && in(at(2), 0x80, 0xBF) && in(at(3), 0x80, 0xBF) ? 4
+                                                                                           : 0;
+            }
+            return 0;  // 80-BF (a lone continuation), C0/C1, F5-FF
+        }
+    }
+
+    bool IsStrictUtf8(std::string_view a_s)
+    {
+        for (std::size_t i = 0; i < a_s.size();) {
+            const std::size_t n = WellFormedLength(a_s, i);
+            if (n == 0) {
+                return false;
+            }
+            i += n;
+        }
+        return true;
+    }
+
+    std::size_t Utf8PrefixLength(std::string_view a_s, std::size_t a_maxBytes)
+    {
+        if (a_s.size() <= a_maxBytes) {
+            return a_s.size();
+        }
+        // Back off while the first byte left OUT is a continuation byte: the
+        // character it belongs to started inside the kept part, so it goes too.
+        std::size_t n = a_maxBytes;
+        while (n > 0 && (static_cast<unsigned char>(a_s[n]) & 0xC0) == 0x80) {
+            --n;
+        }
+        return n;
+    }
+
+    std::string EscapeInvalidUtf8(std::string_view a_s)
+    {
+        std::string out;
+        out.reserve(a_s.size());
+        for (std::size_t i = 0; i < a_s.size();) {
+            const std::size_t n = WellFormedLength(a_s, i);
+            if (n > 0) {
+                out.append(a_s.substr(i, n));
+                i += n;
+                continue;
+            }
+            char esc[8]{};
+            std::snprintf(esc, sizeof(esc), "\\x%02X", static_cast<unsigned char>(a_s[i]));
+            out += esc;
+            ++i;
+        }
+        return out;
+    }
 }

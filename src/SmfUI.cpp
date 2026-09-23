@@ -20,6 +20,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstring>  // std::memcpy (EditBuffer seeds)
 #include <format>
 #include <iterator>
 #include <mutex>
@@ -60,7 +61,7 @@ namespace CostumeFW::SmfUI
         char s_invFilter[64] = "";        // "+ Add from inventory" name filter
         char s_catFilter[64] = "";        // Persist page: catalog row filter (X-SCROLL)
         char s_recFilter[64] = "";        // Recovery page: row filter (X-SCROLL)
-        // A 64-byte text-edit buffer per (field, scope). Each of these fields used
+        // A text-edit buffer per (field, scope). Each of these fields used
         // to have ONE static buffer, reseeded whenever the row being drawn
         // changed, which held up while only one row of a kind could be on screen.
         // A biped slot can carry several boxes from v1.6.4, so two rows of the
@@ -68,7 +69,14 @@ namespace CostumeFW::SmfUI
         // each other's buffer (F16 / X4). Keyed by boxId for a box row and by the
         // content id where the thing being edited belongs to a content, so a
         // buffer lives exactly as long as what it edits.
-        std::unordered_map<std::string, std::array<char, 64>> s_editBuf;
+        //
+        // 256 bytes, matching the longest label the store keeps. It was 64, and
+        // a label set from the MCM is not held to that: 22 Japanese characters
+        // is 66 bytes, so the seed was cut mid-character and pressing Rename
+        // without typing anything handed half a character to the settings write,
+        // which crashed (review 2026-09-23 C1 d).
+        constexpr std::size_t kEditBufSize = 256;
+        std::unordered_map<std::string, std::array<char, kEditBufSize>> s_editBuf;
         char s_blkValue[128] = "";        // "Blocked" page: add-entry value buffer
         int s_blkKind = 0;                // "Blocked" page: 0=name, 1=plugin, 2=id
         std::string s_status;             // last guard/op feedback line
@@ -80,13 +88,17 @@ namespace CostumeFW::SmfUI
         std::unordered_map<std::string, bool> s_pendingWear;  // token -> desired
 
         // Seeded from a_seed the first time it is asked for and left alone after
-        // that - a half-typed name is the thing worth keeping.
+        // that - a half-typed name is the thing worth keeping. A seed too long
+        // for the buffer is cut at a CHARACTER boundary: snprintf cuts at a byte,
+        // which leaves the front half of a multi-byte character at the end (C1).
         char* EditBuffer(const std::string& a_key, const std::string& a_seed)
         {
             auto it = s_editBuf.find(a_key);
             if (it == s_editBuf.end()) {
-                it = s_editBuf.emplace(a_key, std::array<char, 64>{}).first;
-                std::snprintf(it->second.data(), it->second.size(), "%s", a_seed.c_str());
+                it = s_editBuf.emplace(a_key, std::array<char, kEditBufSize>{}).first;
+                const std::size_t n = policy::Utf8PrefixLength(a_seed, kEditBufSize - 1);
+                std::memcpy(it->second.data(), a_seed.data(), n);
+                it->second[n] = '\0';
             }
             return it->second.data();
         }
@@ -437,7 +449,7 @@ namespace CostumeFW::SmfUI
 
             char* hideBuf = EditBuffer("hs:" + a_id, UiOps::GetHideSlotsStr(a_id));
             ImGui::InputText(std::format("Hide when worn (slots)##hs{}", a_scope).c_str(),
-                hideBuf, 64);
+                hideBuf, kEditBufSize);
             ImGui::SameLine();
             if (ImGui::Button(std::format("Apply##hsb{}", a_scope).c_str())) {
                 UiOps::SetHideSlotsStr(a_id, hideBuf);
@@ -777,7 +789,7 @@ namespace CostumeFW::SmfUI
                 ImGui::EndDisabled();  // Wear / Distribute / Armor type / Preset
 
                 char* exportName = EditBuffer("exp:" + scope, {});
-                ImGui::InputText(std::format("##expn{}", scope).c_str(), exportName, 64);
+                ImGui::InputText(std::format("##expn{}", scope).c_str(), exportName, kEditBufSize);
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("Export as preset##expb{}", scope).c_str()) &&
                     exportName[0] != '\0') {
@@ -788,7 +800,7 @@ namespace CostumeFW::SmfUI
                 // Rename (Nexus request): the label follows into the token's
                 // inventory name, so the item reads as the outfit it holds.
                 char* boxLabel = EditBuffer("lbl:" + scope, b.label);
-                ImGui::InputText(std::format("##bxl{}", scope).c_str(), boxLabel, 64);
+                ImGui::InputText(std::format("##bxl{}", scope).c_str(), boxLabel, kEditBufSize);
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("Rename##bxlb{}", scope).c_str()) &&
                     boxLabel[0] != '\0') {
@@ -965,7 +977,7 @@ namespace CostumeFW::SmfUI
                 ImGui::EndCombo();
             }
             char* persistExport = EditBuffer("exp:persist", {});
-            ImGui::InputText("##pexn", persistExport, 64);
+            ImGui::InputText("##pexn", persistExport, kEditBufSize);
             ImGui::SameLine();
             if (ImGui::Button("Export as preset##pexb") && persistExport[0] != '\0') {
                 const std::string file = UiOps::ExportPersist(persistExport);
@@ -1059,7 +1071,7 @@ namespace CostumeFW::SmfUI
                 // it is the same setting, edited from a second place.
                 char* persistHide = EditBuffer("hs:" + id, UiOps::GetHideSlotsStr(id));
                 ImGui::InputText(std::format("Hide when worn (slots)##ph{}", id).c_str(),
-                    persistHide, 64);
+                    persistHide, kEditBufSize);
                 ImGui::SameLine();
                 if (ImGui::Button(std::format("Apply##phb{}", id).c_str())) {
                     UiOps::SetHideSlotsStr(id, persistHide);
