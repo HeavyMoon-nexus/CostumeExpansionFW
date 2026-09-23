@@ -134,6 +134,12 @@ namespace CostumeFW
         // that write is the moment the old shape stops existing anywhere, so a
         // copy of it is kept first. See MaybeWritePre164Backup.
         bool g_settingsWasPre164 = false;
+        // The file that load actually parsed: the main file, the backup when the
+        // main one was corrupt or unreadable, or the legacy costume_boxes.json.
+        // The pre-1.6.4 copy is taken from THIS - taken from the main file, a
+        // load rescued by the backup kept a copy of the corrupt file instead of
+        // the data that was read (review 2026-09-23 M10).
+        const char* g_settingsSource = kSettingsPath;
 
         // Custody history (v1.6.2): ONE row per content id CEF has ever taken
         // custody of, holding what last happened to it. Keyed by id on purpose,
@@ -644,11 +650,11 @@ namespace CostumeFW
                 return;
             }
             g_settingsWasPre164 = false;  // one attempt per load, whatever happens
-            if (::CopyFileA(kSettingsPath, kSettingsPre164Path, TRUE)) {
+            if (::CopyFileA(g_settingsSource, kSettingsPre164Path, TRUE)) {
                 SKSE::log::info(
-                    "settings: kept the pre-1.6.4 file as {} before the first 1.6.4 write "
+                    "settings: kept the pre-1.6.4 file ({}) as {} before the first 1.6.4 write "
                     "(CEF never reads it; it is there if you go back to 1.6.3)",
-                    kSettingsPre164Path);
+                    g_settingsSource, kSettingsPre164Path);
             } else if (::GetLastError() != ERROR_FILE_EXISTS) {
                 SKSE::log::warn("settings: could not keep a pre-1.6.4 copy at {} (error {})",
                     kSettingsPre164Path, ::GetLastError());
@@ -1702,6 +1708,7 @@ namespace CostumeFW
         // (migration) and rewrite into the new file at the end of load.
         bool migrated = false;
         g_settingsUnreadable = false;  // re-decided by this load
+        g_settingsSource = kSettingsPath;
         nlohmann::json doc;
         bool fromBackup = false;
         // The last-known-good copy, for a main file that cannot be used. False
@@ -1743,6 +1750,7 @@ namespace CostumeFW
                 return;
             }
             fromBackup = true;
+            g_settingsSource = kSettingsBakPath;
             SKSE::log::warn("settings: recovered from {} (it is written back to {} on the next "
                             "settings change)",
                 kSettingsBakPath, kSettingsPath);
@@ -1765,6 +1773,7 @@ namespace CostumeFW
             SKSE::log::info("settings: migrating legacy {} -> {}", kOldBoxesPath, kSettingsPath);
             f.swap(old);
             migrated = true;
+            g_settingsSource = kOldBoxesPath;
         }
         if (!fromBackup) {
             try {
@@ -1784,6 +1793,7 @@ namespace CostumeFW
                     return;
                 }
                 fromBackup = true;
+                g_settingsSource = kSettingsBakPath;
                 SKSE::log::warn("settings: recovered from {} (main file corrupt; "
                                 "it is rewritten on the next settings change)",
                     kSettingsBakPath);
