@@ -132,6 +132,36 @@ for reserved in ('Persist', 'Pub01', 'NpcPersist03', 'persist'):
     check(rc != 0 and not artifact(reserved + '_carrier.nif'),
           '"%s" is refused, not built over' % reserved)
 
+print('T5 - a mesh path that is not ASCII resolves, and never stops the sync (C6)')
+# The manifest is JSON, so its paths are UTF-8. The builder used to read them
+# through the ANSI codepage: a Japanese folder name became other characters and
+# "could not be resolved", and a name the codepage cannot spell at all threw
+# out of Sync - carriers.json unwritten, every box frozen. The empty-token NIF
+# is not an SMP mesh, so a content that RESOLVES is logged as "no inline HDT
+# xml" and one that does not as "cannot resolve" - which is the difference
+# under test.
+fresh()
+for folder in ('衣装', 'Café✨'):  # a cp932 name, and one cp932 cannot spell
+    os.makedirs(os.path.join(root, 'data', 'meshes', folder))
+    shutil.copy(EMPTY, os.path.join(root, 'data', 'meshes', folder, 'a.nif'))
+path = os.path.join(root, 'manifest.json')
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump({'version': 2, 'boxes': [
+        {'slot': 55, 'token': '000811:CostumeFW.esp', 'carrierKey': 'Box55', 'contents': [
+            {'id': '000801:A.esp', 'nif': '衣装\\a.nif'},
+            {'id': '000802:B.esp', 'nif': 'Café✨\\a.nif'},
+            {'id': '000803:C.esp', 'nif': '存在しない\\a.nif'}]}]},
+        f, ensure_ascii=False)
+done = subprocess.run(
+    [CLI, 'sync', path, '--data', os.path.join(root, 'data'),
+     '--out', os.path.join(root, 'out'), '--empty', EMPTY],
+    capture_output=True)
+log = done.stdout.decode('utf-8', errors='replace')
+check(done.returncode == 0, 'sync succeeded (rc=%d)' % done.returncode)
+check(os.path.exists(os.path.join(carrier_dir(), 'carriers.json')), 'carriers.json was written')
+check(log.count('no inline HDT xml') == 2, 'both non-ASCII folders resolved')
+check(log.count('cannot resolve under data roots') == 1, 'only the missing one did not')
+
 shutil.rmtree(root, ignore_errors=True)
 print()
 if failures:

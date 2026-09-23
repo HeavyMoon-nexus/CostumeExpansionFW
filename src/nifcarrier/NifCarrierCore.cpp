@@ -40,6 +40,73 @@ namespace nifcarrier {
             log += '\n';
         }
 
+        // --- paths and text (review 2026-09-23 C6) ---------------------------
+        // Narrow strings meet std::filesystem in two encodings here, and neither
+        // may go through path(std::string) or path::string(): those use the
+        // ANSI codepage, and MSVC's STL THROWS when a character has no spelling
+        // there. One such path took the whole sync down to its outer catch, so
+        // carriers.json was never written and every box's carrier stayed frozen
+        // for as long as that costume was in a box.
+        //   - The manifest is JSON, so the paths in it are UTF-8.
+        //   - Strings inside a NIF (the HDT xml path) are raw bytes in whatever
+        //     codepage the author's tool wrote; the game reads them the ANSI way.
+
+        // A path as UTF-8 text, for logs and hash keys. Never throws.
+        std::string U8(const std::filesystem::path& a_p)
+        {
+#if defined(__cpp_char8_t)
+            const auto u = a_p.u8string();
+            return std::string(u.begin(), u.end());
+#else
+            return a_p.u8string();  // C++17 (this library's standard): already std::string
+#endif
+        }
+
+        // Bytes -> path through one code page, without throwing. nullopt when
+        // the bytes are not text in it: UTF-8 is checked strictly, while an
+        // ANSI code page maps every byte to something (MB_ERR_INVALID_CHARS is
+        // deliberately NOT used there - the game does not use it either).
+        std::optional<std::filesystem::path> WidePath(const std::string& a_bytes, UINT a_cp)
+        {
+            if (a_bytes.empty()) {
+                return std::filesystem::path{};
+            }
+            const DWORD flags = a_cp == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
+            const int n = ::MultiByteToWideChar(a_cp, flags, a_bytes.data(),
+                static_cast<int>(a_bytes.size()), nullptr, 0);
+            if (n <= 0) {
+                return std::nullopt;
+            }
+            std::wstring w(static_cast<std::size_t>(n), L'\0');
+            ::MultiByteToWideChar(a_cp, flags, a_bytes.data(), static_cast<int>(a_bytes.size()),
+                w.data(), n);
+            return std::filesystem::path(std::move(w));
+        }
+
+        // Every file name the bytes can spell, the likelier reading first and no
+        // repeats. For ASCII - nearly every path - that is exactly one.
+        std::vector<std::filesystem::path> PathSpellings(const std::string& a_bytes, bool a_utf8First)
+        {
+            std::vector<std::filesystem::path> out;
+            const UINT order[2] = { a_utf8First ? static_cast<UINT>(CP_UTF8) : static_cast<UINT>(CP_ACP),
+                a_utf8First ? static_cast<UINT>(CP_ACP) : static_cast<UINT>(CP_UTF8) };
+            for (const UINT cp : order) {
+                if (auto p = WidePath(a_bytes, cp);
+                    p && std::find(out.begin(), out.end(), *p) == out.end()) {
+                    out.push_back(std::move(*p));
+                }
+            }
+            return out;
+        }
+
+        // A path from UTF-8 text (manifest / carriers.json values), falling back
+        // to the ANSI reading, and to an empty path rather than a throw.
+        std::filesystem::path FromUtf8(const std::string& a_utf8)
+        {
+            auto spellings = PathSpellings(a_utf8, true);
+            return spellings.empty() ? std::filesystem::path{} : std::move(spellings.front());
+        }
+
         bool HasHdtExtra(const nifly::NifFile& nif)
         {
             const auto& hdr = nif.GetHeader();
@@ -546,17 +613,17 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(in) != 0 || !nif.IsValid()) {
-                r.error = "load failed: " + in.string();
+                r.error = "load failed: " + U8(in);
                 return r;
             }
             r.shapesBefore = static_cast<int>(nif.GetShapes().size());
             if (nif.Save(out) != 0) {
-                r.error = "save failed: " + out.string();
+                r.error = "save failed: " + U8(out);
                 return r;
             }
             nifly::NifFile chk;
             if (chk.Load(out) != 0 || !chk.IsValid()) {
-                r.error = "reload failed: " + out.string();
+                r.error = "reload failed: " + U8(out);
                 return r;
             }
             r.shapesAfter = static_cast<int>(chk.GetShapes().size());
@@ -592,7 +659,7 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(in) != 0 || !nif.IsValid()) {
-                Log(r.log, "[zeroalpha] FAILED to load %s", in.string().c_str());
+                Log(r.log, "[zeroalpha] FAILED to load %s", U8(in).c_str());
                 return r;
             }
             Report(r.log, nif, "BEFORE");
@@ -642,10 +709,10 @@ namespace nifcarrier {
             }
 
             if (nif.Save(out) != 0) {
-                Log(r.log, "[zeroalpha] FAILED to save %s", out.string().c_str());
+                Log(r.log, "[zeroalpha] FAILED to save %s", U8(out).c_str());
                 return r;
             }
-            Log(r.log, "[zeroalpha] wrote %s", out.string().c_str());
+            Log(r.log, "[zeroalpha] wrote %s", U8(out).c_str());
 
             // Reload and verify
             nifly::NifFile chk;
@@ -712,11 +779,11 @@ namespace nifcarrier {
                 const auto res = d.load_file(in.c_str(),
                     pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
                 if (!res) {
-                    Log(r.log, "[mergexml] FAILED to load %s: %s", in.string().c_str(), res.description());
+                    Log(r.log, "[mergexml] FAILED to load %s: %s", U8(in).c_str(), res.description());
                     return r;
                 }
                 if (std::string(d.document_element().name()) != "system") {
-                    Log(r.log, "[mergexml] FAILED: root of %s is not <system>", in.string().c_str());
+                    Log(r.log, "[mergexml] FAILED: root of %s is not <system>", U8(in).c_str());
                     return r;
                 }
             }
@@ -753,7 +820,7 @@ namespace nifcarrier {
                         if (!seenBones.insert(nm).second) {
                             ++dupBones;
                             Log(r.log, "[mergexml] duplicate bone '%s' from %s skipped (first wins)",
-                                nm.c_str(), inputs[i].string().c_str());
+                                nm.c_str(), U8(inputs[i]).c_str());
                             continue;
                         }
                     }
@@ -761,18 +828,18 @@ namespace nifcarrier {
                         !seenShapes.insert(nm).second) {
                         Log(r.log,
                             "[mergexml] WARNING: duplicate collision shape '%s' from %s - NIF shape names must be unique across merged contents",
-                            nm.c_str(), inputs[i].string().c_str());
+                            nm.c_str(), U8(inputs[i]).c_str());
                     }
                     outRoot.append_copy(el);
                 }
-                Log(r.log, "[mergexml] appended %s", inputs[i].string().c_str());
+                Log(r.log, "[mergexml] appended %s", U8(inputs[i]).c_str());
             }
 
             if (!outDoc.save_file(out.c_str(), "  ")) {
-                Log(r.log, "[mergexml] FAILED to save %s", out.string().c_str());
+                Log(r.log, "[mergexml] FAILED to save %s", U8(out).c_str());
                 return r;
             }
-            Log(r.log, "[mergexml] wrote %s  (bones=%zu dupSkipped=%d shapes=%zu)", out.string().c_str(),
+            Log(r.log, "[mergexml] wrote %s  (bones=%zu dupSkipped=%d shapes=%zu)", U8(out).c_str(),
                 seenBones.size(), dupBones, seenShapes.size());
             r.ok = true;
         } catch (const std::exception& e) {
@@ -792,7 +859,7 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(in) != 0 || !nif.IsValid()) {
-                Log(r.log, "[setxml] FAILED to load %s", in.string().c_str());
+                Log(r.log, "[setxml] FAILED to load %s", U8(in).c_str());
                 return r;
             }
             nifly::NiStringExtraData* extra = nullptr;
@@ -807,7 +874,7 @@ namespace nifcarrier {
                 }
             }
             if (!extra) {
-                Log(r.log, "[setxml] FAILED: no '%s' NiStringExtraData in %s", kHdtExtra, in.string().c_str());
+                Log(r.log, "[setxml] FAILED: no '%s' NiStringExtraData in %s", kHdtExtra, U8(in).c_str());
                 return r;
             }
             const std::string old = extra->stringData.get();
@@ -815,7 +882,7 @@ namespace nifcarrier {
             Log(r.log, "[setxml] '%s' -> '%s'", old.c_str(), xmlPath.c_str());
 
             if (nif.Save(out) != 0) {
-                Log(r.log, "[setxml] FAILED to save %s", out.string().c_str());
+                Log(r.log, "[setxml] FAILED to save %s", U8(out).c_str());
                 return r;
             }
             nifly::NifFile chk;
@@ -852,7 +919,7 @@ namespace nifcarrier {
             const auto res = doc.load_file(in.c_str(),
                 pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
             if (!res || !doc.document_element()) {
-                Log(r.log, "[persist] FAILED xml load '%s'", in.string().c_str());
+                Log(r.log, "[persist] FAILED xml load '%s'", U8(in).c_str());
                 return r;
             }
             int n = 0;
@@ -875,10 +942,10 @@ namespace nifcarrier {
                 }
             }
             if (!doc.save_file(out.c_str(), "  ")) {
-                Log(r.log, "[persist] FAILED xml save '%s'", out.string().c_str());
+                Log(r.log, "[persist] FAILED xml save '%s'", U8(out).c_str());
                 return r;
             }
-            Log(r.log, "[persist] xml '%s': renamed %d per-*-shape name(s)", in.filename().string().c_str(), n);
+            Log(r.log, "[persist] xml '%s': renamed %d per-*-shape name(s)", U8(in.filename()).c_str(), n);
             r.ok = true;
         } catch (const std::exception& e) {
             Log(r.log, "[persist] FAILED xml transform: exception: %s", e.what());
@@ -913,7 +980,7 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(nifIn) != 0 || !nif.IsValid()) {
-                Log(r.log, "[isolate] FAILED to load %s", nifIn.string().c_str());
+                Log(r.log, "[isolate] FAILED to load %s", U8(nifIn).c_str());
                 return r;
             }
             auto* root = nif.GetRootNode();
@@ -933,7 +1000,7 @@ namespace nifcarrier {
             const auto xmlRes = doc.load_file(xmlIn.c_str(),
                 pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
             if (!xmlRes || !doc.document_element()) {
-                Log(r.log, "[isolate] FAILED xml load '%s'", xmlIn.string().c_str());
+                Log(r.log, "[isolate] FAILED xml load '%s'", U8(xmlIn).c_str());
                 return r;
             }
             std::set<std::string> referenced;
@@ -1011,7 +1078,7 @@ namespace nifcarrier {
             }
             if (dropped > 0) {
                 Log(r.log, "[isolate] %s: dropped %d unreferenced node(s) (in neither xml nor skins)",
-                    nifIn.filename().string().c_str(), dropped);
+                    U8(nifIn.filename()).c_str(), dropped);
             }
 
             // Rename map: every custom bone (live-skeleton bones stay shared -
@@ -1045,7 +1112,7 @@ namespace nifcarrier {
                 ++shapes;
             }
             if (nif.Save(nifOut) != 0) {
-                Log(r.log, "[isolate] FAILED to save %s", nifOut.string().c_str());
+                Log(r.log, "[isolate] FAILED to save %s", U8(nifOut).c_str());
                 return r;
             }
             nifly::NifFile chk;
@@ -1081,11 +1148,11 @@ namespace nifcarrier {
             };
             walk(doc.document_element());
             if (!doc.save_file(xmlOut.c_str(), "  ")) {
-                Log(r.log, "[isolate] FAILED xml save '%s'", xmlOut.string().c_str());
+                Log(r.log, "[isolate] FAILED xml save '%s'", U8(xmlOut).c_str());
                 return r;
             }
             Log(r.log, "[isolate] %s: prefixed %d bone(s) + %d shape(s) as '%s*' (%d xml ref(s))",
-                nifIn.filename().string().c_str(), bones, shapes, prefix.c_str(), refs);
+                U8(nifIn.filename()).c_str(), bones, shapes, prefix.c_str(), refs);
             r.ok = true;
         } catch (const std::exception& e) {
             Log(r.log, "[isolate] FAILED: exception: %s", e.what());
@@ -1117,10 +1184,10 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(path) != 0 || !nif.IsValid()) {
-                Log(r.log, "[validate] %s: FAILED to load (unreadable / invalid NIF)", path.string().c_str());
+                Log(r.log, "[validate] %s: FAILED to load (unreadable / invalid NIF)", U8(path).c_str());
                 return r;
             }
-            Report(r.log, nif, ("VALIDATE " + path.string()).c_str());
+            Report(r.log, nif, ("VALIDATE " + U8(path)).c_str());
             std::string reason;
             r.ok = ValidateNifSkinnable(nif, reason);
             if (r.ok) {
@@ -1144,10 +1211,10 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(path) != 0 || !nif.IsValid()) {
-                Log(r.log, "[validatehead] %s: FAILED to load (unreadable / invalid NIF)", path.string().c_str());
+                Log(r.log, "[validatehead] %s: FAILED to load (unreadable / invalid NIF)", U8(path).c_str());
                 return r;
             }
-            Report(r.log, nif, ("VALIDATEHEAD " + path.string()).c_str());
+            Report(r.log, nif, ("VALIDATEHEAD " + U8(path)).c_str());
 
             std::string ctdReason;
             const bool ctdOk = ValidateNifSkinnable(nif, ctdReason);
@@ -1288,8 +1355,12 @@ namespace nifcarrier {
         const std::vector<std::filesystem::path>& contents, const HeadCarrierOptions& opts)
     {
         VerbResult r;
-        const std::filesystem::path tMerged = out.string() + ".hc1.nif";
-        const std::filesystem::path tZa = out.string() + ".hc2.nif";
+        // Appended as paths, not rebuilt from text: text round-trips through a
+        // code page, a path does not (C6).
+        std::filesystem::path tMerged = out;
+        tMerged += ".hc1.nif";
+        std::filesystem::path tZa = out;
+        tZa += ".hc2.nif";
         const auto cleanup = [&]() {
             std::error_code ec;
             std::filesystem::remove(tMerged, ec);
@@ -1304,7 +1375,7 @@ namespace nifcarrier {
             for (const auto& c : contents) {
                 std::string why;
                 if (!ValidateNifPathImpl(c, why)) {
-                    Log(r.log, "[headcarrier] REJECT content '%s' - %s", c.string().c_str(), why.c_str());
+                    Log(r.log, "[headcarrier] REJECT content '%s' - %s", U8(c).c_str(), why.c_str());
                     return r;
                 }
             }
@@ -1335,7 +1406,7 @@ namespace nifcarrier {
             }
             if (baseIdx != 0) {
                 Log(r.log, "[headcarrier] base reordered to '%s' (owns a merge-trigger shape)",
-                    contents[baseIdx].string().c_str());
+                    U8(contents[baseIdx]).c_str());
             }
             std::vector<std::filesystem::path> ordered{ contents[baseIdx] };
             for (std::size_t i = 0; i < contents.size(); ++i) {
@@ -1454,11 +1525,11 @@ namespace nifcarrier {
                 return r;
             }
             if (fin.Save(out) != 0) {
-                Log(r.log, "[headcarrier] FAILED to save %s", out.string().c_str());
+                Log(r.log, "[headcarrier] FAILED to save %s", U8(out).c_str());
                 cleanup();
                 return r;
             }
-            Log(r.log, "[headcarrier] wrote %s", out.string().c_str());
+            Log(r.log, "[headcarrier] wrote %s", U8(out).c_str());
             cleanup();
 
             const auto vh = ValidateHead(out);
@@ -1482,7 +1553,7 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(in) != 0 || !nif.IsValid()) {
-                Log(r.log, "[proxynif] FAILED to load %s", in.string().c_str());
+                Log(r.log, "[proxynif] FAILED to load %s", U8(in).c_str());
                 return r;
             }
 
@@ -1541,9 +1612,10 @@ namespace nifcarrier {
             }
             nif.DeleteUnreferencedBlocks();
 
-            const std::filesystem::path tmp = out.string() + ".px.nif";
+            std::filesystem::path tmp = out;  // appended as a path (C6)
+            tmp += ".px.nif";
             if (nif.Save(tmp) != 0) {
-                Log(r.log, "[proxynif] FAILED to save %s", tmp.string().c_str());
+                Log(r.log, "[proxynif] FAILED to save %s", U8(tmp).c_str());
                 std::error_code ec;
                 std::filesystem::remove(tmp, ec);
                 return r;
@@ -1587,16 +1659,16 @@ namespace nifcarrier {
             }
             nifly::NifFile dst;
             if (dst.Load(inputs[0]) != 0 || !dst.IsValid()) {
-                Log(r.log, "[merge] FAILED to load base %s", inputs[0].string().c_str());
+                Log(r.log, "[merge] FAILED to load base %s", U8(inputs[0]).c_str());
                 return r;
             }
-            Report(r.log, dst, ("BASE " + inputs[0].string()).c_str());
+            Report(r.log, dst, ("BASE " + U8(inputs[0])).c_str());
             auto* dstRoot = dst.GetRootNode();
 
             for (std::size_t i = 1; i < inputs.size(); ++i) {
                 nifly::NifFile src;
                 if (src.Load(inputs[i]) != 0 || !src.IsValid()) {
-                    Log(r.log, "[merge] FAILED to load %s", inputs[i].string().c_str());
+                    Log(r.log, "[merge] FAILED to load %s", U8(inputs[i]).c_str());
                     return r;
                 }
 
@@ -1616,7 +1688,7 @@ namespace nifcarrier {
                     }
                     if (dup) {
                         Log(r.log, "[merge] WARNING: duplicate shape name '%s' from %s - first wins",
-                            nm.c_str(), inputs[i].string().c_str());
+                            nm.c_str(), U8(inputs[i]).c_str());
                         continue;
                     }
                     if (auto* ns = dst.CloneShape(srcShape, nm, &src)) {
@@ -1633,7 +1705,7 @@ namespace nifcarrier {
                 std::error_code ec;
                 std::filesystem::remove(vtmp, ec);
                 if (ok) {
-                    Log(r.log, "[merge] %s: +%d bone(s), +%zu shape(s)", inputs[i].string().c_str(),
+                    Log(r.log, "[merge] %s: +%d bone(s), +%zu shape(s)", U8(inputs[i]).c_str(),
                         addedBones, addedShapes.size());
                 } else {
                     for (auto* s : addedShapes) {
@@ -1641,12 +1713,12 @@ namespace nifcarrier {
                     }
                     dst.DeleteUnreferencedBlocks();
                     Log(r.log, "[merge] %s: +%d bone(s), shapes unloadable (nifly SSE clone) - kept BONES-ONLY",
-                        inputs[i].string().c_str(), addedBones);
+                        U8(inputs[i]).c_str(), addedBones);
                 }
             }
 
             if (dst.Save(out) != 0) {
-                Log(r.log, "[merge] FAILED to save %s", out.string().c_str());
+                Log(r.log, "[merge] FAILED to save %s", U8(out).c_str());
                 return r;
             }
             nifly::NifFile chk;
@@ -1654,9 +1726,9 @@ namespace nifcarrier {
                 Log(r.log, "[merge] merged NIF invalid on reload");
                 return r;
             }
-            Report(r.log, chk, ("MERGED " + out.string()).c_str());
+            Report(r.log, chk, ("MERGED " + U8(out)).c_str());
             Log(r.log, "[merge] hdtExtra=%s (root extra inherited from base '%s').",
-                HasHdtExtra(chk) ? "True" : "False", inputs[0].string().c_str());
+                HasHdtExtra(chk) ? "True" : "False", U8(inputs[0]).c_str());
             r.ok = true;
         } catch (const std::exception& e) {
             Log(r.log, "[merge] FAILED: exception: %s", e.what());
@@ -1674,7 +1746,7 @@ namespace nifcarrier {
         try {
             nifly::NifFile nif;
             if (nif.Load(path) != 0 || !nif.IsValid()) {
-                Log(r.log, "[verifyzeroalpha] FAILED to load %s", path.string().c_str());
+                Log(r.log, "[verifyzeroalpha] FAILED to load %s", U8(path).c_str());
                 return r;
             }
             Report(r.log, nif, "VERIFY");
@@ -1753,21 +1825,29 @@ namespace nifcarrier {
             return !ec;
         }
 
+        // a_utf8First: the bytes came from the manifest (UTF-8) rather than from
+        // inside a NIF (the author's codepage). Both readings are tried either
+        // way - see PathSpellings - so the order only decides which one wins
+        // when both name an existing file.
         std::filesystem::path ResolveAgainstRoots(const std::string& rel,
-            const std::vector<std::filesystem::path>& roots, bool meshesRel)
+            const std::vector<std::filesystem::path>& roots, bool meshesRel, bool a_utf8First)
         {
             std::string fixed = rel;
             std::replace(fixed.begin(), fixed.end(), '/', '\\');
+            const auto spellings = PathSpellings(fixed, a_utf8First);
             for (const auto& r : roots) {
-                if (meshesRel) {
-                    const auto p1 = r / "meshes" / fixed;
-                    if (std::filesystem::exists(p1)) {
-                        return p1;
+                for (const auto& s : spellings) {
+                    std::error_code ec;
+                    if (meshesRel) {
+                        const auto p1 = r / "meshes" / s;
+                        if (std::filesystem::exists(p1, ec)) {
+                            return p1;
+                        }
                     }
-                }
-                const auto p2 = r / fixed;
-                if (std::filesystem::exists(p2)) {
-                    return p2;
+                    const auto p2 = r / s;
+                    if (std::filesystem::exists(p2, ec)) {
+                        return p2;
+                    }
                 }
             }
             return {};
@@ -1798,7 +1878,7 @@ namespace nifcarrier {
         std::string HashContents(const std::string& salt, std::vector<SmpContent> smp)
         {
             std::sort(smp.begin(), smp.end(),
-                [](const SmpContent& a, const SmpContent& b) { return a.nif.string() < b.nif.string(); });
+                [](const SmpContent& a, const SmpContent& b) { return U8(a.nif) < U8(b.nif); });
             std::string h = salt;
             for (const auto& s : smp) {
                 std::error_code ec;
@@ -1807,8 +1887,8 @@ namespace nifcarrier {
                 const auto xlen = std::filesystem::file_size(s.xmlDisk, ec);
                 const auto xtime = std::filesystem::last_write_time(s.xmlDisk, ec).time_since_epoch().count();
                 h += s.id + "|" + s.prefix + "|" +
-                     s.nif.string() + "|" + std::to_string(nlen) + "|" + std::to_string(ntime) + "|" +
-                     s.xmlDisk.string() + "|" + std::to_string(xlen) + "|" + std::to_string(xtime) + "|";
+                     U8(s.nif) + "|" + std::to_string(nlen) + "|" + std::to_string(ntime) + "|" +
+                     U8(s.xmlDisk) + "|" + std::to_string(xlen) + "|" + std::to_string(xtime) + "|";
             }
             return Sha256HexUpper(h);
         }
@@ -1849,8 +1929,14 @@ namespace nifcarrier {
         {
             std::vector<SmpContent> smp;
             for (const auto& c : contentsArr) {
-                const std::string rel = c.value("nif", "");
-                const auto nifDisk = ResolveAgainstRoots(rel, dataRoots, true);
+                // One content, one net (C6): whatever is wrong with this entry's
+                // paths or fields drops THIS content from the build - it used to
+                // throw past every box to Sync's outer catch, which then wrote
+                // no carriers.json at all.
+                std::string rel;
+                try {
+                rel = c.value("nif", "");
+                const auto nifDisk = ResolveAgainstRoots(rel, dataRoots, true, true);
                 if (nifDisk.empty()) {
                     Log(log, "%s WARNING content '%s' EXCLUDED - cannot resolve under data roots%s", tag.c_str(),
                         rel.c_str(), excludedSuffix);
@@ -1881,7 +1967,9 @@ namespace nifcarrier {
                     }
                     continue;
                 }
-                const auto xmlDisk = ResolveAgainstRoots(xmlRel, dataRoots, false);
+                // The xml path is a string INSIDE the NIF: the author's codepage,
+                // read the ANSI way first (FSMP opens it that way).
+                const auto xmlDisk = ResolveAgainstRoots(xmlRel, dataRoots, false, false);
                 if (xmlDisk.empty()) {
                     Log(log, "%s WARNING content '%s' EXCLUDED - physics xml '%s' not found%s", tag.c_str(),
                         rel.c_str(), xmlRel.c_str(), excludedSuffix);
@@ -1893,6 +1981,10 @@ namespace nifcarrier {
                 const std::string id = c.value("id", "");
                 smp.push_back({ nifDisk, xmlDisk, xmlRel, id,
                     id.empty() ? std::string{} : ContentNamePrefix(id) });
+                } catch (const std::exception& e) {
+                    Log(log, "%s WARNING content '%s' EXCLUDED - unusable path (%s)%s", tag.c_str(),
+                        rel.c_str(), e.what(), excludedSuffix);
+                }
             }
             return smp;
         }
@@ -1909,7 +2001,7 @@ namespace nifcarrier {
             for (auto& s : smp) {
                 if (s.prefix.empty()) {
                     Log(log, "%s content '%s' has no manifest id - merged WITHOUT isolation",
-                        logTag.c_str(), s.nif.filename().string().c_str());
+                        logTag.c_str(), U8(s.nif.filename()).c_str());
                     ++ci;
                     continue;
                 }
@@ -2197,7 +2289,7 @@ namespace nifcarrier {
                 const auto pres = xdoc.load_file(xmlDisk.c_str(),
                     pugi::parse_default | pugi::parse_comments | pugi::parse_pi);
                 if (!pres) {
-                    Log(log, "[persist] WARNING cannot parse xml '%s': %s", xmlDisk.string().c_str(),
+                    Log(log, "[persist] WARNING cannot parse xml '%s': %s", U8(xmlDisk).c_str(),
                         pres.description());
                     continue;
                 }
@@ -2319,7 +2411,7 @@ namespace nifcarrier {
                 const auto rn = RenameShapesInXml(xmlDisk, t, renames);
                 log += rn.log;
                 if (!rn.ok) {
-                    Log(log, "[persist] FAILED xml transform '%s'", xmlDisk.string().c_str());
+                    Log(log, "[persist] FAILED xml transform '%s'", U8(xmlDisk).c_str());
                     return failKeepOld();
                 }
                 txmls.push_back(t);
@@ -2728,7 +2820,7 @@ namespace nifcarrier {
                 // box would never rebuild (review P1-3).
                 if (!CopyOverwrite(outTmp, carrierPath)) {
                     ++res.failed;
-                    Log(res.log, "%s FAILED to publish carrier to %s", tag.c_str(), carrierPath.string().c_str());
+                    Log(res.log, "%s FAILED to publish carrier to %s", tag.c_str(), U8(carrierPath).c_str());
                     continue;
                 }
                 ensurePool();
@@ -2808,7 +2900,7 @@ namespace nifcarrier {
                     const std::string oldM = oldEntry.is_object() ? oldEntry.value("fileM", "") : "";
                     const std::string oldF = oldEntry.is_object() ? oldEntry.value("fileF", "") : "";
                     const auto diskOf = [&](const std::string& rel) {
-                        return opts.outRoot / "meshes" / std::filesystem::path(rel);
+                        return opts.outRoot / "meshes" / FromUtf8(rel);  // carriers.json text (C6)
                     };
                     const bool oldGood = !oldM.empty() && !oldF.empty() &&
                         std::filesystem::exists(diskOf(oldM)) && std::filesystem::exists(diskOf(oldF));
@@ -2930,7 +3022,7 @@ namespace nifcarrier {
                     const int oldRev = oldEntry.is_object() ? oldEntry.value("rev", 0) : 0;
                     const std::string oldFile = oldEntry.is_object() ? oldEntry.value("file", "") : "";
                     const auto diskOf = [&](const std::string& rel) {
-                        return opts.outRoot / "meshes" / std::filesystem::path(rel);
+                        return opts.outRoot / "meshes" / FromUtf8(rel);  // carriers.json text (C6)
                     };
                     const bool oldGood = !oldFile.empty() && std::filesystem::exists(diskOf(oldFile));
                     const auto seed = oldGood ? diskOf(oldFile) : opts.emptyNif;

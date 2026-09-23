@@ -398,7 +398,14 @@ namespace
                 // Settings older than v1.6.2.1 name their preset assignments by
                 // display name; resolve those to the file that now identifies a
                 // preset. Needs the loaded boxes, so it runs right after.
-                CostumeFW::Preset::MigrateAssignments();
+                // Behind its own net as well as its internal one: it walks the
+                // presets folder, and a throw from this task was a crash at
+                // every launch for as long as one odd file sat there (C6).
+                try {
+                    CostumeFW::Preset::MigrateAssignments();
+                } catch (const std::exception& e) {
+                    SKSE::log::error("preset: assignment migration failed ({})", e.what());
+                }
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
                 LogRegistryRollCall("data-loaded");

@@ -1,6 +1,7 @@
 #include "Preset.h"
 #include "BoxStore.h"    // IsTokenColonId (border quarantine)
 #include "SkinRebind.h"  // CanResolveContent, CanonicalizeColonId (validation)
+#include "U8Path.h"      // file names are UTF-8, never the ANSI codepage (C6)
 
 #include <nlohmann/json.hpp>
 
@@ -173,27 +174,45 @@ namespace CostumeFW::Preset
         if (!std::filesystem::exists(dir, ec)) {
             return out;
         }
-        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-            if (ec) {
-                break;
+        // File names come back as UTF-8 (U8Str), not through path::string():
+        // that converts to the ANSI codepage and THROWS for a character the
+        // codepage cannot spell, and it ran for every file in the folder before
+        // the CEFP_ test. One 'CEFP_Café.json' on a Japanese-locale PC crashed
+        // the Presets page, both preset combos, the MCM preset page and - via
+        // the assignment migration - every launch (review 2026-09-23 C6).
+        //
+        // And one file is one file: a problem with any entry drops that entry,
+        // not the list. The directory walk itself can throw on increment, so it
+        // is inside the net too.
+        try {
+            for (auto it = std::filesystem::directory_iterator(dir, ec);
+                 !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+                try {
+                    std::error_code fec;
+                    if (!it->is_regular_file(fec)) {
+                        continue;
+                    }
+                    const std::string name = U8Str(it->path().filename());
+                    const auto low = [](std::string s) {
+                        std::transform(s.begin(), s.end(), s.begin(),
+                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        return s;
+                    };
+                    const std::string ln = low(name);
+                    if (!ln.starts_with("cefp_") || !ln.ends_with(".json")) {
+                        continue;
+                    }
+                    auto p = Read(name);
+                    if (p.valid) {
+                        out.push_back(std::move(p));
+                    }
+                } catch (const std::exception& e) {
+                    SKSE::log::warn("preset: skipped one file in the presets folder ({})",
+                        e.what());
+                }
             }
-            if (!e.is_regular_file()) {
-                continue;
-            }
-            const auto name = e.path().filename().string();
-            const auto low = [](std::string s) {
-                std::transform(s.begin(), s.end(), s.begin(),
-                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return s;
-            };
-            const std::string ln = low(name);
-            if (!ln.starts_with("cefp_") || !ln.ends_with(".json")) {
-                continue;
-            }
-            auto p = Read(name);
-            if (p.valid) {
-                out.push_back(std::move(p));
-            }
+        } catch (const std::exception& e) {
+            SKSE::log::error("preset: listing the presets folder stopped early ({})", e.what());
         }
         std::sort(out.begin(), out.end(),
             [](const PresetInfo& a, const PresetInfo& b) { return a.name < b.name; });
@@ -202,38 +221,55 @@ namespace CostumeFW::Preset
 
     void MigrateAssignments()
     {
-        const auto pending = UnresolvedPresetNames();
-        if (pending.empty()) {
-            return;
-        }
-        // One folder scan covers every pending name. A name shared by two files is
-        // ambiguous: keep its current contents/name and leave the file unresolved
-        // until the user selects it. Guessing would mark a different revision as
-        // selected without applying its contents, blocking that revision's picker.
-        std::unordered_map<std::string, std::string> nameToFile;
-        std::unordered_set<std::string> ambiguous;
-        for (const auto& p : List()) {
-            if (ambiguous.contains(p.name)) {
-                continue;
+        // Runs from the kDataLoaded task and the settings reload, where a throw
+        // is a crash at every launch (C6). List() no longer throws; this is the
+        // second net the review asked for, around the whole pass.
+        try {
+            const auto pending = UnresolvedPresetNames();
+            if (pending.empty()) {
+                return;
             }
-            const auto [it, inserted] = nameToFile.emplace(p.name, p.file);
-            if (!inserted) {
-                SKSE::log::warn(
-                    "preset: '{}' is the display name of both {} and {} - legacy "
-                    "assignment left unresolved; select the intended preset",
-                    p.name, it->second, p.file);
-                ambiguous.insert(p.name);
-                nameToFile.erase(it);
+            // One folder scan covers every pending name. A name shared by two
+            // files is ambiguous: keep its current contents/name and leave the
+            // file unresolved until the user selects it. Guessing would mark a
+            // different revision as selected without applying its contents,
+            // blocking that revision's picker.
+            std::unordered_map<std::string, std::string> nameToFile;
+            std::unordered_set<std::string> ambiguous;
+            for (const auto& p : List()) {
+                if (ambiguous.contains(p.name)) {
+                    continue;
+                }
+                const auto [it, inserted] = nameToFile.emplace(p.name, p.file);
+                if (!inserted) {
+                    SKSE::log::warn(
+                        "preset: '{}' is the display name of both {} and {} - legacy "
+                        "assignment left unresolved; select the intended preset",
+                        p.name, it->second, p.file);
+                    ambiguous.insert(p.name);
+                    nameToFile.erase(it);
+                }
             }
+            ResolvePresetFiles(nameToFile);
+        } catch (const std::exception& e) {
+            SKSE::log::error("preset: assignment migration skipped ({})", e.what());
         }
-        ResolvePresetFiles(nameToFile);
     }
 
     PresetInfo Read(const std::string& a_file)
     {
         PresetInfo p;
         p.file = a_file;
-        std::ifstream f(std::filesystem::path(kPresetDir) / a_file);
+        // a_file is UTF-8 (List hands it out that way, and the settings store
+        // it that way), so it is joined as UTF-8 - never through the ANSI
+        // codepage, which cannot spell every name (C6).
+        std::ifstream f;
+        try {
+            f.open(std::filesystem::path(kPresetDir) / U8Path(a_file));
+        } catch (const std::exception& e) {
+            SKSE::log::warn("preset: cannot open {} ({})", a_file, e.what());
+            return p;
+        }
         if (!f) {
             SKSE::log::warn("preset: cannot open {}", a_file);
             return p;
@@ -257,10 +293,13 @@ namespace CostumeFW::Preset
         }
     }
 
+    // A function-try-block: every path below is file work, and this runs from
+    // the SMF render callback and from a Papyrus native, where a throw is a
+    // crash (review 2026-09-23 C6). A failed export reports "" like any other.
     std::string Export(const std::string& a_name, const std::vector<std::string>& a_contents,
         const std::unordered_map<std::string, ContentPrefs>& a_prefs,
         const std::string& a_author, const std::string& a_description)
-    {
+    try {
         // UTF-8 first (C1): the name goes into the json and into the file name,
         // and the MCM can hand it over in the game's codepage. SMF's text is
         // UTF-8 already and passes through unchanged.
@@ -280,9 +319,11 @@ namespace CostumeFW::Preset
         const std::filesystem::path dir(kPresetDir);
         std::filesystem::create_directories(dir, ec);
 
-        // Suffix _1/_2/... on collision (higher number = saved later).
+        // Suffix _1/_2/... on collision (higher number = saved later). The name is
+        // UTF-8 and joined as UTF-8 (C6): a pasted Japanese name used to be read
+        // as ANSI-codepage bytes here and the conversion threw.
         std::string file = std::string(kPrefix) + stem + ".json";
-        for (int n = 1; std::filesystem::exists(dir / file, ec); ++n) {
+        for (int n = 1; std::filesystem::exists(dir / U8Path(file), ec); ++n) {
             file = std::string(kPrefix) + stem + "_" + std::to_string(n) + ".json";
         }
 
@@ -359,7 +400,7 @@ namespace CostumeFW::Preset
                 e.what());
             return {};
         }
-        std::ofstream out(dir / file, std::ios::trunc);
+        std::ofstream out(dir / U8Path(file), std::ios::trunc);
         if (!out) {
             SKSE::log::error("preset: cannot write {}", file);
             return {};
@@ -367,6 +408,9 @@ namespace CostumeFW::Preset
         out << body;
         SKSE::log::info("preset: exported {} ({} content)", file, a_contents.size());
         return file;
+    } catch (const std::exception& e) {
+        SKSE::log::error("preset: export of '{}' failed ({})", a_name, e.what());
+        return {};
     }
 
     void Validate(const std::vector<std::string>& a_contents,
