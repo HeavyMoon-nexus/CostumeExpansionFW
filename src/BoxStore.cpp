@@ -1648,6 +1648,13 @@ namespace CostumeFW
                     RunInProcSync();
                     return;
                 }
+                if (sr.crashCode != 0) {
+                    // Contained inside Sync (C15): the builder faulted in
+                    // hardware on some content, and the game goes on.
+                    SKSE::log::error("auto-sync: the carrier builder crashed (code {:#x}) - "
+                                     "carriers unchanged (see CEF_sync.log)",
+                        sr.crashCode);
+                }
                 if (sr.ok) {
                     const int built = sr.built;
                     SKSE::GetTaskInterface()->AddTask([built]() {

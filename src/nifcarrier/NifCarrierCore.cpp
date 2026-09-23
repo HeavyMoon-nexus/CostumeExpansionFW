@@ -17,6 +17,7 @@
 #include <unordered_set>
 
 #include <windows.h>
+#include <malloc.h>  // _resetstkoflw (C15)
 
 #include <bcrypt.h>
 
@@ -191,14 +192,28 @@ namespace nifcarrier {
             return allZero && allBlend && !shapes.empty() && skinned && hdt;
         }
 
+        // Recursion bounds for input CEF does not control (C15). A physics XML is
+        // a handful of levels deep and a skeleton a few dozen; anything past
+        // these is damaged, and recursing into it is a stack overflow.
+        constexpr int kMaxXmlDepth = 256;
+        constexpr int kMaxNodeDepth = 1024;
+
         // --- merge internals (C# MergeBranch/EnsureBone/MergeBones ports) ---
 
         // Merge srcNode's bone branch into dst: reuse an existing same-named
         // bone or clone it under the name-matched parent (else dst root), then
         // recurse children. Same algorithm as FSMP's doSkeletonMerge, so the
         // union stays FSMP-consistent.
-        void MergeBranch(nifly::NifFile& dst, nifly::NiNode* srcNode, nifly::NiNode* dstRoot, nifly::NifFile& src)
+        //
+        // a_seen: every source node this merge has entered. A damaged NIF can
+        // parent two nodes to each other, and the recursion then never ends -
+        // a stack overflow on the sync thread (review 2026-09-23 C15).
+        void MergeBranch(nifly::NifFile& dst, nifly::NiNode* srcNode, nifly::NiNode* dstRoot,
+            nifly::NifFile& src, std::unordered_set<const nifly::NiNode*>& a_seen)
         {
+            if (!a_seen.insert(srcNode).second) {
+                return;
+            }
             const std::string boneName = srcNode->name.get();
             if (boneName.empty()) {
                 return;
@@ -222,7 +237,7 @@ namespace nifcarrier {
 
             for (auto& childRef : srcNode->childRefs) {
                 if (auto* childNode = src.GetHeader().GetBlock<nifly::NiNode>(childRef)) {
-                    MergeBranch(dst, childNode, dstRoot, src);
+                    MergeBranch(dst, childNode, dstRoot, src, a_seen);
                 }
             }
         }
@@ -230,8 +245,11 @@ namespace nifcarrier {
         // Ensure a source bone (and its ancestor chain) exists in dst - the
         // rescue for physics bones referenced ONLY by a shape's skin and absent
         // from the node hierarchy (Pharaoh_Veil's PhSVeil_*). Idempotent.
+        // a_chain: the bones this call is already creating the parents of. A
+        // parent cycle in a damaged NIF ends here instead of recursing without
+        // end (C15); the bone that closes the cycle hangs off the root.
         nifly::NiNode* EnsureBone(nifly::NifFile& dst, nifly::NifFile& src, nifly::NiNode* srcBone,
-            nifly::NiNode* dstRoot)
+            nifly::NiNode* dstRoot, std::unordered_set<const nifly::NiNode*>& a_chain)
         {
             const std::string bn = srcBone->name.get();
             if (bn.empty()) {
@@ -242,8 +260,9 @@ namespace nifcarrier {
             }
             nifly::NiNode* dparent = dstRoot;
             auto* sp = src.GetParentNode(srcBone);
-            if (sp && !sp->name.get().empty() && sp != src.GetRootNode()) {
-                dparent = EnsureBone(dst, src, sp, dstRoot);  // parent first (chain-safe order)
+            if (sp && !sp->name.get().empty() && sp != src.GetRootNode() &&
+                a_chain.insert(srcBone).second) {
+                dparent = EnsureBone(dst, src, sp, dstRoot, a_chain);  // parent first (chain-safe order)
             }
             const uint32_t bid = dst.CloneNamedNode(bn, &src);
             dparent->childRefs.AddBlockRef(bid);
@@ -253,13 +272,19 @@ namespace nifcarrier {
 
         // Bone union of one source into dst: hierarchy-reachable branch first,
         // then EVERY remaining named (exact-type) NiNode. Returns bones added.
+        // -1 when either file has no root node to merge under or from (a NIF
+        // without an NiNode root reached here and was dereferenced - C15).
         int MergeBones(nifly::NifFile& dst, nifly::NifFile& src, nifly::NiNode* dstRoot)
         {
-            const int before = CountNamedNodes(dst);
             auto* srcRoot = src.GetRootNode();
+            if (!srcRoot || !dstRoot) {
+                return -1;
+            }
+            const int before = CountNamedNodes(dst);
+            std::unordered_set<const nifly::NiNode*> seen;
             for (auto& childRef : srcRoot->childRefs) {
                 if (auto* childNode = src.GetHeader().GetBlock<nifly::NiNode>(childRef)) {
-                    MergeBranch(dst, childNode, dstRoot, src);
+                    MergeBranch(dst, childNode, dstRoot, src, seen);
                 }
             }
             const auto& hdr = src.GetHeader();
@@ -272,7 +297,8 @@ namespace nifcarrier {
                 }
             }
             for (auto* b : named) {
-                EnsureBone(dst, src, b, dstRoot);
+                std::unordered_set<const nifly::NiNode*> chain;
+                EnsureBone(dst, src, b, dstRoot, chain);
             }
             return CountNamedNodes(dst) - before;
         }
@@ -507,9 +533,12 @@ namespace nifcarrier {
 
         // All node names reachable from the root via children (the tree
         // doSkeletonMerge actually walks). Root's own name included.
-        void TreeNodeNamesWalk(const nifly::NifFile& nif, nifly::NiNode* n, std::set<std::string>& names)
+        void TreeNodeNamesWalk(const nifly::NifFile& nif, nifly::NiNode* n, std::set<std::string>& names,
+            int a_depth = 0)
         {
-            if (!n) {
+            // The name set stops a cycle of NAMED nodes; an unnamed pair
+            // parented to each other would recurse without end (C15).
+            if (!n || a_depth > kMaxNodeDepth) {
                 return;
             }
             const std::string nm = n->name.get();
@@ -518,7 +547,7 @@ namespace nifcarrier {
             }
             for (auto& ref : n->childRefs) {
                 if (auto* c = nif.GetHeader().GetBlock<nifly::NiNode>(ref)) {
-                    TreeNodeNamesWalk(nif, c, names);
+                    TreeNodeNamesWalk(nif, c, names, a_depth + 1);
                 }
             }
         }
@@ -1005,7 +1034,15 @@ namespace nifcarrier {
             }
             std::set<std::string> referenced;
             {
-                const std::function<void(pugi::xml_node)> collect = [&](pugi::xml_node node) {
+                // Depth-capped (C15): a physics XML is a few levels deep, and a
+                // file nested thousands deep would take the stack with it.
+                bool tooDeep = false;
+                const std::function<void(pugi::xml_node, int)> collect =
+                    [&](pugi::xml_node node, int depth) {
+                    if (depth > kMaxXmlDepth) {
+                        tooDeep = true;
+                        return;
+                    }
                     for (auto attr : node.attributes()) {
                         if (attr.value()[0]) {
                             referenced.insert(attr.value());
@@ -1018,10 +1055,15 @@ namespace nifcarrier {
                             }
                             continue;
                         }
-                        collect(child);
+                        collect(child, depth + 1);
                     }
                 };
-                collect(doc.document_element());
+                collect(doc.document_element(), 0);
+                if (tooDeep) {
+                    Log(r.log, "[isolate] FAILED: '%s' nests deeper than %d levels", U8(xmlIn).c_str(),
+                        kMaxXmlDepth);
+                    return r;
+                }
             }
             for (auto* s : nif.GetShapes()) {
                 for (const auto& b : ShapeBoneNames(nif, s)) {
@@ -1126,7 +1168,13 @@ namespace nifcarrier {
             // replacing any attribute value / element text that EXACTLY equals
             // a renamed name. (doc was loaded up front by the slimming pass.)
             int refs = 0;
-            const std::function<void(pugi::xml_node)> walk = [&](pugi::xml_node node) {
+            // Same depth cap (C15); the collect pass above already refused a
+            // file deeper than this, so it only guards against a change there.
+            const std::function<void(pugi::xml_node, int)> walk = [&](pugi::xml_node node,
+                                                                      int depth) {
+                if (depth > kMaxXmlDepth) {
+                    return;
+                }
                 for (auto attr : node.attributes()) {
                     const auto it = renames.find(attr.value());
                     if (it != renames.end()) {
@@ -1143,10 +1191,10 @@ namespace nifcarrier {
                         }
                         continue;
                     }
-                    walk(child);
+                    walk(child, depth + 1);
                 }
             };
-            walk(doc.document_element());
+            walk(doc.document_element(), 0);
             if (!doc.save_file(xmlOut.c_str(), "  ")) {
                 Log(r.log, "[isolate] FAILED xml save '%s'", U8(xmlOut).c_str());
                 return r;
@@ -1673,6 +1721,11 @@ namespace nifcarrier {
                 }
 
                 const int addedBones = MergeBones(dst, src, dstRoot);  // bones ALWAYS union
+                if (addedBones < 0) {
+                    Log(r.log, "[merge] FAILED: %s or the base has no root node to merge bones "
+                               "into", U8(inputs[i]).c_str());
+                    return r;
+                }
 
                 // Clone this content's shapes, remembering the new ones so we
                 // can drop JUST them if they corrupt the NIF.
@@ -2592,14 +2645,17 @@ namespace nifcarrier {
 
     }  // namespace
 
-    SyncResult Sync(const SyncOptions& opts)
+    namespace
     {
-        SyncResult res;
+        // The whole build, written into a_res as it goes - so a run that dies
+        // part-way still hands back the log of everything up to the fault.
+        void SyncInto(const SyncOptions& opts, SyncResult& res)
+        {
         try {
             if (opts.manifestPath.empty() || opts.outRoot.empty() || opts.dataRoots.empty()) {
                 Log(res.log,
                     "[sync] usage: sync <manifest.json> --data <root> [--data ...] --out <cefModRoot> [--empty <emptyToken.nif>]");
-                return res;
+                return;
             }
 
             const auto doc = nlohmann::json::parse(ReadTextFile(opts.manifestPath));
@@ -3163,6 +3219,50 @@ namespace nifcarrier {
         } catch (...) {
             Log(res.log, "[sync] FAILED: unknown exception");
             res.ok = false;
+        }
+        }
+
+        // The C++ frame the SEH frame below calls into. noinline, so the __try
+        // function holds no object with a destructor (C2712) and the compiler
+        // cannot fold this one into it.
+        __declspec(noinline) void RunSyncCpp(const SyncOptions& a_opt, SyncResult& a_res)
+        {
+            SyncInto(a_opt, a_res);
+        }
+
+        // The worker used to be guarded by catch (...) under /EHsc, which does
+        // not catch a hardware fault - and nifly has them to give: a skin
+        // partition with a zero vertex size divides by zero, a damaged NIF reads
+        // through a null ref, two nodes parented to each other recurse until the
+        // stack runs out. On the background sync thread any of those is an
+        // unhandled exception, the game with it, and it comes back on every sync
+        // while that costume is in a box - including a model the engine itself
+        // never loads (published costumes parse both sexes). Caught here; this
+        // library is built /EHa so C++ objects unwind on the way out (review
+        // 2026-09-23 C15). Returns 0, or the exception code.
+        unsigned long RunSyncSeh(const SyncOptions& a_opt, SyncResult& a_res)
+        {
+            __try {
+                RunSyncCpp(a_opt, a_res);
+                return 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                const unsigned long code = GetExceptionCode();
+                if (code == EXCEPTION_STACK_OVERFLOW) {
+                    _resetstkoflw();  // or the next overflow on this thread is fatal
+                }
+                return code;
+            }
+        }
+    }  // namespace
+
+    SyncResult Sync(const SyncOptions& opts)
+    {
+        SyncResult res;
+        if (const unsigned long code = RunSyncSeh(opts, res); code != 0) {
+            res.ok = false;
+            res.crashCode = code;
+            Log(res.log, "[sync] FAILED: the carrier builder crashed (code 0x%08lX) - carriers "
+                         "unchanged", code);
         }
         return res;
     }

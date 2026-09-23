@@ -33,6 +33,19 @@ add_library(nifcarrier_core STATIC
 target_include_directories(nifcarrier_core PUBLIC src)
 target_link_libraries(nifcarrier_core PRIVATE nifly pugixml::pugixml nlohmann_json::nlohmann_json bcrypt)
 target_compile_features(nifcarrier_core PUBLIC cxx_std_17)
+# /EHa: the builder runs third-party NIFs through nifly on a background thread,
+# and a damaged one faults in hardware (a zero divide, an access violation, a
+# stack overflow). Sync() catches those with __try/__except; /EHa is what makes
+# C++ objects unwind when one passes through (review 2026-09-23 C15). nifly's
+# exported options add /EHsc AFTER ours and the last /EH wins, so it is taken
+# out of what nifly hands its consumers (nifcarrier_core is the only one). The
+# /EHsc in CMAKE_CXX_FLAGS comes first and is overridden (warning D9025).
+get_target_property(_cef_nifly_opts nifly INTERFACE_COMPILE_OPTIONS)
+if(_cef_nifly_opts)
+    list(REMOVE_ITEM _cef_nifly_opts "/EHsc")
+    set_target_properties(nifly PROPERTIES INTERFACE_COMPILE_OPTIONS "${_cef_nifly_opts}")
+endif()
+target_compile_options(nifcarrier_core PRIVATE /EHa)
 
 # Offline test host - a DEV tool, never part of the mod package. Nexus zips
 # are staged from the deployed mod folder only; keep it that way (review P1-2).

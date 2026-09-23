@@ -146,6 +146,10 @@ namespace nifcarrier {
         int skipped = 0;
         int failed = 0;
         std::string log;
+        // Nonzero when the build died on a hardware fault (access violation,
+        // zero divide, stack overflow) and was contained - the Windows
+        // exception code, for the log (review 2026-09-23 C15).
+        unsigned long crashCode = 0;
     };
 
     // Full manifest-driven rebuild: per box (0/1/2+ SMP contents), hash skip,
