@@ -416,10 +416,13 @@ namespace CostumeFW
             }
         }
 
-        // Still used by the diagnostics walks (nodediag / headdiag / the dead-bind
-        // sweep), which enumerate FSMP's merged bones and have no record to go on.
-        // Those are user-initiated or already scoped to our own holder; the hot
-        // paths no longer walk anything.
+        // Used by every walk CEF still makes: the diagnostics (nodediag /
+        // headdiag), and the renamed-bone census behind the dead-bind sweep and
+        // the FSMP bone lookup, which enumerate FSMP's merged bones and have no
+        // record to go on. That census DOES walk the actor's whole 3P tree - on
+        // the Reconcile and watchdog paths, so this used to say "the hot paths
+        // no longer walk anything", which was not true - but once per root per
+        // pass since review 2026-09-23 W28, not once per item or per bone.
         bool ChildrenWalkable(RE::NiNode* a_node)
         {
             const auto& kids = a_node->GetChildren();
@@ -937,6 +940,100 @@ namespace CostumeFW
             return true;
         }
 
+        // --- renamed-bone census (review 2026-09-23 W28) ----------------------
+        // Everything the dead-bind sweep and the FSMP bone lookup need to know
+        // about an actor's live tree: which FSMP-renamed nodes hang in it right
+        // now, and the newest generation of each (class, bone). Both used to walk
+        // the WHOLE tree for every question - the sweep once per shown item per
+        // Reconcile and per 2.5s watchdog tick, the lookup once per unresolved
+        // bone - and every walk reads child arrays a stomp can have hit since the
+        // frame containment last looked. One walk per root per pass now: a
+        // CensusScope marks the pass, and the first question builds it. Within a
+        // pass the renamed nodes do not change - FSMP re-merges from the engine's
+        // equip processing, never from inside CEF's own call - and CEF's own
+        // detach / re-inject does not touch them.
+        struct RenamedCensus
+        {
+            std::unordered_set<const RE::NiAVObject*> attached;
+            std::unordered_map<std::string, std::uint32_t> maxHead, maxArmor;
+            std::unordered_map<std::string, RE::NiAVObject*> newestHead, newestArmor;
+        };
+
+        RenamedCensus BuildRenamedCensus(RE::NiAVObject* a_root)
+        {
+            RenamedCensus c;
+            std::vector<RE::NiAVObject*> stack{ a_root };
+            while (!stack.empty()) {
+                auto* obj = stack.back();
+                stack.pop_back();
+                if (!obj) {
+                    continue;
+                }
+                bool head = false;
+                std::uint32_t id = 0;
+                std::string_view suffix;
+                if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix)) {
+                    c.attached.insert(obj);
+                    const std::string key(suffix);
+                    auto& maxes = head ? c.maxHead : c.maxArmor;
+                    // First found wins a tie, as the per-call walk did.
+                    if (auto [it, inserted] = maxes.try_emplace(key, id); inserted || id > it->second) {
+                        it->second = id;
+                        (head ? c.newestHead : c.newestArmor)[key] = obj;
+                    }
+                }
+                // Walkability guard (2026-07-30): the per-bone walk this replaced
+                // had none while the guarded sweeps did - it was the widest-open
+                // residual path of the §7 B-2 audit.
+                if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
+                    for (auto& child : node->GetChildren()) {
+                        auto* ch = child.get();
+                        if (ch && !PlausibleObjectPtr(ch)) {
+                            NoteBadSlot("renamed-bone census", node, ch);
+                            continue;
+                        }
+                        stack.push_back(ch);
+                    }
+                }
+            }
+            return c;
+        }
+
+        // One pass: a Reconcile of one actor, or one watchdog tick. Nests (a tick
+        // that finds a dead bind runs a Reconcile, which starts afresh). Main
+        // thread only, like everything that walks the scene.
+        struct CensusScope
+        {
+            CensusScope() :
+                prev(s_current)
+            {
+                s_current = this;
+            }
+            ~CensusScope() { s_current = prev; }
+            CensusScope(const CensusScope&) = delete;
+            CensusScope& operator=(const CensusScope&) = delete;
+
+            std::unordered_map<const RE::NiAVObject*, RenamedCensus> byRoot;
+            CensusScope* prev;
+            static inline CensusScope* s_current = nullptr;
+        };
+
+        // a_root's census for the current pass, built on first use. Outside a
+        // pass, a fresh one in a_local - the old cost, for the rare caller that
+        // is not part of one.
+        const RenamedCensus& CensusFor(RE::NiAVObject* a_root, RenamedCensus& a_local)
+        {
+            if (auto* scope = CensusScope::s_current) {
+                auto it = scope->byRoot.find(a_root);
+                if (it == scope->byRoot.end()) {
+                    it = scope->byRoot.emplace(a_root, BuildRenamedCensus(a_root)).first;
+                }
+                return it->second;
+            }
+            a_local = BuildRenamedCensus(a_root);
+            return a_local;
+        }
+
         // Selection policy (learned the hard way, 2026-07-04):
         // - PREFER Head over Armor: an Armor merge comes from a WORN item and
         //   dies on unequip (a mesh bound there stretches to garbage); box
@@ -953,45 +1050,16 @@ namespace CostumeFW
             if (!a_root || !a_bone || !*a_bone) {
                 return nullptr;
             }
-            const std::string_view bone{ a_bone };
-            RE::NiAVObject* bestHead = nullptr;
-            RE::NiAVObject* bestArmor = nullptr;
-            std::uint32_t bestHeadId = 0, bestArmorId = 0;
-            std::vector<RE::NiAVObject*> stack{ a_root };
-            while (!stack.empty()) {
-                auto* obj = stack.back();
-                stack.pop_back();
-                if (!obj) {
-                    continue;
-                }
-                bool head = false;
-                std::uint32_t id = 0;
-                std::string_view suffix;
-                if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix) &&
-                    suffix == bone) {
-                    if (head && (!bestHead || id > bestHeadId)) {
-                        bestHead = obj;
-                        bestHeadId = id;
-                    } else if (!head && (!bestArmor || id > bestArmorId)) {
-                        bestArmor = obj;
-                        bestArmorId = id;
-                    }
-                }
-                // Walkability guard (2026-07-30): this walk had NONE while the
-                // guarded sweeps did - it was the widest-open residual path of
-                // the §7 B-2 audit (every unresolved bone, up to twice).
-                if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
-                    for (auto& child : node->GetChildren()) {
-                        auto* c = child.get();
-                        if (c && !PlausibleObjectPtr(c)) {
-                            NoteBadSlot("FindFsmpRenamedBone", node, c);
-                            continue;
-                        }
-                        stack.push_back(c);
-                    }
-                }
+            RenamedCensus local;
+            const auto& census = CensusFor(a_root, local);
+            const std::string bone{ a_bone };
+            if (const auto it = census.newestHead.find(bone); it != census.newestHead.end()) {
+                return it->second;
             }
-            return bestHead ? bestHead : bestArmor;
+            if (const auto it = census.newestArmor.find(bone); it != census.newestArmor.end()) {
+                return it->second;
+            }
+            return nullptr;
         }
 
         // --- rebind retry (FSMP carrier attach race) ---------------------------
@@ -1275,46 +1343,19 @@ namespace CostumeFW
                 return false;  // not injected on the 3p skeleton - nothing to sweep
             }
 
-            // One BFS over the LIVE tree: the set of attached renamed nodes (by
-            // POINTER - liveness is membership, never a parent-chain walk: a
-            // retired node's ->parent can dangle even while the node itself is
-            // pinned alive) and the newest attached generation per (class, bone).
-            // "Attached" alone is NOT enough: FSMP keeps the retiring generation
-            // on the skeleton for a few seconds, and a bind taken in that overlap
-            // window sways wrong without ever being detached.
-            std::unordered_set<const RE::NiAVObject*> attachedRenamed;
-            std::unordered_map<std::string, std::uint32_t> maxHead, maxArmor;
-            {
-                std::vector<RE::NiAVObject*> stack{ a_root3p };
-                while (!stack.empty()) {
-                    auto* obj = stack.back();
-                    stack.pop_back();
-                    if (!obj) {
-                        continue;
-                    }
-                    bool head = false;
-                    std::uint32_t id = 0;
-                    std::string_view suffix;
-                    if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix)) {
-                        attachedRenamed.insert(obj);
-                        auto& m = head ? maxHead : maxArmor;
-                        auto [it, inserted] = m.try_emplace(std::string(suffix), id);
-                        if (!inserted && id > it->second) {
-                            it->second = id;
-                        }
-                    }
-                    if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
-                        for (auto& child : node->GetChildren()) {
-                            auto* c = child.get();
-                            if (c && !PlausibleObjectPtr(c)) {
-                                NoteBadSlot("dead-bind sweep", node, c);
-                                continue;
-                            }
-                            stack.push_back(c);
-                        }
-                    }
-                }
-            }
+            // The census of the LIVE tree (one walk per root per pass - W28): the
+            // set of attached renamed nodes (by POINTER - liveness is membership,
+            // never a parent-chain walk: a retired node's ->parent can dangle even
+            // while the node itself is pinned alive) and the newest attached
+            // generation per (class, bone). "Attached" alone is NOT enough: FSMP
+            // keeps the retiring generation on the skeleton for a few seconds, and
+            // a bind taken in that overlap window sways wrong without ever being
+            // detached.
+            RenamedCensus local;
+            const auto& census = CensusFor(a_root3p, local);
+            const auto& attachedRenamed = census.attached;
+            const auto& maxHead = census.maxHead;
+            const auto& maxArmor = census.maxArmor;
 
             bool dead = false;
             RE::BSVisit::TraverseScenegraphGeometries(a_holder,
@@ -3023,10 +3064,13 @@ namespace CostumeFW
     // (observed up to ~13s after load) and lost - the merge generation died
     // AFTER the pass and the stretched mesh stayed until a manual CEF
     // off->on. Timing guesses are the approach this project keeps re-learning
-    // to avoid; instead a permanent lightweight tick (a few parent-chain
-    // walks every 2.5s) detects dead-generation binds WHENEVER they happen
-    // (load sequence, RaceMenu, any mod rebuilding the head) and runs the
-    // Reconcile sweep to re-inject into the current generation.
+    // to avoid; instead a permanent tick every 2.5s detects dead-generation
+    // binds WHENEVER they happen (load sequence, RaceMenu, any mod rebuilding
+    // the head) and runs the Reconcile sweep to re-inject into the current
+    // generation. What it costs is not "a few parent-chain walks", as this
+    // used to say: liveness is judged against a census of the actor's whole 3P
+    // tree - one walk per actor per tick since W28, and none at all for an
+    // actor whose items bound no FSMP bone.
     constexpr int kBindWatchdogMs = 2500;
     std::atomic<bool> g_watchdogTickPending{ false };
 
@@ -3067,6 +3111,8 @@ namespace CostumeFW
                 return;
             }
         }
+        // One renamed-bone census per actor root for the whole tick (W28).
+        CensusScope census;
         for (auto& state : g_actors) {
             auto* actor = ResolveActor(state);
             auto* root = actor ? actor->Get3D(false) : nullptr;
@@ -3082,6 +3128,9 @@ namespace CostumeFW
                 }
                 if (!it.holder3p) {
                     continue;  // not injected: record-based skip (no name search)
+                }
+                if (it.fsmpBones == 0) {
+                    continue;  // bound to no FSMP bone: no generation to die (W28)
                 }
                 if (HasDeadPhysicsBind(it.id, root, it.holder3p.get())) {
                     ++g_persistDiag.watchdogReconciles;
@@ -3199,6 +3248,8 @@ namespace CostumeFW
                 a_state.bonePins.clear();
                 return;
             }
+            // One renamed-bone census per root for this actor's pass (W28).
+            CensusScope census;
             bool anyRealBody = false;  // set if a shown content wants the real body under it
             for (auto& it : a_state.items) {
                 // master off -> hide; else persist always shows, a box/publish
@@ -3284,8 +3335,10 @@ namespace CostumeFW
                     // Dead-bind sweep: if this item's injected mesh holds FSMP bones of
                     // a dead merge generation (armor unequipped / head rebuilt), detach
                     // it first so the injection below rebinds to the CURRENT generation.
-                    if (auto* r3 = actor->Get3D(false);
-                        r3 && it.holder3p && HasDeadPhysicsBind(it.id, r3, it.holder3p.get())) {
+                    // Only an item that bound FSMP bones can hold a dead
+                    // generation; the rest skip the census entirely (W28).
+                    if (auto* r3 = actor->Get3D(false); r3 && it.holder3p && it.fsmpBones > 0 &&
+                        HasDeadPhysicsBind(it.id, r3, it.holder3p.get())) {
                         ++g_persistDiag.deadBindReinjects;
                         SKSE::log::info("  '{}': bound FSMP bones are DETACHED (dead merge "
                                         "generation) - re-injecting", it.id);
