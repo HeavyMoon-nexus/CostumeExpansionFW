@@ -1248,11 +1248,23 @@ namespace CostumeFW::SmfUI
                     for (int i = 0; i < n; ++i) {
                         const BoxDefInfo b = BoxAt(i);
                         const int slot = TokenSlot(b.token);
-                        if (ImGui::Selectable(
-                                std::format("Box {}: {}##abx{}{}", slot, SlotName(slot), p.file, slot)
-                                    .c_str())) {
+                        // Named and keyed the way the Boxes page names them (W6).
+                        // The id was the SLOT - trap 8, missed here: with two
+                        // boxes on one slot ImGui took them for one widget and
+                        // the pick went to whichever came first. boxId instead,
+                        // the box's label, and the carrier key that tells two
+                        // boxes on one slot apart.
+                        const bool usable = BoxTokenUsable(b);
+                        const std::string where = usable ? std::format("Box {}", slot) : "Box -";
+                        const std::string title = b.label.empty() ? SlotName(slot) : b.label;
+                        ImGui::BeginDisabled(!usable);  // quarantined: nothing to assign onto
+                        if (ImGui::Selectable(std::format("{}: {}  [{}]##abx{}{}", where, title,
+                                usable ? CarrierKeyForToken(b.token) : TokenStateReason(b.tokenState),
+                                p.file, b.boxId)
+                                                  .c_str())) {
                             QueueAssignPreset(b.token, p.file);
                         }
+                        ImGui::EndDisabled();
                     }
                     ImGui::EndCombo();
                 }
