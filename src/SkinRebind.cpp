@@ -1965,6 +1965,9 @@ namespace CostumeFW
                 &a_state.visualRealBody3p);
             DetachRecorded(a_state.realBodyParent1p, a_state.realBodyHolder1p,
                 &a_state.visualRealBody1p);
+            // After both detaches, like an item's: nothing skinned to them is
+            // left to be drawn (C14).
+            a_state.bonePins.erase(kRealBodyNode);
         }
 
         // Pick the BODY (slot-32) addon from a skin ARMO's armature for the player's
@@ -2210,6 +2213,19 @@ namespace CostumeFW
             RE::BGSTextureSet* skinTx = bodyAA->skinTextures[sex];
             static const std::unordered_set<std::string> kNoHide;
             bool any = false;
+            // The real body binds to bones like any item, and it ran outside
+            // InjectFor's bookkeeping (review 2026-09-23 C14): no pin sink, so an
+            // FSMP-renamed node it bound to was never pinned, and the rebind
+            // prefix of whatever content was injected last, so it went looking
+            // for THAT carrier's physics bones first. With the real body hidden
+            // under a slot-32 token its own FSMP generation is retiring but still
+            // attached for a few seconds - bind there, and once FSMP frees it the
+            // skin points at freed nodes (the 2026-07-04 shape). So: no prefix -
+            // the body belongs to no carrier - and its bones pinned under its own
+            // key, both put back as they were afterwards.
+            const std::string savedPrefix = std::exchange(g_rebindPrefix, std::string{});
+            std::vector<RE::NiPointer<RE::NiAVObject>> pins;
+            auto* const savedSink = std::exchange(g_boneRefSink, &pins);
             if (auto* root3p = actor->Get3D(false); root3p && !m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
                     m3p.swap, true, kNoHide, "realbody", false, actor,
@@ -2225,6 +2241,12 @@ namespace CostumeFW
                         &a_state.visualRealBody1p, ReferenceEffectActive(a_state, actor, true));
                     ApplySkinTextures(root1p, kRealBodyNode, skinTx);
                 }
+            }
+            g_boneRefSink = savedSink;
+            g_rebindPrefix = savedPrefix;
+            if (!pins.empty()) {
+                auto& refs = a_state.bonePins[kRealBodyNode];
+                refs.insert(refs.end(), pins.begin(), pins.end());
             }
             if (any) {
                 SKSE::log::info("realbody: injected player body addon {:08X}", bodyAA->GetFormID());
@@ -3019,6 +3041,15 @@ namespace CostumeFW
                     return;
                 }
             }
+            // The real body too (C14) - Reconcile's sweep now covers it.
+            if (state.realBodyHolder3p &&
+                HasDeadPhysicsBind(kRealBodyNode, root, state.realBodyHolder3p.get())) {
+                ++g_persistDiag.watchdogReconciles;
+                SKSE::log::info("bind watchdog: the real body holds a dead merge generation - "
+                                "reconciling");
+                Reconcile();
+                return;
+            }
         }
     }
 
@@ -3221,6 +3252,15 @@ namespace CostumeFW
             // with hideShapes dropping the costume's own body); else remove it.
             if (anyRealBody && !g_poisonParked.contains("realbody-3p") &&
                 !g_poisonParked.contains("realbody-1p")) {
+                // The same dead-bind sweep the items get (C14): the real body can
+                // be bound to an FSMP generation that has since gone.
+                if (auto* r3 = actor->Get3D(false); r3 && a_state.realBodyHolder3p &&
+                    HasDeadPhysicsBind(kRealBodyNode, r3, a_state.realBodyHolder3p.get())) {
+                    ++g_persistDiag.deadBindReinjects;
+                    SKSE::log::info("  real body: bound FSMP bones are DETACHED (dead merge "
+                                    "generation) - re-injecting");
+                    DetachRealBody(a_state);
+                }
                 a_state.realBodyShown = InjectRealBody(a_state);
             } else {
                 DetachRealBody(a_state);
