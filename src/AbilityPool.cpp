@@ -300,7 +300,12 @@ namespace CostumeFW::abilities
                 return out;
             }
             const auto& [map, lock] = RE::TESForm::GetAllForms();
-            [[maybe_unused]] const RE::BSReadWriteLock l{ lock };
+            // A read GUARD on the engine's lock. The line here was
+            // `const BSReadWriteLock l{ lock }` - CommonLib's own LookupByID
+            // pattern - which constructs a second, unrelated lock object and
+            // holds nothing, while this walks the entire form map (review
+            // 2026-09-23 M9).
+            const RE::BSReadLockGuard guard{ lock.get() };
             if (!map) {
                 return out;
             }
