@@ -301,14 +301,28 @@ namespace CostumeFW
         // owning ActorState::bonePins[id] (per-actor storage, NPC-generalized).
         std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
 
-        // Baseline: the children-buffer address each recorded holder is SUPPOSED
-        // to have, captured when CEF itself finished attaching (InjectOnRoot).
-        // Catches the stomp variants a value-plausibility check cannot: an
-        // 8-aligned uint16 run with a zero low word (e.g. 0x0002000000010000)
-        // passes PlausibleObjectPtr, but nothing legitimate moves the buffer
-        // while the record holds the node - CEF pre-sizes the array and never
-        // grows it afterwards. Keyed by node address; erased in DetachRecorded.
-        std::unordered_map<const void*, std::uint64_t> g_holderArrayBaseline;
+        // Baseline: the children array header (buffer address, capacity, size)
+        // each recorded holder is SUPPOSED to have, captured when CEF itself
+        // finished attaching (InjectOnRoot). Catches the stomp variants a
+        // value-plausibility check cannot: an 8-aligned uint16 run with a zero
+        // low word (e.g. 0x0002000000010000) passes PlausibleObjectPtr. CEF
+        // pre-sizes the array and never grows it afterwards - but the ENGINE can:
+        // a hit decal is attached under the shape that was hit, which may be
+        // under our holder, and that reallocates the buffer. Growth (capacity
+        // and size both up, size within capacity) is therefore re-baselined, and
+        // only a buffer that moved WITHOUT growing is corruption (review
+        // 2026-09-23 W16). The stomps observed so far leave the size fields
+        // intact, so they are still caught. Keyed by node address; erased in
+        // DetachRecorded.
+        //
+        // HolderArrayState: a NiTArray header read as raw fields (see
+        // ReadHolderArray below).
+        struct HolderArrayState
+        {
+            std::uint64_t data{ 0 };
+            std::uint16_t cap{ 0 }, freeIdx{ 0 }, size{ 0 }, growth{ 0 };
+        };
+        std::unordered_map<const void*, HolderArrayState> g_holderArrayBaseline;
 
         // Repeat-offender parking: a holder the environment stomps once tends to
         // be stomped again right after the re-inject (same allocator, same
@@ -429,13 +443,8 @@ namespace CostumeFW
         // The observed corruption (children._data == 0x1 with the size fields
         // intact, INVESTIGATION 2026-07-29/30) is detected from the attachment
         // RECORDS: metadata reads only - no dereference, no walking - so the
-        // check is safe at any moment, on any state.
-        struct HolderArrayState
-        {
-            std::uint64_t data{ 0 };
-            std::uint16_t cap{ 0 }, freeIdx{ 0 }, size{ 0 }, growth{ 0 };
-        };
-
+        // check is safe at any moment, on any state. (HolderArrayState is
+        // defined with g_holderArrayBaseline, above.)
         HolderArrayState ReadHolderArray(RE::NiNode* a_node)
         {
             HolderArrayState s{};
@@ -451,7 +460,7 @@ namespace CostumeFW
         void RecordHolderBaseline(RE::NiNode* a_holder)
         {
             if (a_holder) {
-                g_holderArrayBaseline[a_holder] = ReadHolderArray(a_holder).data;
+                g_holderArrayBaseline[a_holder] = ReadHolderArray(a_holder);
             }
         }
 
@@ -518,11 +527,23 @@ namespace CostumeFW
             if (HolderArrayBroken(st)) {
                 how = "implausible children array";
             } else if (const auto itB = g_holderArrayBaseline.find(a_holder.get());
-                       itB != g_holderArrayBaseline.end() && itB->second != st.data) {
-                // Plausible-looking value, wrong buffer: either an aligned
-                // stomp (uint16 run with a zero low word) or something foreign
-                // grew OUR array. Neither is a state to keep rendering from.
-                how = "children buffer moved from its attach-time baseline";
+                       itB != g_holderArrayBaseline.end() && itB->second.data != st.data) {
+                const auto& b = itB->second;
+                if (st.cap > b.cap && st.size > b.size && st.size <= st.cap) {
+                    // The array GREW: a real reallocation for a child the engine
+                    // attached (a hit decal under the shape that was hit). Not a
+                    // stomp - those leave the size fields as they were - so take
+                    // the new buffer as the baseline and carry on (W16).
+                    SKSE::log::info("containment: holder '{}' grew {}->{} children (engine "
+                                    "attach) - rebaselined",
+                        a_holder->name.c_str(), b.size, st.size);
+                    itB->second = st;
+                } else {
+                    // Plausible-looking value, wrong buffer and no growth to
+                    // explain it: an aligned stomp (uint16 run with a zero low
+                    // word). Not a state to keep rendering from.
+                    how = "children buffer moved from its attach-time baseline";
+                }
             }
             if (!how) {
                 return false;
