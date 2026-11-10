@@ -6,6 +6,7 @@
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "Config.h"  // PersistHeadRebuildEnabled (F2 diagnostic lever)
 #include "Diag.h"    // two-tier logging + thread-contract guard
+#include "RttiProbe.h"  // what an object's vtable belongs to (BUGREPORT 2026-10-18)
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
@@ -363,9 +364,19 @@ namespace CostumeFW
         // detach path in the plugin goes through this function, and a stale
         // NiPointer to geometry CEF no longer owns is exactly the extra reference
         // the containment work forbids (§10).
+        bool HolderHeaderIntact(const RE::NiNode* a_holder);
+        void ReleaseBrokenHolder(const char* a_what, RE::NiPointer<RE::NiNode>& a_parent,
+            RE::NiPointer<RE::NiNode>& a_holder, std::vector<VisualSyncRef>* a_visual);
+
         void DetachRecorded(RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder,
             std::vector<VisualSyncRef>* a_visual = nullptr)
         {
+            // DetachChild would release the holder through its own vtable (the
+            // array slot's DecRef) - a call through whatever overwrote it.
+            if (a_holder && !HolderHeaderIntact(a_holder.get())) {
+                ReleaseBrokenHolder("detach", a_parent, a_holder, a_visual);
+                return;
+            }
             if (a_parent && a_holder) {
                 a_parent->DetachChild(a_holder.get());
             }
@@ -500,6 +511,144 @@ namespace CostumeFW
             }
         }
 
+        // --- holder header + object type (BUGREPORT 2026-10-18, Baki) ----------
+        // Everything above reads the children array at +0x110 and nothing else.
+        // The 2026-10-18 crash (v1.6.2) was a holder whose FIRST 0x18 bytes had
+        // become a NiTObjectArray - vtable, data, {6,6,6,1} - while its array
+        // was fine: the dead-bind census read its "name" (the array's size
+        // fields) and strlen faulted. Who writes it is still unknown; what CEF
+        // can do is notice before it reads or calls anything through the node.
+        //
+        // Every holder CEF makes is a plain RE::NiNode::Create, so its vtable is
+        // exactly NiNode's: one compare, safe on any state (the record keeps
+        // the memory alive).
+        std::uintptr_t NiNodeVtable()
+        {
+            static const std::uintptr_t s_vt = RE::VTABLE_NiNode[0].address();
+            return s_vt;
+        }
+
+        bool HolderHeaderIntact(const RE::NiNode* a_holder)
+        {
+            std::uintptr_t vt = 0;
+            std::memcpy(&vt, a_holder, sizeof(vt));
+            return vt == NiNodeVtable();
+        }
+
+        // a_child out of a_parent's children array by VALUE: nothing is called
+        // on a_child and nothing is read through it. This is NiTObjectArray's
+        // RemoveAt minus the release of the slot's reference - that release is
+        // the call through the broken vtable: null the slot, one element fewer,
+        // and pull the end in if it was the last. The parent is a live skeleton
+        // node; only its own array fields and slot values are read.
+        bool RawUnlinkChild(RE::NiNode* a_parent, const void* a_child)
+        {
+            if (!a_parent || !ChildrenWalkable(a_parent)) {
+                return false;
+            }
+            auto* raw = reinterpret_cast<unsigned char*>(&a_parent->GetChildren());
+            void** data = nullptr;
+            std::uint16_t cap = 0, freeIdx = 0, size = 0;
+            std::memcpy(&data, raw + 0x08, sizeof(data));
+            std::memcpy(&cap, raw + 0x10, sizeof(cap));
+            std::memcpy(&freeIdx, raw + 0x12, sizeof(freeIdx));
+            std::memcpy(&size, raw + 0x14, sizeof(size));
+            for (std::uint16_t i = 0; i < cap; ++i) {
+                if (data[i] != a_child) {
+                    continue;
+                }
+                data[i] = nullptr;
+                if (size > 0) {
+                    --size;
+                    std::memcpy(raw + 0x14, &size, sizeof(size));
+                }
+                if (freeIdx == i + 1) {
+                    --freeIdx;
+                    std::memcpy(raw + 0x12, &freeIdx, sizeof(freeIdx));
+                }
+                return true;
+            }
+            return false;
+        }
+
+        // A holder whose header is no longer NiNode's: out of the scene and out
+        // of the records, without calling or releasing anything through it. The
+        // reference the record held is leaked on purpose - releasing it IS the
+        // virtual call. The dump and the type the vtable names are the writer's
+        // fingerprint, which no crash log has been able to give.
+        void ReleaseBrokenHolder(const char* a_what, RE::NiPointer<RE::NiNode>& a_parent,
+            RE::NiPointer<RE::NiNode>& a_holder, std::vector<VisualSyncRef>* a_visual)
+        {
+            auto* holder = a_holder.get();
+            std::uintptr_t vt = 0;
+            std::memcpy(&vt, holder, sizeof(vt));
+            const std::string type = rtti::VtableTypeName(vt);
+            SKSE::log::error(
+                "SCENE CORRUPTION on holder at {:#x} ({}): it no longer starts with NiNode's "
+                "vtable - found {:#x} ({}). Something overwrote its header. Dumping it, then "
+                "cutting it out of the scene without calling anything through it",
+                reinterpret_cast<std::uintptr_t>(holder), a_what, vt,
+                type.empty() ? "not a class vtable" : type);
+            HexDumpNode(holder);
+            const bool unlinked = RawUnlinkChild(a_parent.get(), holder);
+            g_holderArrayBaseline.erase(holder);
+            if (a_visual) {
+                a_visual->clear();
+            }
+            a_parent.reset();
+            // Raw null, not reset(): reset() is the DecRef through the broken vtable.
+            static_assert(sizeof(RE::NiPointer<RE::NiNode>) == sizeof(void*));
+            std::memset(static_cast<void*>(&a_holder), 0, sizeof(a_holder));
+            SKSE::log::error("  holder {}; its reference is leaked on purpose",
+                unlinked ? "removed from its parent's children" :
+                           "NOT found in its parent's children - left where it is");
+        }
+
+        // For the walks (census, diagnostics): is what a child slot points at a
+        // scene object at all? Asked before its name is read or anything is
+        // called on it. NiNode's own vtable is the fast path; any other vtable
+        // is looked up once through RTTI and remembered.
+        bool IsSceneObject(const RE::NiAVObject* a_obj, std::uintptr_t& a_vtable)
+        {
+            if (!rtti::ReadPointer(a_obj, a_vtable)) {
+                return false;
+            }
+            if (a_vtable == NiNodeVtable()) {
+                return true;
+            }
+            static std::mutex s_m;
+            static std::unordered_map<std::uintptr_t, bool> s_known;
+            {
+                std::scoped_lock lk(s_m);
+                if (const auto it = s_known.find(a_vtable); it != s_known.end()) {
+                    return it->second;
+                }
+            }
+            const bool ok = rtti::VtableIsA(a_vtable, "NiAVObject");
+            std::scoped_lock lk(s_m);
+            s_known.emplace(a_vtable, ok);
+            return ok;
+        }
+
+        // Same family and same log budget as NoteBadSlot, plus the type the
+        // vtable names.
+        void NoteBadObject(const char* a_where, const void* a_obj, std::uintptr_t a_vtable)
+        {
+            static std::atomic<std::uint32_t> s_seen{ 0 };
+            const auto n = ++s_seen;
+            const std::string type = rtti::VtableTypeName(a_vtable);
+            if (n <= 8) {
+                SKSE::log::error(
+                    "SCENE CORRUPTION: the {} walk met an object at {:#x} whose vtable {:#x} is "
+                    "{} - not a scene object, skipped (hit #{})",
+                    a_where, reinterpret_cast<std::uintptr_t>(a_obj), a_vtable,
+                    type.empty() ? "not a class vtable" : "'" + type + "'", n);
+            } else {
+                SKSE::log::debug("non-scene object {:#x} (vtable {:#x}) in the {} walk, hit #{}",
+                    reinterpret_cast<std::uintptr_t>(a_obj), a_vtable, a_where, n);
+            }
+        }
+
         // A broken holder cannot be released as-is: ~NiNode's array destructor
         // walks _data (slot release + deallocate) and dies on 0x1 - "Active OFF
         // on the broken item still crashes" was a residual path of the record
@@ -524,6 +673,21 @@ namespace CostumeFW
         {
             if (!a_holder) {
                 return false;
+            }
+            // The header first: a holder that is no longer a NiNode cannot be
+            // repaired, detached or re-used like one, and an item that has had
+            // its node overwritten once sits out (no strike count - re-injecting
+            // just hands the writer a fresh target).
+            if (!HolderHeaderIntact(a_holder.get())) {
+                ReleaseBrokenHolder(a_what, a_parent, a_holder, a_visual);
+                g_poisonParked.insert(a_what);
+                SKSE::log::error("'{}' PARKED (no more re-injects until the next save load): "
+                                 "its node's header was overwritten by something outside CEF",
+                    a_what);
+                RE::DebugNotification(
+                    "CostumeFW: a costume's node was damaged by another mod - parked it "
+                    "(see the CEF log)");
+                return true;
             }
             const auto st = ReadHolderArray(a_holder.get());
             const char* how = nullptr;
@@ -969,6 +1133,13 @@ namespace CostumeFW
                 if (!obj) {
                     continue;
                 }
+                // The 2026-10-18 crash site: a holder overwritten with a
+                // NiTObjectArray reached this point and its "name" was read.
+                std::uintptr_t vt = 0;
+                if (!IsSceneObject(obj, vt)) {
+                    NoteBadObject("renamed-bone census", obj, vt);
+                    continue;
+                }
                 bool head = false;
                 std::uint32_t id = 0;
                 std::string_view suffix;
@@ -1341,6 +1512,12 @@ namespace CostumeFW
             (void)a_id;
             if (!a_holder || !a_root3p) {
                 return false;  // not injected on the 3p skeleton - nothing to sweep
+            }
+            // Overwritten since the containment last looked (mid-pass): the
+            // traversal below is a virtual call per node. The next containment
+            // pass releases it; this one must not walk it.
+            if (!HolderHeaderIntact(a_holder)) {
+                return false;
             }
 
             // The census of the LIVE tree (one walk per root per pass - W28): the
@@ -4559,6 +4736,95 @@ namespace CostumeFW
         return out;
     }
 
+    // `cef headertest` - synthetic probe for the holder-HEADER family
+    // (BUGREPORT 2026-10-18, Baki): a holder whose first 0x18 bytes had become
+    // a NiTObjectArray. Touches nothing on the player. Against the game's own
+    // RTTI it checks (a) the player's 3D root is a scene object and a fresh
+    // holder has NiNode's exact vtable, (b) the vtable every NiNode's embedded
+    // children array starts with - the image the reported holder had been
+    // overwritten with - is NOT a scene object, and (c) on a fresh test parent
+    // and child, with the child's header overwritten by that image: the census
+    // walk skips it, the header check catches it, and ReleaseBrokenHolder takes
+    // it out of the parent by value without a call through it. The overwritten
+    // child is never released - its references are leaked on purpose, as in
+    // the real path - so no destructor ever runs on it.
+    std::vector<std::string> HeaderGuardProbe()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        bool allOk = true;
+        const auto row = [&](bool a_ok, const std::string& a_text) {
+            allOk = allOk && a_ok;
+            out.push_back(std::format("{} {}", a_ok ? "ok  " : "FAIL", a_text));
+        };
+
+        if (auto* player = RE::PlayerCharacter::GetSingleton(); player && player->Get3D(false)) {
+            std::uintptr_t vt = 0;
+            const bool scene = IsSceneObject(player->Get3D(false), vt);
+            row(scene, std::format("the player's 3P root is a scene object ({})",
+                rtti::VtableTypeName(vt)));
+        } else {
+            out.push_back("     (no player 3D yet - load a save for the root row)");
+        }
+
+        RE::NiPointer<RE::NiNode> parent{ RE::NiNode::Create(2) };
+        RE::NiPointer<RE::NiNode> child{ RE::NiNode::Create(0) };
+        if (!parent || !child) {
+            out.push_back("Create returned null");
+            return out;
+        }
+        parent->name = "CEF_HeaderProbe";
+        child->name = "CEF_HeaderProbe_child";
+        row(HolderHeaderIntact(child.get()), "a fresh holder starts with NiNode's vtable");
+
+        parent->AttachChild(child.get(), true);
+        unsigned char image[0x18]{};
+        std::memcpy(image, &parent->GetChildren(), sizeof(image));  // vtable, data, sizes
+        std::uintptr_t arrVt = 0;
+        std::memcpy(&arrVt, image, sizeof(arrVt));
+        const std::string arrType = rtti::VtableTypeName(arrVt);
+        row(!arrType.empty(), std::format("a children array's own vtable names a class: {}",
+                                  arrType.empty() ? "(none)" : arrType));
+        {
+            alignas(16) unsigned char fake[0x128]{};
+            std::memcpy(fake, image, sizeof(image));
+            std::uintptr_t vt = 0;
+            row(!IsSceneObject(reinterpret_cast<const RE::NiAVObject*>(fake), vt),
+                "an object that starts with that image is not a scene object");
+        }
+
+        // The real arrays, end to end. The record pair is taken first, as an
+        // item holds it before anything goes wrong; then the child's header
+        // becomes the array image, exactly as reported.
+        RE::NiNode* const childRaw = child.get();
+        RE::NiPointer<RE::NiNode> recParent = parent;
+        RE::NiPointer<RE::NiNode> recHolder = child;
+        const auto sizeBefore = parent->GetChildren().size();
+        std::memcpy(child.get(), image, sizeof(image));
+        row(!HolderHeaderIntact(child.get()), "the overwritten child fails the holder header check");
+        const auto census = BuildRenamedCensus(parent.get());
+        row(census.attached.empty(),
+            "the renamed-bone census walked past it without reading it (the SCENE CORRUPTION "
+            "line in the log just above is this probe's own)");
+
+        ReleaseBrokenHolder("headertest", recParent, recHolder, nullptr);
+        const auto& kids = parent->GetChildren();
+        bool slotGone = true;
+        for (const auto& k : kids) {
+            if (k.get() == childRaw) {
+                slotGone = false;
+            }
+        }
+        row(slotGone && kids.size() + 1 == sizeBefore,
+            std::format("removed from the parent by value: {} -> {} children", sizeBefore, kids.size()));
+        row(!recHolder && !recParent, "the record pair is empty");
+
+        // The probe's own reference to the overwritten child goes the same way.
+        std::memset(static_cast<void*>(&child), 0, sizeof(child));
+        out.push_back(std::format("header guard probe: {}", allOk ? "ok" : "FAILED"));
+        return out;
+    }
+
     // `cef nodediag` - live side. Reports the child array of every CEF node on
     // the player, plus ANY node that fails the walkability guard. Run it right
     // after the operation that crashes: if a holder is already bad here, we have
@@ -4606,6 +4872,11 @@ namespace CostumeFW
                     if (auto* c = child.get(); c) {
                         if (!PlausibleObjectPtr(c)) {
                             NoteBadSlot("nodediag", node, c);
+                            ++bad;
+                            continue;
+                        }
+                        if (std::uintptr_t vt = 0; !IsSceneObject(c, vt)) {
+                            NoteBadObject("nodediag", c, vt);
                             ++bad;
                             continue;
                         }
@@ -4690,6 +4961,10 @@ namespace CostumeFW
                 if (auto* c = child.get(); c) {
                     if (!PlausibleObjectPtr(c)) {
                         NoteBadSlot("bone census", node, c);
+                        continue;
+                    }
+                    if (std::uintptr_t vt = 0; !IsSceneObject(c, vt)) {
+                        NoteBadObject("bone census", c, vt);
                         continue;
                     }
                     if (auto* cn = c->AsNode()) {
@@ -4871,6 +5146,10 @@ namespace CostumeFW
                 auto [obj, parentName] = std::move(stack.back());
                 stack.pop_back();
                 if (!obj) {
+                    continue;
+                }
+                if (std::uintptr_t vt = 0; !IsSceneObject(obj, vt)) {
+                    NoteBadObject("headdiag", obj, vt);
                     continue;
                 }
                 const std::string_view nm{ obj->name.c_str() };

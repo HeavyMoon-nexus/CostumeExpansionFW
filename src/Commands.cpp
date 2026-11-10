@@ -121,7 +121,7 @@ namespace CostumeFW
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
                   "repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av | abilities");
+                  "slottest | headertest | invisdiag | av | abilities");
             return;
         }
 
@@ -446,15 +446,17 @@ namespace CostumeFW
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
-        } else if (sub == "arraytest" || sub == "nodediag" || sub == "slottest") {
+        } else if (sub == "arraytest" || sub == "nodediag" || sub == "slottest" ||
+                   sub == "headertest") {
             // persist-CTD harness (BUGREPORT_2026-07-27 / uint16-pattern
             // 2026-07-30). All run on the task pump and print to console AND
             // log, so a tester can paste either.
             const std::string which = sub;
             SKSE::GetTaskInterface()->AddTask([which] {
-                const auto lines = which == "arraytest" ? ChildArrayProbe()
-                                 : which == "slottest"  ? SlotCorruptionProbe()
-                                                        : ChildArrayScan();
+                const auto lines = which == "arraytest"  ? ChildArrayProbe()
+                                 : which == "slottest"   ? SlotCorruptionProbe()
+                                 : which == "headertest" ? HeaderGuardProbe()
+                                                         : ChildArrayScan();
                 SKSE::log::info("--- cef {} ---", which);
                 for (const auto& l : lines) {
                     SKSE::log::info("  {}", l);
@@ -631,7 +633,7 @@ namespace CostumeFW
             Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
                   "repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av | abilities");
+                  "slottest | headertest | invisdiag | av | abilities");
         }
     }
 }

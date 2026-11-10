@@ -8,10 +8,13 @@
 // in-game checks.
 
 #include "CapturePolicy.h"
+#include "RttiProbe.h"
 #include "TokenIdentity.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <set>
 #include <string>
 
@@ -31,6 +34,66 @@ namespace
 }
 
 #define CHECK(expr) Check((expr), #expr)
+
+// RttiProbe (BUGREPORT 2026-10-18). Stand-ins named like the engine classes and
+// declared at global scope, so MSVC mangles them exactly as it does the game's
+// (".?AVNiAVObject@@"). The locator layout is the compiler's, not the game's,
+// so these take the same path the in-game walks do.
+class NiAVObject
+{
+public:
+    virtual ~NiAVObject() = default;
+    std::uint64_t pad{ 0 };
+};
+
+class NiNode : public NiAVObject
+{
+};
+
+// What the 2026-10-18 holder's first 0x18 bytes had become.
+class NiTObjectArrayLike
+{
+public:
+    virtual ~NiTObjectArrayLike() = default;
+    void* data{ nullptr };
+    std::uint16_t cap{ 6 }, freeIdx{ 6 }, size{ 6 }, growth{ 1 };
+};
+
+namespace
+{
+    void RttiChecks()
+    {
+        using namespace CostumeFW::rtti;
+        NiNode node;
+        NiAVObject base;
+        NiTObjectArrayLike arr;
+        std::uintptr_t vt = 0;
+
+        CHECK(ReadPointer(&node, vt));
+        CHECK(VtableIsA(vt, "NiAVObject"));  // a base
+        CHECK(VtableIsA(vt, "NiNode"));      // the class itself
+        CHECK(VtableTypeName(vt) == ".?AVNiNode@@");
+        CHECK(ReadPointer(&base, vt) && VtableIsA(vt, "NiAVObject") && !VtableIsA(vt, "NiNode"));
+        CHECK(ReadPointer(&arr, vt) && !VtableIsA(vt, "NiAVObject"));  // the overwritten header
+        CHECK(VtableTypeName(vt) == ".?AVNiTObjectArrayLike@@");
+        CHECK(!VtableIsA(vt, "NiTObjectArray"));  // a prefix is not the class
+
+        // Values that have been read as pointers in this hunt, and plain junk.
+        CHECK(!VtableIsA(0x0001000600060006ull, "NiAVObject"));
+        CHECK(!VtableIsA(0x1, "NiAVObject"));
+        CHECK(!VtableIsA(0, "NiAVObject"));
+        CHECK(VtableTypeName(0x0001000600060006ull).empty());
+        // Heap memory is in no image, whatever it holds.
+        const auto heap = std::make_unique<std::uint64_t[]>(8);
+        CHECK(!VtableIsA(reinterpret_cast<std::uintptr_t>(heap.get()) + 8, "NiAVObject"));
+        // An image address that is not a vtable (code): the locator self-check fails.
+        CHECK(!VtableIsA(reinterpret_cast<std::uintptr_t>(&RttiChecks) & ~std::uintptr_t{ 7 },
+            "NiAVObject"));
+        // Unreadable memory answers false and leaves the output alone.
+        std::uintptr_t out = 0x1234;
+        CHECK(!ReadPointer(reinterpret_cast<const void*>(std::uintptr_t{ 0x10 }), out) && out == 0x1234);
+    }
+}
 
 // v1.6.4 token identity (TH1-TH14). The two starred groups are the regression
 // guards: they fail if somebody narrows the BROAD predicate, or widens the
@@ -439,6 +502,7 @@ int main()
     CarrierKeyFileChecks();
     Utf8Checks();
     ReturnChecks();
+    RttiChecks();
 
     std::printf("policy_tests: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

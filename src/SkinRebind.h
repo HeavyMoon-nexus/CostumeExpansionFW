@@ -338,6 +338,13 @@ namespace CostumeFW
     // before teardown. No mods needed; safe to run any time.
     std::vector<std::string> SlotCorruptionProbe();
 
+    // `cef headertest`: synthetic probe of the holder-HEADER family
+    // (BUGREPORT 2026-10-18): checks the RTTI guard against the game's own
+    // classes, then overwrites a fresh test child's header with a children
+    // array's image and runs the census walk and the by-value release on it.
+    // Touches nothing on the player; the test child is leaked on purpose.
+    std::vector<std::string> HeaderGuardProbe();
+
     // Merge-race rescue (2026-07-31): re-arm rebind retries for shown items
     // that ended fully static - the state a lost "FSMP merge vs bind" race
     // leaves behind, which nothing else revisits (retries burned, parked,

@@ -89,6 +89,18 @@ carries abilities the file doesn't list, they're reserved, passthrough is off fo
 that session, and CEF tells you not to save. `cef abilities restore` also brings
 back the newest copy now, not the one from before the latest change.
 
+**CEF no longer crashes on a costume node that something else has overwritten.**
+A crash reported on 1.6.2 while adding persist costumes happened inside CEF's own
+scan of the skeleton. One of CEF's costume nodes had had its first bytes
+replaced by a different engine object, and CEF read it as if it were still a
+node. Every node CEF makes is now checked to still be one before CEF reads it,
+releases it or walks into it, and the scans check each object they meet before
+reading its name. A damaged node is cut out of the scene without anything being
+called through it, the costume on it is parked until you load a save, and the
+log records what the node had been overwritten with. What does the overwriting
+is still unknown. If `SCENE CORRUPTION` shows up in CostumeExpansionFW.log, that
+line and the dump under it are what I need to track it down.
+
 ### Added
 
 - **`CEF_NOINJECT.txt`.** Put an empty file of that name in `SKSE\Plugins` and
@@ -114,6 +126,9 @@ back the newest copy now, not the one from before the latest change.
 - Diagnostics lists costumes whose mesh path is not UTF-8, which are shown
   without physics.
 - The MCM's Main page shows whether CostumeExpansionFW.dll is running.
+- `cef headertest` checks the node-damage guard above in your own game. It
+  builds its own test nodes, damages one of them the way the reported crash
+  did, and leaves everything you are wearing alone.
 
 ### Fixed
 
