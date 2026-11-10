@@ -1,7 +1,15 @@
-// CostumeExpansionFW - skin-rebind injection PoC.
-// Console commands (open ~ console, type):
-//   cef seed | cef inject <FormID:Plugin.esp> | cef detach <id> | cef clear | cef list
-// Real seed/config/co-save driven flow continues to replace this test driver.
+// CostumeExpansionFW - skin-rebind injection.
+//
+// Console commands: open ~ and type "cef" on its own for the current list.
+// Commands.cpp::HandleConsoleCommand is the only place that list exists; this
+// header used to carry a copy of it and drifted (it still advertised "cef seed",
+// which has not existed for several releases).
+//
+// The user-facing ones are tokens / abilities / av / store / list / recover /
+// shapes / hideshape / morph / persist / pub / npcpersist / repair / carriers.
+// There is deliberately no "cef enabled": the master switch lives on the SMF
+// Main page, in the MCM, and in CEF_settings.json's "enabled" - see Config.h for
+// why the settings-file switch and the INI's bEnabled are not the same thing.
 
 #include "logger.h"
 #include "AbilityPool.h"
@@ -38,14 +46,18 @@ namespace
         static RE::NiAVObject* thunk(RE::PlayerCharacter* a_this, bool a_backgroundLoading)
         {
             auto* result = func(a_this, a_backgroundLoading);
-            SKSE::GetTaskInterface()->AddTask([] { CostumeFW::Reconcile(); });
-            // The engine builds the facegen head AGAIN a few seconds into the
-            // load sequence; FSMP then retires the old Head merge generation and
-            // an injected mesh bound to it keeps dead, world-frozen bones
-            // (in-game 2026-07-04: bound at Head_00000001, headdiag showed
-            // Head_00000002). Reconcile's dead-bind sweep repairs that - but
-            // only when it runs, so run one more pass after the rebuild window.
-            CostumeFW::RunAfterDelayMs(4000, [] { CostumeFW::Reconcile(); });
+            // The hook's thread only queues (W8); the delayed pass is scheduled
+            // from the main thread.
+            SKSE::GetTaskInterface()->AddTask([] {
+                CostumeFW::Reconcile();
+                // The engine builds the facegen head AGAIN a few seconds into the
+                // load sequence; FSMP then retires the old Head merge generation
+                // and an injected mesh bound to it keeps dead, world-frozen bones
+                // (in-game 2026-07-04: bound at Head_00000001, headdiag showed
+                // Head_00000002). Reconcile's dead-bind sweep repairs that - but
+                // only when it runs, so run one more pass after the rebuild window.
+                CostumeFW::RunAfterDelayMs(4000, [] { CostumeFW::Reconcile(); });
+            });
             return result;
         }
         static inline REL::Relocation<decltype(thunk)> func;
@@ -109,10 +121,13 @@ namespace
             // actor on the main thread and no-ops for unknown handles.
             if (CostumeFW::AnyActorBindings()) {
                 const auto handle = a_this->GetHandle();
-                SKSE::GetTaskInterface()->AddTask(
-                    [handle] { CostumeFW::ReconcileActorByHandle(handle); });
-                CostumeFW::RunAfterDelayMs(4000,
-                    [handle] { CostumeFW::ReconcileActorByHandle(handle); });
+                // Only AddTask on this thread (W8): the delayed second pass is
+                // scheduled from the main thread, inside the task.
+                SKSE::GetTaskInterface()->AddTask([handle] {
+                    CostumeFW::ReconcileActorByHandle(handle);
+                    CostumeFW::RunAfterDelayMs(4000,
+                        [handle] { CostumeFW::ReconcileActorByHandle(handle); });
+                });
             }
             return result;
         }
@@ -153,8 +168,13 @@ namespace
                 const auto handle = actor->GetHandle();
                 const auto base = a_event->baseObject;
                 const bool equipped = a_event->equipped;
+                // Needs the event itself, so it is not coalesced - and it
+                // carries its own convergence, because the coalesced pass below
+                // may already be queued AHEAD of it and would not see the
+                // binding this makes.
                 SKSE::GetTaskInterface()->AddTask([handle, base, equipped] {
                     CostumeFW::OnNpcTokenEquip(handle, base, equipped);
+                    CostumeFW::ApplyBoxAbilities();
                 });
             }
             if (actor == RE::PlayerCharacter::GetSingleton()) {
@@ -162,10 +182,19 @@ namespace
                     SKSE::log::debug("equip: {:08X} {}", a_event->baseObject,
                         a_event->equipped ? "on" : "off");
                 }
-                SKSE::GetTaskInterface()->AddTask([] {
-                    CostumeFW::Reconcile();
-                    CostumeFW::ApplyBoxAbilities();
-                });
+                // ONE pass for a burst. An outfit swap or an equip-set mod fires
+                // an event per piece in the same frame, and each used to queue
+                // its own Reconcile + convergence (review 2026-09-23 W13). The
+                // flag is cleared as the pass STARTS, so an event arriving while
+                // it runs queues the next one - nothing is missed.
+                static std::atomic_bool s_queued{ false };
+                if (!s_queued.exchange(true)) {
+                    SKSE::GetTaskInterface()->AddTask([] {
+                        s_queued = false;
+                        CostumeFW::Reconcile();
+                        CostumeFW::ApplyBoxAbilities();
+                    });
+                }
             } else if (CostumeFW::IsPublishToken(a_event->baseObject) ||
                        CostumeFW::IsNpcPersistCarrier(a_event->baseObject)) {
                 const auto handle = actor->GetHandle();
@@ -204,7 +233,11 @@ namespace
                 if (a_event->oldContainer == playerID && a_event->newContainer != playerID &&
                     CostumeFW::IsBoxToken(a_event->baseObj)) {
                     const RE::FormID token = a_event->baseObj;
-                    SKSE::GetTaskInterface()->AddTask([token] { CostumeFW::ReplenishToken(token); });
+                    // Where it went, so a token handed to someone comes back from
+                    // them instead of being minted anew (review 2026-09-23 M7).
+                    const RE::FormID to = a_event->newContainer;
+                    SKSE::GetTaskInterface()->AddTask(
+                        [token, to] { CostumeFW::ReplenishToken(token, to); });
                 }
                 if (CostumeFW::IsPublishToken(a_event->baseObj)) {
                     const auto base = a_event->baseObj;
@@ -390,12 +423,26 @@ namespace
                 // Settings older than v1.6.2.1 name their preset assignments by
                 // display name; resolve those to the file that now identifies a
                 // preset. Needs the loaded boxes, so it runs right after.
-                CostumeFW::Preset::MigrateAssignments();
+                // Behind its own net as well as its internal one: it walks the
+                // presets folder, and a throw from this task was a crash at
+                // every launch for as long as one odd file sat there (C6).
+                try {
+                    CostumeFW::Preset::MigrateAssignments();
+                } catch (const std::exception& e) {
+                    SKSE::log::error("preset: assignment migration failed ({})", e.what());
+                }
                 CostumeFW::Reconcile();
                 CostumeFW::ApplyBoxAbilities();
                 LogRegistryRollCall("data-loaded");
                 MirrorSettingsForSupport();
                 CostumeFW::ReapplyNpcBindings();
+                // Last, and after the boxes are in: it reads the pools AND the
+                // definitions, and it only observes (PLAN §9.3). Nothing
+                // branches on the result - a support log that says which
+                // generations are installed and whether they hold together is
+                // the whole point, and an audit that also acted would be a
+                // second thing to be wrong.
+                CostumeFW::AuditTokenPools();
             });
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
@@ -409,6 +456,7 @@ namespace
             // save (a CTD rollback can predate the registration - C §9-18); it
             // rebuilds the head only when something actually changed.
             SKSE::GetTaskInterface()->AddTask([] {
+                CostumeFW::Diag::NoteThreadOf("post-load task");  // M1: a task's thread
                 // Hidden-store handling moved to the co-save (P2): RevertCallback
                 // clears the per-save store id at load START, LoadCallback restores
                 // THIS save's (ROOT A protection preserved). Clearing it here ran
@@ -422,6 +470,12 @@ namespace
                 // destroys the captured original while the box definition survives
                 // in the global json; nothing pointed at that before.
                 CostumeFW::ReportLostStoreItems();
+                // An MCM-made store survives only while the MCM script points at
+                // it; move its contents into a store the engine keeps (review
+                // 2026-09-23 C12). After the loss report, which should read the
+                // store as the save left it; before every pass that takes items
+                // out of it.
+                CostumeFW::MakeStorePersistent();
                 // v1.6.1: recover temper/enchant snapshots missing on older
                 // captures from the stored originals BEFORE stats reapply; a
                 // heal also restamps publish tokens (their armor sums live).
@@ -434,6 +488,15 @@ namespace
                 // both need this save's restored store id, and the sweep's held
                 // set needs the publish / NPC-persist state the co-save restored.
                 CostumeFW::SweepOrphanedStoredItems();
+                // Which listed ids have no item behind them (review 2026-09-23
+                // C2). Before the backfill below: it reads which ids have no
+                // custody row yet, and the backfill gives every one of them a
+                // row. Before ReapplyBoxes / ApplyBoxAbilities, which leave the
+                // listed-only ids out of the stats; a published costume's token
+                // is stamped elsewhere, so it gets restamped here.
+                if (CostumeFW::ReconcileRefOnly() > 0) {
+                    CostumeFW::StampAllPublishTokens();
+                }
                 // Then give anything still held a custody row if it has none, so
                 // the Recovery list covers items captured before the history
                 // existed. After the sweep: what it just returned is no longer

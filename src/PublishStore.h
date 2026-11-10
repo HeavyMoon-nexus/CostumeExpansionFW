@@ -28,6 +28,17 @@ namespace CostumeFW
     {
         int pubSlot{ -1 };
         std::string label;
+        // The logical box this costume IS. Publishing does not destroy the box,
+        // it moves it into a frozen state, so the id survives the round trip and
+        // the box that comes back out of unpublish is the same box (PLAN §2.4).
+        std::string boxId;
+        // The box token held in reserve for it, canonical colon-id. Unpublish
+        // returns to THIS token or to none; FreeTokens will not hand it out while
+        // the costume is published (PLAN §5.3/§5.4).
+        std::string sourceToken;
+        // The biped slot the costume was published from. Display, the published
+        // token's biped mask, and the one-time migration that fills sourceToken
+        // for a snapshot written before 1.6.4 - never identity.
         int sourceSlot{ 0 };
         int armorType{ 0 };
         std::string manualAbility;
@@ -87,6 +98,26 @@ namespace CostumeFW
     bool IsCefToken(RE::FormID a_form);
     RE::TESObjectARMO* PubTokenArmo(int a_slot);
     RE::TESObjectARMO* NprTokenArmo(int a_slot);
+    // Whether a published costume can become a box again right now, and why
+    // not when it cannot. Unpublish refuses on anything but Ready rather than
+    // looking for a substitute token: the substitute is a different biped slot,
+    // and a costume's slot decides what it hides.
+    enum class PubRestore
+    {
+        Ready,          // the reserved token is loaded and unclaimed
+        NoSnapshot,     // nothing is published in that pool slot
+        SourceUnknown,  // a pre-1.6.4 snapshot whose slot named no generation-0 token
+        SourceMissing,  // the token's pool generation is not loaded (put it back)
+        SourceTaken     // a box holds it - the reservation was lost (PLAN §5.1 rule 3)
+    };
+    [[nodiscard]] PubRestore PublishRestoreState(int a_pubSlot);
+    [[nodiscard]] const char* PubRestoreReason(PubRestore a_state);
+
+    // True while a published costume is holding this box token in reserve.
+    // FreeTokens() asks on every candidate, so it stays a scan of at most eight
+    // string compares and takes no lock of its own.
+    [[nodiscard]] bool TokenReservedByPublish(const std::string& a_token);
+
     const PubSnapshot* PubBySlot(int a_slot);
     const PubSnapshot* PubByTokenForm(RE::FormID a_form);
     std::vector<PubSnapshot> PublishedSnapshot();
@@ -123,10 +154,22 @@ namespace CostumeFW
     void InvalidatePublishAbilities();
 
     void EmitPublishJson(nlohmann::json& a_doc);
+    // All or nothing: the published list is replaced only once the whole of it
+    // has parsed. A throw leaves the previous list in place for the caller's
+    // failure path to drop.
     void ParsePublishJson(const nlohmann::json& a_doc);
+    // The settings file did not load: forget every published snapshot, as the
+    // box store forgets its boxes, and put the pool tokens back to their
+    // unpublished state. Keeps the co-save's per-save hidden flags.
+    void DropPublishedSnapshots();
     void SaveGlobalSettings();
 
-    bool PublishBox(int a_boxIndex);
+    // By boxId, not by list position. The caller is a UI row whose click and
+    // whose confirmation are separated by a modal and a task hop, and a box
+    // list that shifts in between would publish - freeze and remove - a
+    // DIFFERENT box. boxId is what v1.6.4 introduced so nothing has to be
+    // addressed by where it currently sits.
+    bool PublishBox(const std::string& a_boxId);
     bool SetPubHidden(int a_slot, bool a_hidden);
     // Take a published costume's token and ability back off everyone wearing it.
     //
@@ -136,9 +179,20 @@ namespace CostumeFW
     // also what stops UnpublishToBox dissolving a costume somebody still has
     // (review 2026-09-11 F07).
     //
-    // a_forgetUnreachable is for the uninstall flow only, where a record that
-    // would ride the next co-save is worse than a forgotten one.
+    // a_forgetUnreachable is for the uninstall flow only, where a live binding
+    // that would ride the next co-save is worse than a forgotten one.
+    // (Unresolved bindings never ride it since review 2026-09-23 C5 - they live
+    // for the session, as the Unpublish guard.)
     bool RecallPublished(int a_slot, bool a_forgetUnreachable = false);
+    // Let go of the bindings on a_slot that cannot be reached: unresolved ones,
+    // ones whose actor is not in the game, and ones carried without a costume.
+    // An actor that never loads again otherwise blocks Unpublish for good
+    // (review 2026-09-23 W19). Returns how many went. Main thread.
+    int ForgetUnreachablePub(int a_slot);
+    // Remove the NPC-persist assignment on a pool slot, resolved or not - the
+    // way to free a slot whose NPC's plugin is gone (W19). A reachable actor
+    // goes through RemoveNpcPersist. Main thread.
+    bool ForgetNprAssignment(int a_poolSlot);
     bool PubHidden(int a_slot);
     bool UnpublishToBox(int a_slot);
     void RefreshPubWearers(int a_slot);
@@ -179,22 +233,54 @@ namespace CostumeFW
     void OnNpcActorLoaded(RE::ActorHandle a_handle);
     std::vector<NprAssignmentInfo> NprAssignmentsSnapshot();
 
+    // What the co-save writes: the assignments whose actor resolved on THIS
+    // load. The unresolved ones are NOT written (review 2026-09-23 C5): SKSE
+    // re-reads a raw FormID through the plugin list of the save that wrote it,
+    // and that list no longer has the missing plugin - so a value carried
+    // across a save lands, on the next load, in whatever plugin moved into its
+    // index: an unrelated NPC gets a carrier equipped and kept in its inventory.
+    // There is no way to recover the plugin name from the raw value, and the
+    // engine drops that NPC's inventory changes on such a save anyway.
     std::vector<NprSaveAssignment> NprAssignmentsForSave();
+    // Everything that holds NPC-persist contents this session - resolved AND
+    // unresolved - for the orphan sweep's held set and the holder labels. The
+    // unresolved ones still hold their items until the save that drops them.
+    std::vector<NprSaveAssignment> NprAssignmentsHeld();
     void RestoreNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
         std::vector<std::string> a_contents, bool a_female);
+    // Kept in memory for this session only (slot reservation, held set) - see
+    // NprAssignmentsForSave.
     void CarryUnresolvedNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
         std::vector<std::string> a_contents, bool a_female);
     std::size_t UnresolvedNprAssignmentCount();
+    // Once per load, after the co-save restore: tell the player how many NPC
+    // persist assignments belong to a plugin that is not loaded, because the
+    // next save releases them (N3). Main thread.
+    void ReportUnresolvedNpcRecords();
     void ClearNpcBindings();
     // "Prepare for uninstall" NPC arm: recall every published slot + remove
     // every npc-persist assignment (unresolvable ones dropped, loudly). No-op
     // without the addon esp. Main thread only.
     void UninstallNpcCleanup();
 
+    // Every hidden flag the co-save restored, not only those of slots with a
+    // costume this session: with the settings unreadable there are no
+    // costumes, and writing only theirs erased every flag from the save
+    // (review 2026-09-23 C8).
     std::vector<PubSaveState> PubStatesForSave();
+    // The bindings to write: the live ones, plus the ones that resolved on this
+    // load but whose costume is not loaded this session (C8 - values of THIS
+    // load order, so safe to carry). Never the unresolved raw values (C5, see
+    // NprAssignmentsForSave).
     std::vector<PubBindSave> PubBindingsForSave();
     void RestorePubState(std::uint8_t a_slot, bool a_hidden);
+    // a_actor has been resolved through this save's plugin list. A value that
+    // lands on something other than an actor was written by a save whose list
+    // differs - the C5 corruption - and is dropped; the holder / wearer bits are
+    // kept only where the actor really has / wears the token (R4b).
     void RestorePubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags);
+    // Session-only, like CarryUnresolvedNprAssignment: still blocks
+    // UnpublishToBox for that slot, never written.
     void CarryUnresolvedPubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags);
     std::size_t UnresolvedPubBindingCount();
     int MaxNpcInjected();

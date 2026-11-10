@@ -4,8 +4,10 @@
 #include "PublishStore.h"
 #include "AbilityPool.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace CostumeFW
@@ -36,6 +38,11 @@ namespace CostumeFW
         constexpr std::uint32_t kStoreManifestVersion = 1;
         constexpr std::uint32_t kRecordNprState = 'NPRS';
         constexpr std::uint32_t kNprVersion = 1;
+        // "Prepare for uninstall" ran on this save (1 byte). A second run is
+        // store-only (review 2026-09-23 C3). An older DLL skips the record, so
+        // going back a version is safe; it just loses the guard.
+        constexpr std::uint32_t kRecordUninstall = 'UNIN';
+        constexpr std::uint32_t kUninstallVersion = 1;
         constexpr std::uint32_t kMaxBindCount = 1024;
 
         void WriteString(SKSE::SerializationInterface* a_intfc, const std::string& a_s)
@@ -152,6 +159,13 @@ namespace CostumeFW
             } else {
                 SKSE::log::error("cosave: OpenRecord(NPRS) failed");
             }
+
+            if (a_intfc->OpenRecord(kRecordUninstall, kUninstallVersion)) {
+                a_intfc->WriteRecordData(
+                    static_cast<std::uint8_t>(UninstallRanOnThisSave() ? 1 : 0));
+            } else {
+                SKSE::log::error("cosave: OpenRecord(UNIN) failed");
+            }
         }
 
         void LoadCallback(SKSE::SerializationInterface* a_intfc)
@@ -196,6 +210,17 @@ namespace CostumeFW
                     RestoreStoreManifest(std::move(ids));
                     continue;
                 }
+                if (type == kRecordUninstall) {
+                    std::uint8_t ran = 0;
+                    if (a_intfc->ReadRecordData(ran) == sizeof(ran)) {
+                        RestoreUninstallRan(ran != 0);
+                        if (ran) {
+                            SKSE::log::info("cosave: this save was prepared for uninstall - a "
+                                            "second run returns stored items only");
+                        }
+                    }
+                    continue;
+                }
                 if (type == kRecordPubState) {
                     std::uint32_t count = 0;
                     if (a_intfc->ReadRecordData(count) != sizeof(count) || count > kMaxBindCount)
@@ -218,6 +243,12 @@ namespace CostumeFW
                         if (a_intfc->ReadRecordData(slot) != sizeof(slot) ||
                             a_intfc->ReadRecordData(saved) != sizeof(saved) ||
                             a_intfc->ReadRecordData(flags) != sizeof(flags)) break;
+                        // Unresolved: kept for this session only - it blocks
+                        // Unpublish for the slot - and not written back. SKSE
+                        // reads a raw FormID through the plugin list of the
+                        // save that wrote it, and a save made without the
+                        // plugin has a different list: the value would land on
+                        // an unrelated NPC next time (review 2026-09-23 C5).
                         if (a_intfc->ResolveFormID(saved, resolved) && resolved)
                             RestorePubBinding(slot, resolved, flags);
                         else
@@ -254,6 +285,10 @@ namespace CostumeFW
                             contents.push_back(std::move(id));
                         }
                         if (!valid) break;
+                        // Unresolved: session-only, like PUBB above (C5). It
+                        // keeps its pool slot and its items held until the
+                        // next save drops it; the load after that returns the
+                        // items through the orphan sweep.
                         if (a_intfc->ResolveFormID(saved, resolved) && resolved) {
                             auto* form = RE::TESForm::LookupByID(resolved);
                             auto* actor = form ? form->As<RE::Actor>() : nullptr;
@@ -302,9 +337,32 @@ namespace CostumeFW
             // set (M2, CEF_STATE_SCOPE.md §3/§5 - a character switch changes the
             // set; the compare-skip keeps same-character reloads free).
             SKSE::GetTaskInterface()->AddTask([prePoolSave] {
+                // FIRST, before anything can allocate a pool ability: the save is
+                // the only witness of which abilities it holds when the registry
+                // was lost with its backups (review 2026-09-23 C7). The player,
+                // and every NPC a published costume pays stats to.
+                {
+                    std::vector<RE::Actor*> actors;
+                    if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
+                        actors.push_back(pc);
+                    }
+                    for (const auto& b : PubBindingsSnapshot()) {
+                        if (b.unresolved) {
+                            continue;  // a raw value from another plugin list (C5)
+                        }
+                        auto* form = RE::TESForm::LookupByID(b.actorFormID);
+                        if (auto* actor = form ? form->As<RE::Actor>() : nullptr) {
+                            actors.push_back(actor);
+                        }
+                    }
+                    abilities::AuditSaveAbilities(actors);
+                }
                 Reconcile();
                 SyncPersistManifest();
                 ReapplyNpcBindings();
+                // The next save releases NPC records whose plugin is missing
+                // (C5) - said once, now, while not saving is still an option.
+                ReportUnresolvedNpcRecords();
                 // After the reconcile, so the report is not competing with the
                 // load for the notification area.
                 abilities::ReportLegacySave(prePoolSave);
@@ -324,10 +382,37 @@ namespace CostumeFW
             // task - which ran AFTER LoadCallback and wiped the restored id).
             RestoreStoreFormId(0);
             RestoreStoreManifest({});  // same per-save rule as the store id above
+            RestoreUninstallRan(false);  // and again: a save without 'UNIN' was never prepared
             SKSE::log::info("cosave: reverted (registry cleared)");
         }
     }
 
+    std::vector<std::string> UnresolvedActiveIds()
+    {
+        return g_unresolvedActives;
+    }
+
+    void CarryPersistActive(const std::string& a_id)
+    {
+        if (a_id.empty() ||
+            std::find(g_unresolvedActives.begin(), g_unresolvedActives.end(), a_id) !=
+                g_unresolvedActives.end()) {
+            return;
+        }
+        g_unresolvedActives.push_back(a_id);
+        SKSE::log::warn("cosave: '{}' could not be registered - carried for next save", a_id);
+    }
+
+    std::vector<std::string> TakeUnresolvedActives()
+    {
+        return std::exchange(g_unresolvedActives, {});
+    }
+
+    // NOT called when Config.h's HardDisabled() trips - SKSEPluginLoad returns
+    // before it. That is deliberate (an inert plugin cannot be the thing that
+    // crashes a save open), and it is also why saving while hard-disabled writes
+    // no CEF chunk at all and drops everything below. See the note on
+    // HardDisabled().
     void InstallSerialization()
     {
         auto* ser = SKSE::GetSerializationInterface();

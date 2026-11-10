@@ -1,0 +1,86 @@
+{
+  "schema": 2,
+  "checksum": "0000000000000000",
+  "abilities": [
+    {
+      "ability": "000800:CostumeFW_Abilities.esp",
+      "content": "012345:MyCostume.esp",
+      "recipeGeneration": 1,
+      "tombstone": false,
+      "effects": [
+        {
+          "mgef": "0ADA64:Skyrim.esm",
+          "magnitude": 3256.831787109375,
+          "area": 0,
+          "duration": 0,
+          "cost": 0.10000000149011612,
+          "conditions": [
+            {
+              "fn": 448,
+              "flags": 0,
+              "object": 0,
+              "dataID": 0,
+              "value": 1.0,
+              "params": [ { "form": "000D62:Skyrim.esm" }, { "raw": 18446744073709551615 } ]
+            },
+            {
+              "fn": 72,
+              "flags": 1,
+              "object": 0,
+              "dataID": 0,
+              "global": "000039:Skyrim.esm",
+              "params": [ { "raw": 0 }, { "raw": 0 } ]
+            }
+          ]
+        },
+        {
+          "mgef": "03EB15:Skyrim.esm",
+          "magnitude": 250.0,
+          "area": 5,
+          "duration": 4294967295,
+          "cost": -1.5,
+          "conditions": []
+        }
+      ]
+    },
+    {
+      "ability": "000801:CostumeFW_Abilities.esp",
+      "content": "000D64:\u8863\u88c5\ud83d\ude00.esp",
+      "recipeGeneration": 12,
+      "tombstone": false,
+      "effects": [
+        {
+          "mgef": "000F2D:\u885b\u5175.esm",
+          "magnitude": 1e-05,
+          "area": 0,
+          "duration": 60,
+          "cost": 0.0,
+          "conditions": []
+        }
+      ]
+    },
+    {
+      "ability": "000802:CostumeFW_Abilities.esp",
+      "content": "000ABC:Quote\"Back\\slash/Tab\tCtl\u0001Del\u007f.esp",
+      "recipeGeneration": 0,
+      "tombstone": true,
+      "effects": []
+    },
+    {
+      "ability": "000800:CostumeFW_Abilities2.esp",
+      "content": "FE000800:Light.esl",
+      "recipeGeneration": 2,
+      "tombstone": false,
+      "effects": [
+        {
+          "mgef": "000800:Light.esl",
+          "magnitude": 123456.7890625,
+          "area": 0,
+          "duration": 0,
+          "cost": 12.5,
+          "conditions": []
+        }
+      ]
+    }
+  ]
+}

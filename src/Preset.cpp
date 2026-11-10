@@ -1,6 +1,7 @@
 #include "Preset.h"
 #include "BoxStore.h"    // IsTokenColonId (border quarantine)
 #include "SkinRebind.h"  // CanResolveContent, CanonicalizeColonId (validation)
+#include "U8Path.h"      // file names are UTF-8, never the ANSI codepage (C6)
 
 #include <nlohmann/json.hpp>
 
@@ -66,7 +67,10 @@ namespace CostumeFW::Preset
                 p.name = it->get<std::string>();
             }
             if (p.name.empty()) {
-                p.name = a_file;
+                // The file name, which is not necessarily UTF-8 text the way the
+                // json's own "name" is - and the display name is what an
+                // assignment writes into the settings (review 2026-09-23 C1).
+                p.name = EnsureUtf8(a_file);
                 if (auto dot = p.name.rfind(".json"); dot != std::string::npos) {
                     p.name.erase(dot);
                 }
@@ -87,6 +91,13 @@ namespace CostumeFW::Preset
                     p.contents.push_back(c.get<std::string>());
                 }
             }
+            // --- per-content prefs -------------------------------------------
+            // Two shapes are read, oldest first. "hideRules"/"genderModes" are the
+            // pre-1.6.4 top-level maps and every preset in circulation has them;
+            // "contentSettings" is the 1.6.4 form that also carries the three
+            // settings the old shape silently dropped (F15). Reading the legacy
+            // pair first means a preset written by any version applies the same
+            // way here, and a 1.6.4 file overlays the rest on top.
             const auto& rules = Object(a_doc, "hideRules");
             for (auto it = rules.begin(); it != rules.end(); ++it) {
                 std::vector<int> slots;
@@ -99,7 +110,7 @@ namespace CostumeFW::Preset
                     }
                 }
                 if (!slots.empty()) {
-                    p.hideRules[it.key()] = std::move(slots);
+                    p.contentPrefs[it.key()].hideSlots = std::move(slots);
                 }
             }
             const auto& genders = Object(a_doc, "genderModes");
@@ -107,8 +118,47 @@ namespace CostumeFW::Preset
                 if (it.value().is_number_integer()) {
                     const int m = it.value().get<int>();
                     if (m >= 1 && m <= 2) {
-                        p.genderModes[it.key()] = m;
+                        p.contentPrefs[it.key()].genderMode = m;
                     }
+                }
+            }
+            const auto& settings = Object(a_doc, "contentSettings");
+            for (auto it = settings.begin(); it != settings.end(); ++it) {
+                if (!it.value().is_object()) {
+                    continue;
+                }
+                const auto& node = it.value();
+                auto& prefs = p.contentPrefs[it.key()];
+                // Each field is optional and only overwrites when present, so a
+                // hand-edited file that carries one key keeps the legacy values
+                // for the rest.
+                if (const auto f = node.find("hideSlots"); f != node.end() && f->is_array()) {
+                    std::vector<int> slots;
+                    for (const auto& s : *f) {
+                        if (s.is_number_integer()) {
+                            slots.push_back(s.get<int>());
+                        }
+                    }
+                    prefs.hideSlots = std::move(slots);
+                }
+                if (const auto f = node.find("genderMode");
+                    f != node.end() && f->is_number_integer()) {
+                    if (const int m = f->get<int>(); m >= 0 && m <= 2) {
+                        prefs.genderMode = m;
+                    }
+                }
+                if (const auto f = node.find("bodyMorph"); f != node.end() && f->is_boolean()) {
+                    prefs.bodyMorph = f->get<bool>();
+                }
+                if (const auto f = node.find("hideShapes"); f != node.end() && f->is_array()) {
+                    for (const auto& s : *f) {
+                        if (s.is_string()) {
+                            prefs.hideShapes.push_back(s.get<std::string>());
+                        }
+                    }
+                }
+                if (const auto f = node.find("showRealBody"); f != node.end() && f->is_boolean()) {
+                    prefs.showRealBody = f->get<bool>();
                 }
             }
             p.valid = true;
@@ -124,27 +174,45 @@ namespace CostumeFW::Preset
         if (!std::filesystem::exists(dir, ec)) {
             return out;
         }
-        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-            if (ec) {
-                break;
+        // File names come back as UTF-8 (U8Str), not through path::string():
+        // that converts to the ANSI codepage and THROWS for a character the
+        // codepage cannot spell, and it ran for every file in the folder before
+        // the CEFP_ test. One 'CEFP_Café.json' on a Japanese-locale PC crashed
+        // the Presets page, both preset combos, the MCM preset page and - via
+        // the assignment migration - every launch (review 2026-09-23 C6).
+        //
+        // And one file is one file: a problem with any entry drops that entry,
+        // not the list. The directory walk itself can throw on increment, so it
+        // is inside the net too.
+        try {
+            for (auto it = std::filesystem::directory_iterator(dir, ec);
+                 !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+                try {
+                    std::error_code fec;
+                    if (!it->is_regular_file(fec)) {
+                        continue;
+                    }
+                    const std::string name = U8Str(it->path().filename());
+                    const auto low = [](std::string s) {
+                        std::transform(s.begin(), s.end(), s.begin(),
+                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        return s;
+                    };
+                    const std::string ln = low(name);
+                    if (!ln.starts_with("cefp_") || !ln.ends_with(".json")) {
+                        continue;
+                    }
+                    auto p = Read(name);
+                    if (p.valid) {
+                        out.push_back(std::move(p));
+                    }
+                } catch (const std::exception& e) {
+                    SKSE::log::warn("preset: skipped one file in the presets folder ({})",
+                        e.what());
+                }
             }
-            if (!e.is_regular_file()) {
-                continue;
-            }
-            const auto name = e.path().filename().string();
-            const auto low = [](std::string s) {
-                std::transform(s.begin(), s.end(), s.begin(),
-                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return s;
-            };
-            const std::string ln = low(name);
-            if (!ln.starts_with("cefp_") || !ln.ends_with(".json")) {
-                continue;
-            }
-            auto p = Read(name);
-            if (p.valid) {
-                out.push_back(std::move(p));
-            }
+        } catch (const std::exception& e) {
+            SKSE::log::error("preset: listing the presets folder stopped early ({})", e.what());
         }
         std::sort(out.begin(), out.end(),
             [](const PresetInfo& a, const PresetInfo& b) { return a.name < b.name; });
@@ -153,38 +221,55 @@ namespace CostumeFW::Preset
 
     void MigrateAssignments()
     {
-        const auto pending = UnresolvedPresetNames();
-        if (pending.empty()) {
-            return;
-        }
-        // One folder scan covers every pending name. A name shared by two files is
-        // ambiguous: keep its current contents/name and leave the file unresolved
-        // until the user selects it. Guessing would mark a different revision as
-        // selected without applying its contents, blocking that revision's picker.
-        std::unordered_map<std::string, std::string> nameToFile;
-        std::unordered_set<std::string> ambiguous;
-        for (const auto& p : List()) {
-            if (ambiguous.contains(p.name)) {
-                continue;
+        // Runs from the kDataLoaded task and the settings reload, where a throw
+        // is a crash at every launch (C6). List() no longer throws; this is the
+        // second net the review asked for, around the whole pass.
+        try {
+            const auto pending = UnresolvedPresetNames();
+            if (pending.empty()) {
+                return;
             }
-            const auto [it, inserted] = nameToFile.emplace(p.name, p.file);
-            if (!inserted) {
-                SKSE::log::warn(
-                    "preset: '{}' is the display name of both {} and {} - legacy "
-                    "assignment left unresolved; select the intended preset",
-                    p.name, it->second, p.file);
-                ambiguous.insert(p.name);
-                nameToFile.erase(it);
+            // One folder scan covers every pending name. A name shared by two
+            // files is ambiguous: keep its current contents/name and leave the
+            // file unresolved until the user selects it. Guessing would mark a
+            // different revision as selected without applying its contents,
+            // blocking that revision's picker.
+            std::unordered_map<std::string, std::string> nameToFile;
+            std::unordered_set<std::string> ambiguous;
+            for (const auto& p : List()) {
+                if (ambiguous.contains(p.name)) {
+                    continue;
+                }
+                const auto [it, inserted] = nameToFile.emplace(p.name, p.file);
+                if (!inserted) {
+                    SKSE::log::warn(
+                        "preset: '{}' is the display name of both {} and {} - legacy "
+                        "assignment left unresolved; select the intended preset",
+                        p.name, it->second, p.file);
+                    ambiguous.insert(p.name);
+                    nameToFile.erase(it);
+                }
             }
+            ResolvePresetFiles(nameToFile);
+        } catch (const std::exception& e) {
+            SKSE::log::error("preset: assignment migration skipped ({})", e.what());
         }
-        ResolvePresetFiles(nameToFile);
     }
 
     PresetInfo Read(const std::string& a_file)
     {
         PresetInfo p;
         p.file = a_file;
-        std::ifstream f(std::filesystem::path(kPresetDir) / a_file);
+        // a_file is UTF-8 (List hands it out that way, and the settings store
+        // it that way), so it is joined as UTF-8 - never through the ANSI
+        // codepage, which cannot spell every name (C6).
+        std::ifstream f;
+        try {
+            f.open(std::filesystem::path(kPresetDir) / U8Path(a_file));
+        } catch (const std::exception& e) {
+            SKSE::log::warn("preset: cannot open {} ({})", a_file, e.what());
+            return p;
+        }
         if (!f) {
             SKSE::log::warn("preset: cannot open {}", a_file);
             return p;
@@ -208,12 +293,17 @@ namespace CostumeFW::Preset
         }
     }
 
+    // A function-try-block: every path below is file work, and this runs from
+    // the SMF render callback and from a Papyrus native, where a throw is a
+    // crash (review 2026-09-23 C6). A failed export reports "" like any other.
     std::string Export(const std::string& a_name, const std::vector<std::string>& a_contents,
-        const std::unordered_map<std::string, std::vector<int>>& a_hideRules,
-        const std::unordered_map<std::string, int>& a_genderModes,
+        const std::unordered_map<std::string, ContentPrefs>& a_prefs,
         const std::string& a_author, const std::string& a_description)
-    {
-        std::string base = Sanitize(a_name);
+    try {
+        // UTF-8 first (C1): the name goes into the json and into the file name,
+        // and the MCM can hand it over in the game's codepage. SMF's text is
+        // UTF-8 already and passes through unchanged.
+        std::string base = Sanitize(EnsureUtf8(a_name));
         if (base.empty()) {
             base = "preset";
         }
@@ -229,17 +319,19 @@ namespace CostumeFW::Preset
         const std::filesystem::path dir(kPresetDir);
         std::filesystem::create_directories(dir, ec);
 
-        // Suffix _1/_2/... on collision (higher number = saved later).
+        // Suffix _1/_2/... on collision (higher number = saved later). The name is
+        // UTF-8 and joined as UTF-8 (C6): a pasted Japanese name used to be read
+        // as ANSI-codepage bytes here and the conversion threw.
         std::string file = std::string(kPrefix) + stem + ".json";
-        for (int n = 1; std::filesystem::exists(dir / file, ec); ++n) {
+        for (int n = 1; std::filesystem::exists(dir / U8Path(file), ec); ++n) {
             file = std::string(kPrefix) + stem + "_" + std::to_string(n) + ".json";
         }
 
         nlohmann::json doc;
         doc["schema"] = kSchema;
         doc["name"] = stem;
-        doc["author"] = a_author;
-        doc["description"] = a_description;
+        doc["author"] = EnsureUtf8(a_author);
+        doc["description"] = EnsureUtf8(a_description);
         // Record the defining plugins so an importer can warn on missing masters.
         std::vector<std::string> plugins;
         for (const auto& c : a_contents) {
@@ -252,31 +344,73 @@ namespace CostumeFW::Preset
         }
         doc["requiredPlugins"] = plugins;
         doc["contents"] = a_contents;
-        // Carry the per-content hide-when-worn rules (§8.10) so the hide behavior
-        // travels with the distributed preset. Only contents that have a rule.
+        // Carry the per-content settings so the appearance travels with the
+        // distributed preset. Written in BOTH shapes on purpose:
+        //
+        //   "contentSettings" - the 1.6.4 form, all five settings.
+        //   "hideRules" / "genderModes" - the pre-1.6.4 top-level maps.
+        //
+        // A preset is a file people hand to each other, and the recipient is not
+        // necessarily on the same CEF version. Emitting the legacy pair as well
+        // costs a few lines and keeps a 1.6.4-exported preset applying its hide
+        // rules and gender on 1.6.3, instead of arriving as contents only.
+        auto settings = nlohmann::json::object();
         auto rules = nlohmann::json::object();
-        for (const auto& [id, slots] : a_hideRules) {
-            if (!slots.empty()) {
-                rules[id] = slots;
-            }
-        }
-        doc["hideRules"] = std::move(rules);
         auto genders = nlohmann::json::object();
-        for (const auto& [id, mode] : a_genderModes) {
-            if (mode != 0) {
-                genders[id] = mode;
+        for (const auto& [id, prefs] : a_prefs) {
+            const bool worthCarrying = !prefs.hideSlots.empty() || prefs.genderMode != 0 ||
+                                       prefs.bodyMorph || !prefs.hideShapes.empty() ||
+                                       prefs.showRealBody;
+            if (!worthCarrying) {
+                continue;
             }
+            auto node = nlohmann::json::object();
+            if (!prefs.hideSlots.empty()) {
+                node["hideSlots"] = prefs.hideSlots;
+                rules[id] = prefs.hideSlots;  // legacy shape
+            }
+            if (prefs.genderMode != 0) {
+                node["genderMode"] = prefs.genderMode;
+                genders[id] = prefs.genderMode;  // legacy shape
+            }
+            if (prefs.bodyMorph) {
+                node["bodyMorph"] = true;
+            }
+            if (!prefs.hideShapes.empty()) {
+                node["hideShapes"] = prefs.hideShapes;
+            }
+            if (prefs.showRealBody) {
+                node["showRealBody"] = true;
+            }
+            settings[id] = std::move(node);
         }
+        doc["contentSettings"] = std::move(settings);
+        doc["hideRules"] = std::move(rules);
         doc["genderModes"] = std::move(genders);
 
-        std::ofstream out(dir / file, std::ios::trunc);
+        // Text first, file second. dump() throws on text that is not UTF-8
+        // (review 2026-09-23 C1), and the stream below truncates the moment it
+        // opens - so doing it the other way round turned a refused name into an
+        // EMPTY preset file on disk, and the throw itself into a crash.
+        std::string body;
+        try {
+            body = doc.dump(2);
+        } catch (const nlohmann::json::exception& e) {
+            SKSE::log::error("preset: {} NOT written - {} (a name or id that is not UTF-8)", file,
+                e.what());
+            return {};
+        }
+        std::ofstream out(dir / U8Path(file), std::ios::trunc);
         if (!out) {
             SKSE::log::error("preset: cannot write {}", file);
             return {};
         }
-        out << doc.dump(2);
+        out << body;
         SKSE::log::info("preset: exported {} ({} content)", file, a_contents.size());
         return file;
+    } catch (const std::exception& e) {
+        SKSE::log::error("preset: export of '{}' failed ({})", a_name, e.what());
+        return {};
     }
 
     void Validate(const std::vector<std::string>& a_contents,

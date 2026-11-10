@@ -71,6 +71,24 @@ namespace CostumeFW
     // Pure data reads; safe on the Papyrus VM thread.
     bool CanResolveContent(const std::string& a_contentId);
 
+    // Why a content is NOT being injected, when the reason is that its mesh is a
+    // Skyrim LE file. "" for everything else - including a content nobody has
+    // tried to resolve yet, since the verdict is recorded when the model is
+    // resolved. The carrier builder has refused this geometry since the Box44
+    // CTD; from 1.6.4.1 the model resolver refuses it too, so an LE costume is
+    // kept in the settings and simply not injected rather than risking the
+    // engine's skin-partition loader.
+    std::string LegacyNifRefusal(const std::string& a_contentId);
+
+    // One ARMO, several addons, and the one being shown does not cover all of
+    // the item's slots while a sibling does - so what is injected is part of the
+    // item. Returns the sentence to show, or "" when it is not that. Recorded
+    // when the model is picked, so a capture check is enough to populate it.
+    std::string PartialArmatureNote(const std::string& a_contentId);
+
+    // Every such refusal this session, "<id> - <reason>", sorted. Diagnostics.
+    std::vector<std::string> LegacyNifRefusals();
+
     // Main thread only: resolve a content's ARMA model, load the NIF, and return its
     // skinned shapes (name + first dismember biped slot; -1 if not dismembered),
     // caching them for the MCM (BoxStore::ContentShapesFor). Empty on failure. Used
@@ -99,8 +117,9 @@ namespace CostumeFW
         const policy::CapturePolicy& a_policy, std::string& a_nifOut,
         bool a_log = true);
 
-    // Run a_fn on the main thread after (at least) a_ms milliseconds, via the
-    // SKSE task queue (re-posts until the deadline; hop rate is NOT frame-locked).
+    // Run a_fn on the main thread after (at least) a_ms milliseconds: one timer
+    // thread holds the deadline, then hands a_fn to the SKSE task queue once.
+    // Callable from any thread, and takes no CEF lock (review 2026-09-23 W8).
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn);
 
     // Snapshot of active items (id + tokenId), and a registry clear (co-save).
@@ -318,6 +337,13 @@ namespace CostumeFW
     // guard rejects it and the guarded walk skips it, then restores the slot
     // before teardown. No mods needed; safe to run any time.
     std::vector<std::string> SlotCorruptionProbe();
+
+    // `cef headertest`: synthetic probe of the holder-HEADER family
+    // (BUGREPORT 2026-10-18): checks the RTTI guard against the game's own
+    // classes, then overwrites a fresh test child's header with a children
+    // array's image and runs the census walk and the by-value release on it.
+    // Touches nothing on the player; the test child is leaked on purpose.
+    std::vector<std::string> HeaderGuardProbe();
 
     // Merge-race rescue (2026-07-31): re-arm rebind retries for shown items
     // that ended fully static - the state a lost "FSMP merge vs bind" race

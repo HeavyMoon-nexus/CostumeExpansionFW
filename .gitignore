@@ -55,3 +55,7 @@ tools/nifcarrier/sync_carriers.local.cmd
 
 # Nexus store-page description draft (local working copy)
 2GAME_DESCRIPTION_ja.txt
+
+# Python bytecode from the dev tools in tools/
+__pycache__/
+*.pyc

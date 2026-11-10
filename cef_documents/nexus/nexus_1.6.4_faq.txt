@@ -1,0 +1,160 @@
+# 1.6.4 Q&A - for the description page or a sticky post.
+# Written 2026-09-14 for 1.6.3, brought to 1.6.4 on 2026-09-18.
+#
+# The questions are the ones 1.6.3 actually creates (a new esp, one installer, a persistent ability registry, stuck bonuses people already have) plus the ones that keep coming back (MCM, VR, logs). Answers are short on purpose: a FAQ where every answer runs three paragraphs is a FAQ nobody reads to the end.
+#
+# Accuracy points that must not drift if this is edited:
+#   - "cef av" alone CANNOT attribute a bonus to CEF. base/diff can.
+#   - "cef av" is NEW IN 1.6.3. It cannot be used before updating from 1.6.2.
+#   - CEF cannot remove an existing stuck bonus, and will not try.
+#   - the esp cannot be removed once used.
+#   - CEF_abilities.json cannot be discarded once used either.
+#   - the ability esp carries enchantments. Armor/weight/class/keywords are written onto the box token and do not use its spell pool.
+#   - slots are not one per costume.
+#
+# Changed for 1.6.4, and these are the ones that reverse earlier advice:
+#   - REPLACE is now the right answer for an update. 1.6.3's answer said install as a new mod, because the installer could end an install by writing a note instead of the mod. That branch is gone, so every install lands a complete mod and there is nothing for Replace to destroy. Merge and side-by-side are the dangerous answers now: they leave the carrier hash files in place under the archive's placeholder meshes, and the rebuild is skipped.
+#   - the pool is TWO plugins, 3,072 abilities, both installed by the one option.
+#   - the MCM is NOT removed in 1.6.4 and no version is named for it now.
+
+Do I have to install CostumeFW_Abilities.esp?
+
+No, as long as you have never used it. The option comes up already ticked and unticking it is a supported answer; leaving it ticked installs two plugins, CostumeFW_Abilities.esp and CostumeFW_Abilities2.esp. Your costumes look exactly the same either way. What you lose is their enchantment effects. The armor rating (including tempering), weight, armor class and allowed keywords written onto a box token use a different path and still work. CEF turns the enchantment feature off and tells you it is off, rather than going back to the old method.
+
+Once CostumeFW_Abilities.esp is active in your load order, the installer stops offering the choice and locks the option on. Unticking it there would remove a plugin your saves point into, and the bonuses it holds would have nothing left to take them off.
+
+Why is there a new plugin? Couldn't these records go in CostumeFW.esp?
+
+It could have gone in CostumeFW.esp. There is room - roughly 1,500 free IDs at the end of it. It is separate because that room is spoken for.
+
+CostumeFW.esp holds the box tokens, head parts and quest records. That room was being kept for more tokens, and 1.6.4 is what needed them: an equipment slot holds four boxes now, which took a token plugin of its own (CostumeFW_BoxPool1.esp) rather than the tail of CostumeFW.esp. Spending the budget on 1,024 abilities would have spent it on the thing that needed it least. Keeping the abilities in their own file also means the decision to make CostumeFW.esp a full plugin, or move everything into an ESM, can still be made later without touching them.
+
+It also means the abilities file does one job. Its existing form IDs can never be reassigned, because saves refer to them directly, so the less it carries the better.
+
+Why isn't it an ESL? I don't want to spend a load-order slot.
+
+The light range gives about 2,048 IDs, which sounds like plenty for 1,024 abilities. It is not, because a slot is never reused. The count is not how many costumes you are wearing, or even how many you own: it is how many have ever been registered on this setup. A piece whose enchantment changes takes a new slot and keeps the old one, so the number only goes up over a setup's lifetime.
+
+Removing the light flag later changes how the form IDs resolve, and that breaks every save that had used the plugin. A file that might one day need to be a full plugin therefore has to start as one.
+
+CostumeFW_Abilities2.esp, which comes with it, is ESL, and that is not a contradiction. The range limit only mattered while one plugin had to hold everything. More capacity comes from adding a plugin now, so a later pool only has to hold what the one before it ran out of.
+
+If the slot matters more to you than the feature, untick it in the installer.
+
+Can I install CostumeFW_Abilities.esp later?
+
+If you skipped it and have never used it, yes. Re-run the installer and leave Enchantment passthrough ticked, which is how it comes up, then enable the plugins it installs. If you used it before and it is now missing, this is not an optional later install: restore the plugin before loading or saving. Once CEF has allocated an ability and a save has used it, keep both the plugin and CEF_abilities.json from then on.
+
+I'm updating from 1.6.2 or earlier. What do I have to do?
+
+Take off every box token and save, in the version you have now. Then quit and install this over it, letting your mod manager REPLACE the CEF you have.
+
+The `cef av` commands mentioned below are new in 1.6.3. They do not exist in 1.6.2, so the preparation on the old version is simply: take every token off, make a new save, quit, then install.
+
+If you read this answer before 1.6.4, it told you to install as a NEW mod instead. That was because the installer had a "stop, my tokens are still on" option which installed a note and nothing else, and a manager told to replace put that note where your working install had been. The option is gone. Every install now lands a complete 1.6.4, so Replace has nothing to destroy, and it is the answer that keeps the carriers working.
+
+My mod manager is asking whether to replace, merge, or install alongside what I have.
+
+Replace. The other two break the physics carriers without saying anything.
+
+CEF builds a carrier mesh for each box inside its own mod folder and keeps a small hash file beside it. A rebuild is skipped while that hash still matches, and the hash covers what went into the carrier rather than the carrier itself. Merging, or installing this as a second mod beside the old one, leaves those hash files in place while the archive's empty placeholder meshes land on top of the built ones. CEF finds a match, skips the rebuild, and those boxes come back with no physics. Replace clears the meshes and the hashes together, so the next launch rebuilds them.
+
+Your boxes, presets and settings are not in the mod folder, so replacing it does not touch them.
+
+Why does it matter whether my tokens are on when I update?
+
+Up to 1.6.2 a costume's enchantments reached you through a spell that only existed while the game was running. Quit with a box on and that spell is gone next launch, but the bonus it applied is in your save with nothing left to take it back off. 1.6.3 stopped that happening and 1.6.4 keeps it stopped. Neither can clean up one that is already stuck, so remove every box token before making the save you will update from. Nothing in the installer can check this for you: it cannot read a save and cannot see what you are wearing.
+
+I think I already have a stuck bonus. Will CEF remove it?
+
+No, and it will not try. It cannot tell its own leftovers from a bonus another mod gave you on purpose, and taking away something you meant to have is worse than leaving something you did not.
+
+It will show you what it thinks they are when you load a save made before 1.6.3, and `cef abilities legacy` prints the same again. Conditional enchantments are listed separately, because whether one of those was applying depends on what you were doing when you saved.
+
+How do I check?
+
+From 1.6.3 onwards, run `cef av base` while the tokens are on, take every box token off, then run `cef av diff`. That lists what changed when the tokens came off: the live, removable part of the costume's bonus. This command was not present in 1.6.2, so it cannot diagnose the old version before you update.
+
+`cef av` on its own lists every actor value that anything is modifying - other mods, perks, diseases, blessings - and cannot tell you which is which. A value left after the tokens are off is only a possible leftover, not proof that CEF put it there. Compare it with the legacy report and with the known values on your old costumes.
+
+To remove a confirmed leftover by hand: `player.getavinfo health` shows the permanent modifier, and `player.modav health -N` cancels exactly N points. Use whichever actor value the box fortified, and subtract only the amount you have identified - do not blindly negate the whole permanent modifier, because other mods may own part of it.
+
+Can NPCs have stuck bonuses too?
+
+Yes. Published costumes used the same old mechanism. Select the NPC in the console before running `cef av`, `cef av base`, or `cef av diff`; the commands will inspect that actor instead of the player. As with the player, remove only an amount you have positively identified as a leftover.
+
+Why did I get the pre-1.6.3 warning when no box was equipped?
+
+Because it identifies the save format, not a currently worn token. Nothing new was left by that particular load if every box was already off, but an earlier session may still have left a bonus behind. The warning stops appearing after that save has been written by 1.6.3 and is no longer in the old format.
+
+I have the NPC add-on and the VR patch installed separately.
+
+Remove them before you install this. They are both in the installer now.
+
+The VR patch is the one that matters. It holds a DLL at the same path as the main one, so depending on where it sits in your mod order it can put the old DLL back over the new one. Nothing can detect that for you, because the file has the same name either way.
+
+I play in VR. Which download?
+
+Download the main installer. There is no separate VR build and there never really was: the DLL is one binary that detects which engine loaded it, and the old VR patch shipped the same file. Pick Skyrim VR in the installer and you get the VR notes.
+
+VR still needs SkyrimVRESL, and ImGui VR Helper for the SMF menu.
+
+Do my boxes, presets and settings survive the update?
+
+Yes. Box definitions and settings live in `Data\SKSE\Plugins\CEF_settings.json`, per-save state is in the regular save and its matching SKSE co-save, and presets are CEFP_*.json files. Once an enchantment ability is allocated, 1.6.3 also creates `Data\SKSE\Plugins\CEF_abilities.json`. Preserve that file too when moving the setup to another profile or computer; under MO2 these generated files will commonly be in Overwrite.
+
+The first time 1.6.4 reads each of those two files it also keeps a copy of them as they were, at CEF_settings.pre164.json and CEF_abilities.pre164.json. CEF never reads them again. They are there so that going back to 1.6.3 is a file copy rather than a reconstruction.
+
+Can I remove CostumeFW_Abilities.esp later if I change my mind?
+
+Not once you have used it. Your saves refer to form IDs inside it, and without it those bonuses cannot be taken off. The same goes for CostumeFW_Abilities2.esp once something has been allocated into that one. If you load a save without it, CEF tells you and asks you not to save: quit, put it back, and load the same save again so the enchantment bonuses can be removed normally. Save first and the numbers are in that save for good.
+
+A message box says a plugin is missing. What now?
+
+Read which one it names and do what it says, which will usually be "do not save, quit, put it back". The save on disk is still fine at that point. It is saving over it that makes the problem permanent, because after that there is nothing anywhere to say which mod produced the numbers.
+
+The named file may be CostumeFW_Abilities.esp, or it may be the costume mod that defined one of the magic effects. Both matter. Restore every plugin the message names, then load the same save again.
+
+It says CEF_abilities.json is damaged. What do I do?
+
+Do not save. Run `cef abilities restore`, quit to desktop, and restart Skyrim. CEF keeps the broken file and restores the last good automatic backup. The abilities have to be rebuilt before a save loads, so restarting is required.
+
+Do not edit, delete or regenerate CEF_abilities.json to clear it. It is the only map between the fixed spells in CostumeFW_Abilities.esp and the enchantment recipes assigned to them; the esp and the JSON are a pair once they have been used.
+
+Do both bonuses apply when two pieces have the same enchantment?
+
+Yes. 1.6.3 gives each piece its own ability, so two pieces with the same +40 effect give +80. Different magnitudes of the same effect add up as well. Older versions put a whole costume into one spell, where the game collapsed identical effects into one.
+
+How many costume pieces can pass enchantments through?
+
+3,072 abilities, and the SMF menu shows how many are left on the Main page. That is the two plugins the enchantment option installs: 1,024 in CostumeFW_Abilities.esp and 2,048 in CostumeFW_Abilities2.esp. 1.6.3 shipped only the first.
+
+It is not one per costume. A piece whose enchantment changes keeps its old entry as well, so something you re-enchant often may use more than one. Taking a piece out of a box and putting it back costs nothing. In ordinary use you will not come near the limit, but that is why the count is not simply the number of costumes you own.
+
+If it does fill, abilities already registered keep working. A new piece still looks right and its box still carries token-based armor and weight, but that piece gets no enchantment ability.
+
+The message you get at that point names CostumeFW_Abilities3.esp. That file does not exist yet: the pool is built to be extended a plugin at a time, and the next one gets made when somebody needs it. If you are anywhere near 3,072, tell me in the Nexus bug-report section and attach the log - I would want to see the setup that got there.
+
+What does "kept for old saves" mean? Can I free those slots?
+
+It is an older value of an enchantment - for example, from before you re-enchanted the piece. CEF keeps it because another save may still refer to that exact spell. It cannot be handed to different content safely, so there is no supported cleanup button. If the same piece returns to exactly that old value, CEF reuses the old slot instead of taking another one.
+
+Do not delete or edit CEF_abilities.json to reclaim the count. That would break the mapping used by existing saves.
+
+Why does one costume piece pass no enchantment through?
+
+Check the log. The piece may be unenchanted, have its Item data switch off, be blocked, come from a plugin that is not loaded, or have a condition CEF cannot rebuild safely after a restart. CEF rejects the whole enchantment in the last case instead of silently dropping a condition and giving you a different effect from the one the author made. Ordinary conditions such as "while sneaking" are preserved; conditions tied to a particular runtime reference or another mod's script variable are examples that cannot be saved faithfully. A full ability pool has the same visible result for new pieces.
+
+Which log should I attach to a bug report?
+
+CostumeExpansionFW.log for the current run. 1.6.3 also keeps CostumeExpansionFW.prev1.log and CostumeExpansionFW.prev2.log beside it. If you restarted after a crash, prev1 is usually the run that crashed; attach it with the crash log.
+
+They are usually under `Documents\My Games\Skyrim Special Edition\SKSE`, or the Skyrim VR folder if you play in VR. The folder name follows whatever your setup calls the game's My Games folder, and some setups do rename it - `Documents\My Games\Skyrim.INI\SKSE` is one that turns up. If neither is there, search your Windows user profile for CostumeExpansionFW.log rather than hunting for the folder.
+
+If CEF behaves strangely, please enable verbose logging before trying to reproduce it. Either open `CostumeExpansionFW\SKSE\Plugins\CostumeExpansionFW.ini` in the mod folder and set `[Diagnostics]` `bDebugMode=1`, or open CEF's SMF menu, go to Diagnostics, and enable `Verbose diagnostic logging (debug mode)`. Then reproduce the same problem as closely as possible and send CostumeExpansionFW.log, plus the crash log if there is one. The SMF switch lasts for the current session only; the INI setting remains enabled until you set it back to 0. Debug mode changes only what CEF logs, not how CEF behaves.
+
+I heard the MCM was going away.
+
+It is still here. I named 1.6.3 for its removal, then 1.6.4, and both slipped, so I am not naming a version this time.
+
+It works as it did, with one gap: an equipment slot holding more than one box gets no MCM page. The pages are keyed by the slot number, so a slot with two boxes names neither of them, and a page that quietly edited the wrong box would be worse than no page. Use the SMF menu for those. Nothing about your setup changes either way.

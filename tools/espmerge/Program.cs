@@ -22,6 +22,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
@@ -55,11 +56,33 @@ internal static class Program
             try { return VerifyNpcAddon(args[1]); }
             catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
         }
+        if (args.Length >= 2 && args[0] == "--verify-core") {
+            try { return VerifyCore(args[1]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 2 && args[0] == "--add-marker") {
+            try { return AddBoxTokenMarker(args[1]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 4 && args[0] == "--build-boxpool") {
+            try {
+                var perSlot = args.Length > 4 ? int.Parse(args[4]) : kDefaultPerSlot;
+                return BuildBoxPool(int.Parse(args[1]), args[2], args[3], perSlot);
+            } catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 3 && args[0] == "--verify-abilities") {
+            try { return VerifyAbilityPool(int.Parse(args[1]), args[2]); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
+        if (args.Length >= 3 && args[0] == "--verify-pool") {
+            // Optional 4th arg: the meshes root to check the carrier files under
+            // (package_assets/meshes). Without it the asset check is skipped.
+            try { return VerifyBoxPool(args[1], args[2], args.Length > 3 ? args[3] : null); }
+            catch (Exception ex) { Console.Error.WriteLine("FATAL: " + ex); return 1; }
+        }
         if (args.Length >= 3 && args[0] == "--build-npc") {
             try {
-                var result = BuildNpcAddon(args[1], args[2]);
-                if (result != 0) return result;
-                return VerifyNpcAddon(Path.Combine(args[2], "CostumeFW_NPC.esp"));
+                return BuildNpcAddon(args[1], args[2]);
             } catch (Exception ex) {
                 Console.Error.WriteLine("FATAL: " + ex);
                 return 1;
@@ -138,6 +161,10 @@ internal static class Program
             var addonKey = new FormKey(outKey, (uint)(0x808 + i));
             var armor = armorTemplate.Duplicate(armorKey);
             var addon = addonTemplate.Duplicate(addonKey);
+            // The template is a box token, and from 1.6.4 it carries the
+            // box-token marker - which here would enroll a publish token in the
+            // box pool. This add-on's tokens carry no keywords at all.
+            armor.Keywords = null;
             armor.EditorID = $"CFW_PubToken{i + 1:00}";
             armor.Name = "Costume (unpublished)";
             armor.MajorFlags &= ~Armor.MajorFlag.NonPlayable;
@@ -161,6 +188,7 @@ internal static class Program
             var addonKey = new FormKey(outKey, (uint)(0x818 + i));
             var armor = armorTemplate.Duplicate(armorKey);
             var addon = addonTemplate.Duplicate(addonKey);
+            armor.Keywords = null;  // no box-token marker - see the loop above
             armor.EditorID = $"CFW_NpcPersistTok{i + 1:00}";
             armor.Name = "Costume NPC carrier";
             armor.MajorFlags |= Armor.MajorFlag.NonPlayable;
@@ -177,10 +205,26 @@ internal static class Program
             outMod.ArmorAddons.RecordCache.Set(addon);
         }
 
+        // Stage, verify, and only then replace: the shipped add-on used to be
+        // overwritten first and verified after, so a build that failed the
+        // check had already destroyed the good file (review 2026-09-23 W25).
         Directory.CreateDirectory(outDir);
         var outPath = Path.Combine(outDir, "CostumeFW_NPC.esp");
-        outMod.WriteToBinary(outPath);
-        Console.WriteLine("npc add-on -> " + outPath);
+        var stageDir = Path.Combine(outDir, ".espmerge_stage");
+        Directory.CreateDirectory(stageDir);
+        var stagedPath = Path.Combine(stageDir, "CostumeFW_NPC.esp");
+        outMod.WriteToBinary(stagedPath);
+        if (VerifyNpcAddon(stagedPath) != 0) {
+            Console.Error.WriteLine("the new add-on does not verify - " + outPath +
+                                    " untouched. The rejected result is at " + stagedPath);
+            return 1;
+        }
+        var unchanged = File.Exists(outPath) && Md5Hex(outPath) == Md5Hex(stagedPath);
+        File.Copy(stagedPath, outPath, true);
+        File.Delete(stagedPath);
+        try { Directory.Delete(stageDir); } catch (IOException) { /* not empty: leave it */ }
+        Console.WriteLine("npc add-on -> " + outPath +
+                          (unchanged ? " (byte-identical to the previous file)" : " (changed)"));
         return 0;
     }
 
@@ -192,13 +236,692 @@ internal static class Program
             addon.AdditionalRaces.Add(new FormLink<IRaceGetter>(new FormKey(skyrimKey, id)));
     }
 
+    // --- v1.6.4 generation 0: the box-token marker -------------------------
+    // Membership in the box token pool stopped being a question about a display
+    // name in 1.6.4 (a token's FULL is rewritten at runtime and can be
+    // translated). It is a keyword now, and this is the one place that puts it
+    // on the 27 tokens that shipped before it existed.
+    private const string kMarkerEdid = "CFW_BoxTokenMarker";
+    private const string kBoxTokenEdidPrefix = "CFW_BoxToken_";
+    private const int kCoreArmorCount = 27;
+    private const int kCoreAddonCount = 31;
+    private const float kHeaderVersion = 1.71f;
+
+    // Every ARMO whose editor ID is CFW_BoxToken_<slot>. The ARMA records are
+    // named ..._<slot>AA, so the all-digits tail is what keeps them out.
+    private static bool IsBoxTokenEdid(string edid)
+    {
+        if (edid == null || !edid.StartsWith(kBoxTokenEdidPrefix, StringComparison.Ordinal))
+            return false;
+        var tail = edid.Substring(kBoxTokenEdidPrefix.Length);
+        return tail.Length > 0 && tail.All(char.IsDigit);
+    }
+
+    private static int SlotOfMask(uint mask)
+    {
+        for (var bit = 0; bit < 32; ++bit)
+            if ((mask & (1u << bit)) != 0) return bit + 30;
+        return 0;
+    }
+
+    private static int AddBoxTokenMarker(string path)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing core plugin: " + path);
+            return 1;
+        }
+        var mod = SkyrimMod.CreateFromBinary(ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var modKey = mod.ModKey;
+
+        var marker = mod.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) {
+            // Append past the used range; never renumber an existing record.
+            // Local ids are published identity - the settings file, the co-save
+            // and every shared preset name records by FormID.
+            uint next = 0x800;
+            foreach (var rec in mod.EnumerateMajorRecords())
+                if (rec.FormKey.ModKey == modKey && rec.FormKey.ID >= next)
+                    next = rec.FormKey.ID + 1;
+            if (next > 0xFFF) {
+                Console.Error.WriteLine("no room for the marker: next free id " + next.ToString("X") +
+                                        " is past the ESL range");
+                return 1;
+            }
+            marker = new Keyword(new FormKey(modKey, next), SkyrimRelease.SkyrimSE) {
+                EditorID = kMarkerEdid,
+            };
+            mod.Keywords.RecordCache.Set(marker);
+            Console.WriteLine("created KYWD " + kMarkerEdid + " at " + next.ToString("X6"));
+        } else {
+            Console.WriteLine("KYWD " + kMarkerEdid + " already present at " +
+                              marker.FormKey.ID.ToString("X6"));
+        }
+
+        var tagged = 0;
+        var already = 0;
+        foreach (var armor in mod.Armors.ToList()) {
+            if (!IsBoxTokenEdid(armor.EditorID)) continue;
+            if (armor.Keywords == null)
+                armor.Keywords = new Noggog.ExtendedList<IFormLinkGetter<IKeywordGetter>>();
+            if (armor.Keywords.Any(x => x.FormKey == marker.FormKey)) { ++already; continue; }
+            armor.Keywords.Add(new FormLink<IKeywordGetter>(marker.FormKey));
+            ++tagged;
+        }
+        Console.WriteLine("marker on " + tagged + " newly tagged + " + already +
+                          " already tagged box token(s)");
+        if (tagged == 0 && already == 0) {
+            Console.Error.WriteLine("no CFW_BoxToken_* ARMO found - wrong file?");
+            return 1;
+        }
+
+        // Write beside the original and swap only once the result verifies, so a
+        // half-written plugin never replaces a shipping one. The staging copy
+        // keeps the REAL file name in a scratch directory rather than picking up
+        // a .tmp suffix: Mutagen resolves the output path to a ModKey to check
+        // its masters, and "CostumeFW.esp.tmp" is not a plugin name.
+        var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+        var stageDir = Path.Combine(dir, ".espmerge_stage");
+        Directory.CreateDirectory(stageDir);
+        var staged = Path.Combine(stageDir, Path.GetFileName(path));
+        if (File.Exists(staged)) File.Delete(staged);
+        mod.WriteToBinary(staged);
+        if (VerifyCore(staged) != 0) {
+            Console.Error.WriteLine("the rewritten plugin does not verify - original untouched. " +
+                                    "The rejected result is at " + staged);
+            return 1;
+        }
+        File.Copy(staged, path, true);
+        File.Delete(staged);
+        try { Directory.Delete(stageDir); } catch (IOException) { /* not empty: leave it */ }
+        Console.WriteLine("add-marker -> " + path);
+        return 0;
+    }
+
+    private static int VerifyCore(string path)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing core plugin: " + path);
+            return 1;
+        }
+        // using: the overlay memory-maps the file and HOLDS it. Without this the
+        // staged copy in --add-marker cannot be deleted after it verifies.
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+
+        if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
+            errors.Add("ESL flag missing");
+        if (Math.Abs(mod.ModHeader.Stats.Version - kHeaderVersion) > 0.001f)
+            errors.Add("HEDR version must be " + kHeaderVersion + ", got " + mod.ModHeader.Stats.Version);
+        var masters = mod.ModHeader.MasterReferences.Select(x => x.Master.FileName.String).ToList();
+        if (masters.Count != 1 || !masters[0].Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+            errors.Add("masters must be [Skyrim.esm], got [" + string.Join(", ", masters) + "]");
+
+        foreach (var rec in mod.EnumerateMajorRecords()) {
+            if (rec.FormKey.ModKey != mod.ModKey) continue;
+            if (rec.FormKey.ID < 0x800 || rec.FormKey.ID > 0xFFF)
+                errors.Add("local id " + rec.FormKey.ID.ToString("X6") + " (" + rec.EditorID +
+                           ") is outside the ESL range 800-FFF");
+        }
+
+        var marker = mod.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) errors.Add("KYWD " + kMarkerEdid + " is missing");
+
+        var armors = mod.Armors.ToList();
+        var addons = mod.ArmorAddons.ToList();
+        if (armors.Count != kCoreArmorCount)
+            errors.Add("expected " + kCoreArmorCount + " ARMO, got " + armors.Count);
+        if (addons.Count != kCoreAddonCount)
+            errors.Add("expected " + kCoreAddonCount + " ARMA, got " + addons.Count);
+
+        var skyrimKey = ModKey.FromNameAndExtension("Skyrim.esm");
+        var expectedRaces = kNpcRaceIds.Select(id => new FormKey(skyrimKey, id)).ToHashSet();
+
+        foreach (var armor in armors) {
+            var who = armor.EditorID ?? armor.FormKey.ID.ToString("X6");
+            if (!IsBoxTokenEdid(armor.EditorID)) {
+                // The pool is "every ARMO this plugin defines", so a non-token
+                // ARMO landing here would silently join it.
+                errors.Add("ARMO " + who + " is not a CFW_BoxToken_<slot> record");
+                continue;
+            }
+            if (marker != null &&
+                (armor.Keywords == null || !armor.Keywords.Any(k => k.FormKey == marker.FormKey)))
+                errors.Add(who + " does not carry " + kMarkerEdid);
+
+            if (armor.Armature.Count != 1) {
+                errors.Add(who + " references " + armor.Armature.Count + " ARMA (want exactly 1)");
+                continue;
+            }
+            var addon = addons.FirstOrDefault(a => a.FormKey == armor.Armature[0].FormKey);
+            if (addon == null) { errors.Add(who + " points at an ARMA outside this plugin"); continue; }
+
+            var armorMask = (uint)armor.BodyTemplate.FirstPersonFlags;
+            var addonMask = (uint)addon.BodyTemplate.FirstPersonFlags;
+            // NOT "exactly one bit": the shipped slot-31 wig token carries 31|41
+            // (Hair + LongHair) and that is correct. What must hold is that the
+            // pair agree and that the slot is real.
+            if (armorMask == 0) errors.Add(who + " has an empty BOD2");
+            if (armorMask != addonMask)
+                errors.Add(who + " BOD2 " + armorMask.ToString("X") + " != its ARMA's " +
+                           addonMask.ToString("X"));
+            var slot = SlotOfMask(armorMask);
+            if (slot < 30 || slot > 61) errors.Add(who + " slot " + slot + " is outside 30-61");
+            var edidSlot = int.Parse(armor.EditorID.Substring(kBoxTokenEdidPrefix.Length));
+            if (slot != edidSlot)
+                errors.Add(who + " names slot " + edidSlot + " but its BOD2 says " + slot);
+
+            // The 23-race list is the fix for "a box silently does nothing on an
+            // ArmorRace custom race"; a generated pool that loses it would
+            // reproduce that bug for its own boxes only.
+            if (addon.Race.FormKey != new FormKey(skyrimKey, 0x19))
+                errors.Add(addon.EditorID + " RNAM is not DefaultRace");
+            if (!addon.AdditionalRaces.Select(x => x.FormKey).ToHashSet().SetEquals(expectedRaces))
+                errors.Add(addon.EditorID + " additional-race list does not match the 23-race set");
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify core: " + armors.Count + " ARMO + " + addons.Count +
+                          " ARMA, ESL, HEDR " + kHeaderVersion +
+                          ", Skyrim.esm-only, marker/BOD2/ARMA-link/races OK");
+        return 0;
+    }
+
+    // --- v1.6.4 BOX pool generations ---------------------------------------
+    // CostumeFW_BoxPoolN.esp adds more physical box tokens, so several boxes can
+    // share one biped slot. Every record is DERIVED from the matching generation
+    // 0 token rather than built from a slot number, because gen 0 carries two
+    // things that are easy to get wrong and invisible when wrong:
+    //
+    //   the BOD2 mask   - slot 31's token is 31|41 (Hair + LongHair), not one bit
+    //   the race list   - RNAM plus 23 additional races. Without them a box
+    //                     silently does nothing on an ArmorRace custom race, the
+    //                     exact bug tools/esprace was written to fix
+    //
+    // Copying the template keeps both correct by construction; --verify-core and
+    // --verify-pool then assert they stayed that way.
+    private const int kDefaultPerSlot = 3;
+
+    // Generations that have shipped, by the md5 of the plugin that went out. A
+    // shipped generation is frozen. Saves point at its tokens by (plugin, local
+    // id), and the ids are positional - 0x800 + 2 * index over (slot, ordinal) -
+    // so a rebuild with another --per-slot, or from a core whose token set
+    // changed, moves every id after the first difference to another slot, and
+    // each saved box token turns into some other slot's token. Every internal
+    // check still passes on such a file; only the bytes can tell. Capacity is
+    // added as a new generation instead (review 2026-09-23 W24).
+    private static readonly Dictionary<int, string> kShippedBoxPoolMd5 = new() {
+        [1] = "eb32e35e320813600fa65692657dc703",
+    };
+
+    private static string Md5Hex(string path)
+    {
+        using var md5 = MD5.Create();
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(md5.ComputeHash(stream)).ToLowerInvariant();
+    }
+
+    private static string CarrierKey(int generation, uint armoLocalId) =>
+        "BP" + generation.ToString("00") + "_" + armoLocalId.ToString("X6");
+
+    private static int BuildBoxPool(int generation, string corePath, string outDir, int perSlot)
+    {
+        if (generation < 1) {
+            Console.Error.WriteLine("generation must be >= 1 (generation 0 is CostumeFW.esp)");
+            return 1;
+        }
+        if (perSlot < 1) {
+            Console.Error.WriteLine("per-slot count must be >= 1");
+            return 1;
+        }
+        if (!File.Exists(corePath)) {
+            Console.Error.WriteLine("missing core plugin: " + corePath);
+            return 1;
+        }
+        using var core = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(corePath), SkyrimRelease.SkyrimSE);
+
+        var marker = core.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) {
+            Console.Error.WriteLine("the core plugin has no " + kMarkerEdid +
+                                    " - run --add-marker on it first");
+            return 1;
+        }
+
+        // Templates in slot order, so the generated ids are stable across runs.
+        var templates = core.Armors
+            .Where(x => IsBoxTokenEdid(x.EditorID))
+            .Select(x => new {
+                Armor = x,
+                Slot = int.Parse(x.EditorID.Substring(kBoxTokenEdidPrefix.Length)),
+            })
+            .OrderBy(x => x.Slot)
+            .ToList();
+        if (templates.Count != kCoreArmorCount) {
+            Console.Error.WriteLine("expected " + kCoreArmorCount + " gen-0 tokens, found " +
+                                    templates.Count);
+            return 1;
+        }
+
+        var outName = "CostumeFW_BoxPool" + generation + ".esp";
+        var outKey = ModKey.FromNameAndExtension(outName);
+        var outMod = new SkyrimMod(outKey, SkyrimRelease.SkyrimSE);
+        outMod.ModHeader.Flags |= (SkyrimModHeader.HeaderFlag)0x200;  // ESL
+        outMod.ModHeader.Stats.Version = kHeaderVersion;
+
+        var kid = new List<string>();
+        var index = 0;
+        foreach (var t in templates) {
+            var addonTemplate = core.ArmorAddons.FirstOrDefault(
+                a => t.Armor.Armature.Count == 1 && a.FormKey == t.Armor.Armature[0].FormKey);
+            if (addonTemplate == null) {
+                Console.Error.WriteLine("gen-0 token " + t.Armor.EditorID + " has no single ARMA");
+                return 1;
+            }
+            for (var ord = 1; ord <= perSlot; ++ord, ++index) {
+                var armoId = (uint)(0x800 + index * 2);
+                var armaId = armoId + 1;
+                if (armaId > 0xFFF) {
+                    Console.Error.WriteLine("generation " + generation + " at " + perSlot +
+                                            " per slot does not fit the ESL range 800-FFF (" +
+                                            templates.Count + " slots x " + perSlot +
+                                            " tokens x 2 records)");
+                    return 1;
+                }
+                var armor = t.Armor.Duplicate(new FormKey(outKey, armoId));
+                var addon = addonTemplate.Duplicate(new FormKey(outKey, armaId));
+
+                var tag = "CFW_BP" + generation.ToString("00") + "_S" + t.Slot + "_" +
+                          ord.ToString("00");
+                armor.EditorID = tag;
+                addon.EditorID = tag + "_AA";
+                // The FULL must NOT start with "Costume Box". A 1.6.3 DLL finds
+                // box tokens by "a CostumeFW* plugin AND that name prefix", and
+                // BoxPoolN satisfies the first half - so keeping the prefix off
+                // means a user who rolls back to 1.6.3 cannot be handed a pool
+                // token and build an unguarded same-slot box with it. At runtime
+                // CEF overwrites this with the box's label anyway; it is visible
+                // only in the free-token picker and diagnostics.
+                armor.Name = "CFW Pool " + generation + " Slot " + t.Slot + " #" + ord;
+
+                armor.Armature.Clear();
+                armor.Armature.Add(new FormLink<IArmorAddonGetter>(addon.FormKey));
+
+                // Duplicate carried the marker over with the rest of the keywords;
+                // assert rather than assume, since it is the membership test.
+                if (armor.Keywords == null ||
+                    !armor.Keywords.Any(k => k.FormKey == marker.FormKey)) {
+                    Console.Error.WriteLine("template " + t.Armor.EditorID +
+                                            " did not carry the marker into " + tag);
+                    return 1;
+                }
+
+                // One carrier namespace per TOKEN, not per slot: several tokens
+                // share slot 55 now, and slot-keyed file names would have them
+                // overwrite each other's meshes.
+                var key = CarrierKey(generation, armoId);
+                var nif = "CostumeFW\\" + key + "_carrier_r0.nif";
+                addon.WorldModel.Male.File = nif;
+                addon.WorldModel.Female.File = nif;
+
+                outMod.Armors.RecordCache.Set(armor);
+                outMod.ArmorAddons.RecordCache.Set(addon);
+
+                // LoreBox tooltips are keyed per token from this generation on;
+                // gen 0 keeps its LoreBox_CEFBox<slot> names as slot aliases.
+                kid.Add("Keyword = LoreBox_CEFTok_" + key + "|Armor|0x" +
+                        armoId.ToString("X") + "~" + outName);
+            }
+        }
+
+        // Built into a stage directory and moved into place only once it verifies
+        // and, for a shipped generation, matches what shipped byte for byte - so
+        // a refused build never replaces a good file. The staged copies keep
+        // their real names: Mutagen takes a plugin's ModKey from its file name,
+        // and the KID check looks for the ini beside the plugin.
+        Directory.CreateDirectory(outDir);
+        var outPath = Path.Combine(outDir, outName);
+        var kidName = "CostumeFW_BoxPool" + generation + "_KID.ini";
+        var kidPath = Path.Combine(outDir, kidName);
+        var stageDir = Path.Combine(outDir, ".espmerge_stage");
+        Directory.CreateDirectory(stageDir);
+        var stagedPath = Path.Combine(stageDir, outName);
+        var stagedKid = Path.Combine(stageDir, kidName);
+        outMod.WriteToBinary(stagedPath);
+
+        var header = new List<string> {
+            "; Costume Expansion FW - LoreBox tooltip keywords for box pool generation " +
+                generation + ".",
+            "; Generated by tools/espmerge --build-boxpool; do not edit by hand.",
+            ";",
+            "; One keyword per TOKEN (LoreBox_CEFTok_<carrierKey>), not per slot: a slot",
+            "; can hold several boxes from 1.6.4 on, and a slot-keyed tooltip would show",
+            "; whichever of them CEF happened to find first.",
+            ";",
+            "; Soft dependency: without \"LoreBox - Item and Spell Tooltips\" nothing reads",
+            "; these and there is no effect. KID auto-creates the keywords.",
+            "",
+        };
+        File.WriteAllLines(stagedKid, header.Concat(kid));
+
+        Console.WriteLine("box pool " + generation + " staged -> " + stagedPath);
+        Console.WriteLine("  " + outMod.Armors.Count + " ARMO + " + outMod.ArmorAddons.Count +
+                          " ARMA (" + perSlot + " per slot x " + templates.Count + " slots)");
+        Console.WriteLine("  " + stagedKid + " (" + kid.Count + " keyword lines)");
+        if (VerifyBoxPool(stagedPath, corePath) != 0) {
+            Console.Error.WriteLine("the new pool does not verify - " + outPath +
+                                    " untouched. The rejected result is in " + stageDir);
+            return 1;
+        }
+        if (kShippedBoxPoolMd5.TryGetValue(generation, out var shipped)) {
+            var built = Md5Hex(stagedPath);
+            if (!built.Equals(shipped, StringComparison.OrdinalIgnoreCase)) {
+                Console.Error.WriteLine("generation " + generation + " has shipped (md5 " + shipped +
+                                        ") and this build differs (md5 " + built + "). Its token " +
+                                        "ids are in players' saves, so it is never rebuilt - add " +
+                                        "a new generation instead. " + outPath + " untouched; the " +
+                                        "rejected result is in " + stageDir);
+                return 1;
+            }
+            Console.WriteLine("  md5 " + built + " = the shipped generation " + generation);
+        }
+        File.Copy(stagedPath, outPath, true);
+        File.Copy(stagedKid, kidPath, true);
+        File.Delete(stagedPath);
+        File.Delete(stagedKid);
+        try { Directory.Delete(stageDir); } catch (IOException) { /* not empty: leave it */ }
+        Console.WriteLine("box pool " + generation + " -> " + outPath);
+        return 0;
+    }
+
+    private static int VerifyBoxPool(string path, string corePath, string meshRoot = null)
+    {
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing pool plugin: " + path);
+            return 1;
+        }
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        using var core = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(corePath), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+
+        var generation = 0;
+        var name = Path.GetFileName(path);
+        var stem = "CostumeFW_BoxPool";
+        if (name.StartsWith(stem, StringComparison.OrdinalIgnoreCase) &&
+            name.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)) {
+            var digits = name.Substring(stem.Length, name.Length - stem.Length - 4);
+            if (digits.Length > 0 && digits[0] != '0' && digits.All(char.IsDigit))
+                generation = int.Parse(digits);
+        }
+        if (generation < 1)
+            errors.Add("file name " + name + " is not CostumeFW_BoxPool<N>.esp with N >= 1");
+
+        if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
+            errors.Add("ESL flag missing");
+        if (Math.Abs(mod.ModHeader.Stats.Version - kHeaderVersion) > 0.001f)
+            errors.Add("HEDR version must be " + kHeaderVersion + ", got " + mod.ModHeader.Stats.Version);
+
+        // Masters are FIXED and checked for exact equality. The cumulative chain
+        // across pool generations was withdrawn in rev.5: a missing master is a
+        // startup CTD in SE, which takes the diagnostic CEF would otherwise print
+        // away from the user entirely.
+        var masters = mod.ModHeader.MasterReferences
+            .Select(x => x.Master.FileName.String).ToList();
+        var wanted = new[] { "Skyrim.esm", "CostumeFW.esp" };
+        if (masters.Count != wanted.Length ||
+            !masters.Select(m => m.ToLowerInvariant()).OrderBy(m => m)
+                .SequenceEqual(wanted.Select(m => m.ToLowerInvariant()).OrderBy(m => m)))
+            errors.Add("masters must be exactly [" + string.Join(", ", wanted) + "], got [" +
+                       string.Join(", ", masters) + "]");
+
+        var marker = core.Keywords.FirstOrDefault(x => x.EditorID == kMarkerEdid);
+        if (marker == null) errors.Add("the core plugin has no " + kMarkerEdid);
+
+        var armors = mod.Armors.ToList();
+        var addons = mod.ArmorAddons.ToList();
+        if (armors.Count != addons.Count)
+            errors.Add("ARMO/ARMA counts differ: " + armors.Count + " vs " + addons.Count);
+
+        // gen 0 keyed by slot, to compare masks and race lists against.
+        var coreBySlot = core.Armors
+            .Where(x => IsBoxTokenEdid(x.EditorID))
+            .ToDictionary(x => int.Parse(x.EditorID.Substring(kBoxTokenEdidPrefix.Length)));
+
+        // P4. A pool generation carries CostumeFW.esp as a master, so it CAN
+        // override the core's records, and a later generation could override an
+        // earlier one. Neither is ever right: a save points at a record by
+        // (plugin, id), and a pool that redefines somebody else's record changes
+        // what that id means for everyone who has the file. Every record here has
+        // to be this plugin's own.
+        foreach (var rec in mod.EnumerateMajorRecords()) {
+            if (rec.FormKey.ModKey != mod.ModKey) {
+                errors.Add("overrides " + rec.FormKey.ModKey.FileName + " record " +
+                           rec.FormKey.ID.ToString("X6") + " (" + rec.EditorID +
+                           ") - a pool defines its own records and nobody else's");
+            }
+        }
+
+        var carrierKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var armor in armors) {
+            var who = armor.EditorID ?? armor.FormKey.ID.ToString("X6");
+            if (armor.FormKey.ID < 0x800 || armor.FormKey.ID > 0xFFF)
+                errors.Add(who + " local id " + armor.FormKey.ID.ToString("X6") +
+                           " is outside the ESL range 800-FFF");
+            if (armor.Name != null &&
+                armor.Name.String != null &&
+                armor.Name.String.StartsWith("Costume Box", StringComparison.OrdinalIgnoreCase))
+                errors.Add(who + " FULL starts with \"Costume Box\" - a 1.6.3 DLL would hand it out");
+            if (marker != null &&
+                (armor.Keywords == null || !armor.Keywords.Any(k => k.FormKey == marker.FormKey)))
+                errors.Add(who + " does not carry " + kMarkerEdid);
+            if (armor.Armature.Count != 1) {
+                errors.Add(who + " references " + armor.Armature.Count + " ARMA (want exactly 1)");
+                continue;
+            }
+            var addon = addons.FirstOrDefault(a => a.FormKey == armor.Armature[0].FormKey);
+            if (addon == null) { errors.Add(who + " points at an ARMA outside this plugin"); continue; }
+
+            var mask = (uint)armor.BodyTemplate.FirstPersonFlags;
+            if (mask == 0) errors.Add(who + " has an empty BOD2");
+            if (mask != (uint)addon.BodyTemplate.FirstPersonFlags)
+                errors.Add(who + " BOD2 does not match its ARMA");
+            var slot = SlotOfMask(mask);
+            if (!coreBySlot.TryGetValue(slot, out var gen0)) {
+                errors.Add(who + " slot " + slot + " has no generation 0 token");
+            } else if (mask != (uint)gen0.BodyTemplate.FirstPersonFlags) {
+                // slot 31 is the one this catches: 31|41, not a single bit.
+                errors.Add(who + " BOD2 " + mask.ToString("X") + " differs from generation 0's " +
+                           ((uint)gen0.BodyTemplate.FirstPersonFlags).ToString("X") +
+                           " for slot " + slot);
+            } else {
+                var gen0Addon = core.ArmorAddons.FirstOrDefault(
+                    a => gen0.Armature.Count == 1 && a.FormKey == gen0.Armature[0].FormKey);
+                if (gen0Addon != null) {
+                    if (addon.Race.FormKey != gen0Addon.Race.FormKey)
+                        errors.Add(addon.EditorID + " RNAM differs from generation 0's");
+                    if (!addon.AdditionalRaces.Select(x => x.FormKey).ToHashSet()
+                            .SetEquals(gen0Addon.AdditionalRaces.Select(x => x.FormKey)))
+                        errors.Add(addon.EditorID + " additional-race list differs from generation 0's");
+                }
+            }
+
+            var key = CarrierKey(generation, armor.FormKey.ID);
+            if (!carrierKeys.Add(key)) errors.Add("duplicate carrier key " + key);
+            var expected = "CostumeFW\\" + key + "_carrier_r0.nif";
+            var male = addon.WorldModel?.Male?.File?.RawPath?.Replace('/', '\\');
+            var female = addon.WorldModel?.Female?.File?.RawPath?.Replace('/', '\\');
+            if (!string.Equals(male, expected, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(female, expected, StringComparison.OrdinalIgnoreCase))
+                errors.Add(addon.EditorID + " model path is not " + expected +
+                           " (got " + male + " / " + female + ")");
+        }
+
+        // The KID file beside it must name every token exactly once.
+        var kidPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".",
+            "CostumeFW_BoxPool" + generation + "_KID.ini");
+        if (!File.Exists(kidPath)) {
+            errors.Add("missing " + Path.GetFileName(kidPath));
+        } else {
+            var lines = File.ReadAllLines(kidPath)
+                .Where(l => l.StartsWith("Keyword =", StringComparison.Ordinal)).ToList();
+            if (lines.Count != armors.Count)
+                errors.Add("KID ini has " + lines.Count + " keyword lines for " + armors.Count +
+                           " token(s)");
+            foreach (var armor in armors) {
+                var key = CarrierKey(generation, armor.FormKey.ID);
+                var want = "Keyword = LoreBox_CEFTok_" + key + "|Armor|0x" +
+                           armor.FormKey.ID.ToString("X") + "~" + Path.GetFileName(path);
+                if (!lines.Contains(want)) errors.Add("KID ini is missing: " + want);
+            }
+        }
+
+        // P6. The carrier assets each token needs: the base NIF, eight rotation
+        // NIFs and eight rotation XMLs, all named after the carrier key. The
+        // pool ARMA points straight at _carrier_r0.nif, so a token whose files
+        // are missing from the archive is a box that renders nothing and says
+        // nothing - and the file list is long enough (17 per token) that a
+        // partial copy is easy to miss by eye.
+        if (meshRoot != null) {
+            var carrierDir = Path.Combine(meshRoot, "CostumeFW");
+            var xmlDir = Path.Combine(carrierDir, "XML");
+            var missing = 0;
+            string firstMissing = null;
+            foreach (var armor in armors) {
+                var key = CarrierKey(generation, armor.FormKey.ID);
+                var want = new List<string> { Path.Combine(carrierDir, key + "_carrier.nif") };
+                for (var r = 0; r < 8; r++) {
+                    want.Add(Path.Combine(carrierDir, key + "_carrier_r" + r + ".nif"));
+                    want.Add(Path.Combine(xmlDir, key + "_physics_r" + r + ".xml"));
+                }
+                foreach (var f in want) {
+                    if (!File.Exists(f)) {
+                        missing++;
+                        firstMissing ??= f;
+                    }
+                }
+            }
+            if (missing != 0)
+                errors.Add(missing + " carrier asset(s) missing under " + meshRoot +
+                           ", first: " + firstMissing);
+            else
+                Console.WriteLine("  carrier assets: " + (armors.Count * 17) +
+                                  " file(s) present under " + meshRoot);
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify pool " + generation + ": " + armors.Count + " ARMO + " +
+                          addons.Count + " ARMA, ESL, HEDR " + kHeaderVersion +
+                          ", masters/marker/BOD2-vs-gen0/races/carrier-keys/KID OK");
+        return 0;
+    }
+
+    // --- v1.6.4 ability pool generations -----------------------------------
+    // tools/make_ability_pool.py writes these; this says whether what it wrote
+    // is what the runtime will accept. The two halves that matter are the ones
+    // a mistake makes invisible until a save is already pointing into the file:
+    // the ESL flag (generation 1 is NOT ESL and can never become one; every
+    // later generation must be, or it burns a load-order slot for nothing), and
+    // a CONTIGUOUS run of local ids from 0x800 - because the runtime measures a
+    // generation's size by walking until an id stops resolving, so a gap at
+    // 0x8xx silently shortens the pool to that point.
+    private static int VerifyAbilityPool(int generation, string path)
+    {
+        if (generation < 1) {
+            Console.Error.WriteLine("generation must be >= 1");
+            return 1;
+        }
+        if (!File.Exists(path)) {
+            Console.Error.WriteLine("missing ability pool: " + path);
+            return 1;
+        }
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
+            ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
+        var errors = new List<string>();
+
+        var wantName = generation == 1 ? "CostumeFW_Abilities.esp"
+                                       : "CostumeFW_Abilities" + generation + ".esp";
+        if (!Path.GetFileName(path).Equals(wantName, StringComparison.OrdinalIgnoreCase))
+            errors.Add("generation " + generation + " must be named " + wantName + ", got " +
+                       Path.GetFileName(path));
+
+        var esl = (mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) != 0;
+        if (generation == 1 && esl)
+            errors.Add("generation 1 shipped WITHOUT the ESL flag and cannot gain it - the flag " +
+                       "changes how every form in the file is addressed");
+        if (generation >= 2 && !esl)
+            errors.Add("generation " + generation + " must carry the ESL flag");
+
+        if (Math.Abs(mod.ModHeader.Stats.Version - kHeaderVersion) > 0.001f)
+            errors.Add("HEDR version must be " + kHeaderVersion + ", got " +
+                       mod.ModHeader.Stats.Version);
+
+        var masters = mod.ModHeader.MasterReferences.Select(x => x.Master.FileName.String).ToList();
+        if (masters.Count != 1 || !masters[0].Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+            errors.Add("masters must be [Skyrim.esm], got [" + string.Join(", ", masters) + "]");
+
+        var spells = mod.Spells.ToList();
+        var others = mod.EnumerateMajorRecords()
+            .Where(x => x.FormKey.ModKey == mod.ModKey)
+            .Count() - spells.Count;
+        if (others != 0)
+            errors.Add("the pool must hold SPEL records only, found " + others + " other record(s)");
+
+        var wantCount = generation == 1 ? 1024 : 2048;
+        if (spells.Count != wantCount)
+            errors.Add("generation " + generation + " must hold " + wantCount + " abilities, got " +
+                       spells.Count);
+
+        var ids = spells.Select(x => x.FormKey.ID).OrderBy(x => x).ToList();
+        for (var i = 0; i < ids.Count; i++) {
+            var want = (uint)(0x800 + i);
+            if (ids[i] != want) {
+                errors.Add("local ids must run contiguously from 000800; expected " +
+                           want.ToString("X6") + " at position " + i + ", got " +
+                           ids[i].ToString("X6"));
+                break;
+            }
+        }
+        if (ids.Count > 0 && ids[ids.Count - 1] > 0xFFF)
+            errors.Add("local id " + ids[ids.Count - 1].ToString("X6") +
+                       " is outside the light range 800-FFF");
+
+        foreach (var spell in spells) {
+            var want = "CFW_Ability_" + (spell.FormKey.ID - 0x800).ToString("0000");
+            if (spell.EditorID != want)
+                errors.Add(spell.FormKey.ID.ToString("X6") + " EditorID is '" + spell.EditorID +
+                           "', expected '" + want + "'");
+            if (spell.Type != SpellType.Ability)
+                errors.Add(want + " is not an Ability spell");
+            if (spell.CastType != CastType.ConstantEffect)
+                errors.Add(want + " is not constant-effect");
+            if (spell.TargetType != TargetType.Self)
+                errors.Add(want + " does not target self");
+            if (spell.Effects.Count != 0)
+                errors.Add(want + " ships with " + spell.Effects.Count + " effect(s) - the pool " +
+                           "is empty by design and CEF fills it at kDataLoaded");
+        }
+
+        foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
+        if (errors.Count != 0) return 1;
+        Console.WriteLine("verify abilities " + generation + ": " + spells.Count +
+                          " SPEL, " + (esl ? "ESL" : "non-ESL") + ", HEDR " + kHeaderVersion +
+                          ", Skyrim.esm-only, ids/EDID/type/empty-effects OK");
+        return 0;
+    }
+
     private static int VerifyNpcAddon(string path)
     {
         if (!File.Exists(path)) {
             Console.Error.WriteLine("missing NPC add-on: " + path);
             return 1;
         }
-        var mod = SkyrimMod.CreateFromBinaryOverlay(
+        // using: the overlay memory-maps the file and HOLDS it. Without this the
+        // staged copy in --add-marker cannot be deleted after it verifies.
+        using var mod = SkyrimMod.CreateFromBinaryOverlay(
             ModPath.FromPath(path), SkyrimRelease.SkyrimSE);
         var errors = new List<string>();
         if ((mod.ModHeader.Flags & (SkyrimModHeader.HeaderFlag)0x200) == 0)
@@ -264,9 +987,23 @@ internal static class Program
 
         }
 
+        // Role split. This add-on and the core both pass "is it a CEF plugin",
+        // so what keeps a publish token out of the box pool is that it is not a
+        // box token: no CFW_BoxToken_* editor ID, and no box-token marker. Both
+        // are asserted here rather than left as a naming convention, because the
+        // convention is what failed - a display name is not identity.
+        foreach (var armor in mod.Armors) {
+            if (IsBoxTokenEdid(armor.EditorID))
+                errors.Add("ARMO " + armor.EditorID + " uses a box-token editor ID - it would " +
+                           "read as a box token");
+            if (armor.Keywords != null && armor.Keywords.Count != 0)
+                errors.Add("ARMO " + armor.EditorID + " carries keywords; this add-on's tokens " +
+                           "must carry none (a box-token marker here joins the box pool)");
+        }
+
         foreach (var error in errors) Console.Error.WriteLine("VERIFY FAIL: " + error);
         if (errors.Count != 0) return 1;
-        Console.WriteLine("verify NPC: 16 ARMO + 16 ARMA, ESL, Skyrim.esm-only, links/slots/races OK");
+        Console.WriteLine("verify NPC: 16 ARMO + 16 ARMA, ESL, Skyrim.esm-only, links/slots/races/role-split OK");
         return 0;
     }
 

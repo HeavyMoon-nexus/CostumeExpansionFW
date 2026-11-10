@@ -26,12 +26,18 @@ keep this notice, keep the license texts, keep the source link.
 | Windows CNG (bcrypt) | OS component | SHA-256 content hashing |
 | [SKSE Menu Framework](https://github.com/QTR-Modding/SKSE-Menu-Framework-3) consumer header (Thiago099 / QTR-Modding) | **LGPL-2.1** | in-game UI (v1.3+). Header-only, vendored at `src/external/` (pinned commit recorded alongside); all calls resolve the separately-installed SKSEMenuFramework.dll at runtime (dynamic linking — no SMF code is statically embedded). LGPL-2.1 is GPLv3-compatible. |
 
-## Legacy optional tool (not part of the mod package)
+## Legacy optional tool (removed in v1.6.4)
 
-`tools/nifcarrier` (C#) uses [NiflySharp](https://github.com/ousnius/NiflySharp)
-(GPL-3.0). It is a development/oracle tool and an external-process fallback; it
-is **not** shipped in the mod zip. Any separate distribution of that exe is a
-GPLv3 distribution and needs the same treatment (license text + source offer).
+`tools/nifcarrier` (C#, [NiflySharp](https://github.com/ousnius/NiflySharp),
+GPL-3.0) is **gone**. The carrier build was ported to C++ in v1.2.1 and has been
+the only shipping path ever since; nothing selected the external process at
+runtime, so the C# copy was a second implementation of `carriers.json` that no
+longer knew its current shape — running it by hand dropped the `published` and
+`npcPersist` entries (F19). It was never in the mod zip. Its history is in git.
+
+NiflySharp's GPL-3.0 obligations travelled with that exe only. The C++ carrier
+builder uses [nifly](https://github.com/ousnius/nifly) (GPL-3.0), listed above,
+so the GPLv3 treatment of the shipped package is unchanged.
 
 ## Packaging checklist (Nexus zip)
 

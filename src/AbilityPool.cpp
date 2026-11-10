@@ -1,11 +1,14 @@
 #include "AbilityPool.h"
 
 #include "AtomicWrite.h"
+#include "JsonRead.h"  // typed reads - the registry is read at kDataLoaded (C16)
 #include "AvDiag.h"  // AvConsoleName - the legacy report must name actor values
 #include "BoxStore.h"    // ContentEffectsFor - what a content is really worth
 #include "SkinRebind.h"  // ActiveSnapshot - what is worn RIGHT NOW
 #include "ConsoleOut.h"
 #include "FormId.h"
+#include "RegistryChecksum.h"  // shared with the host test (M13)
+#include "TokenIdentity.h"  // which generation a pool plugin name is
 
 #include "RE/E/Effect.h"
 #include "RE/E/EffectSetting.h"
@@ -20,12 +23,15 @@
 #include "RE/T/TESDataHandler.h"
 #include "RE/T/TESForm.h"
 
+#include <Windows.h>  // CopyFileA - the one-shot pre-1.6.4 registry copy
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <format>
 #include <optional>
@@ -42,12 +48,30 @@ namespace CostumeFW::abilities
     {
         void Print(std::string_view a_msg) { ConsolePrint(a_msg); }
 
+        // Generation 1's plugin. It shipped in 1.6.3 under this name and cannot
+        // be renamed, so it is the ONE exception in the generation naming - see
+        // tokenid::AbilityPoolPluginName. Still spelled out here because most of
+        // what the user is told names it.
         constexpr const char* kPoolPlugin = "CostumeFW_Abilities.esp";
         constexpr std::uint32_t kPoolBase = 0x800;
-        constexpr int kPoolSize = 1024;  // must match tools/make_ability_pool.py
+        // What generation 1 shipped with. Used ONLY to bound the schema-1
+        // migration - the live size of a generation is measured, not assumed,
+        // because the answer is whatever plugin is installed (see PoolLimit).
+        constexpr int kLegacyPoolSize = 1024;
+        // A generation cannot have more local ids than the ESL range holds, and
+        // the probe that measures one stops here rather than trusting a number
+        // in a file.
+        constexpr std::uint32_t kMaxPerGeneration = 0x1000 - 0x800;
 
         constexpr const char* kRegistryPath = "Data\\SKSE\\Plugins\\CEF_abilities.json";
-        constexpr int kSchema = 1;
+        // Kept at the moment 1.6.4 first reads a 1.6.3 registry, and never
+        // again. The .bak1/.bak2 rotation below is TWO writes deep, so it is
+        // gone after two allocations - this is the copy that makes going back to
+        // 1.6.3 a file copy rather than a reconstruction. CEF never reads it.
+        constexpr const char* kRegistryPre164Path =
+            "Data\\SKSE\\Plugins\\CEF_abilities.pre164.json";
+        constexpr int kSchema = 2;        // entries name an ability, not a slot
+        constexpr int kSchemaLegacy = 1;  // ... a slot index into generation 1
 
         // ---------------------------------------------------------------
         // Recipe
@@ -100,8 +124,35 @@ namespace CostumeFW::abilities
             std::vector<RecipeEffect> effects;
         };
 
-        std::vector<std::optional<Entry>> g_slots(kPoolSize);
-        std::unordered_map<std::string, int> g_byContent;  // content -> live slot
+        // WHICH ability, across generations: the pool plugin's generation number
+        // and the local FormID in it. Ordered by exactly that pair, which is the
+        // order §7.3 allocates in - so the map's own iteration order IS the
+        // allocation order, and every walk, listing and diagnostic comes out
+        // stable without sorting anything.
+        //
+        // The local id alone does not identify an ability: generation 1's 0x800
+        // and generation 2's 0x800 are different spells in different plugins,
+        // and a save can hold either.
+        struct PoolKey
+        {
+            int generation{ 0 };
+            std::uint32_t local{ 0 };
+            auto operator<=>(const PoolKey&) const = default;
+        };
+
+        std::map<PoolKey, Entry> g_entries;
+        std::unordered_map<std::string, PoolKey> g_byContent;  // content -> live ability
+
+        // Generations 1..N, contiguous from 1, as measured at kDataLoaded. A
+        // generation installed ABOVE a gap is deliberately not in here: §4.2
+        // stops new allocation on a broken run rather than skipping over it.
+        std::vector<int> g_generations;
+        std::unordered_map<int, std::uint32_t> g_genCount;  // generation -> abilities in it
+        // Generations the registry names that are not loaded. Non-empty is the
+        // fail-closed case (§7.4): a save holds abilities whose forms are gone.
+        std::set<int> g_missingGenerations;
+        // Set when the registry that was read was written by 1.6.3.
+        bool g_migratedFromSchema1 = false;
         State g_state = State::Uninitialized;
         std::string g_why;
         std::string g_legacyReport;  // set when a pre-1.6.3 save is loaded
@@ -133,30 +184,102 @@ namespace CostumeFW::abilities
         // Forms
         // ---------------------------------------------------------------
 
+        // Through the one range-checked resolver (review 2026-09-23 C11): a
+        // recipe's magic effect or condition form saved against a plugin that
+        // was later ESL-flagged must come back unresolved - which the hydrate
+        // pass already handles - not as another plugin's record.
         RE::TESForm* LookupColon(const std::string& a_id)
         {
-            const auto colon = a_id.find(':');
-            if (colon == std::string::npos) {
-                return nullptr;
-            }
-            std::uint32_t local = 0;
-            try {
-                local = static_cast<std::uint32_t>(std::stoul(a_id.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return nullptr;
-            }
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            return dh ? dh->LookupForm(local, a_id.substr(colon + 1)) : nullptr;
+            const std::uint32_t id = ResolveFormId(a_id);
+            return id ? RE::TESForm::LookupByID(id) : nullptr;
         }
 
-        RE::SpellItem* PoolSpell(int a_slot)
+        // The canonical colon-id of a pool ability, which is what the registry
+        // stores and what a diagnostic prints.
+        std::string ColonIdOf(PoolKey a_key)
         {
-            if (a_slot < 0 || a_slot >= kPoolSize) {
+            const auto plugin = tokenid::AbilityPoolPluginName(a_key.generation);
+            return plugin.empty() ? std::string{} : std::format("{:06X}:{}", a_key.local, plugin);
+        }
+
+        // ... and back. False for anything that is not one of ours: a plugin
+        // name no generation owns, a local id outside the ESL range, a malformed
+        // id. The caller refuses the registry rather than guessing.
+        bool ParseAbilityId(const std::string& a_id, PoolKey& a_out)
+        {
+            const auto colon = a_id.find(':');
+            if (colon == std::string::npos || colon == 0 || colon + 1 >= a_id.size()) {
+                return false;
+            }
+            const auto hex = a_id.substr(0, colon);
+            if (hex.size() > 8 ||
+                hex.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+                return false;  // bounded so the conversion below cannot throw
+            }
+            const int generation = tokenid::AbilityPoolGeneration(a_id.substr(colon + 1));
+            if (generation <= 0) {
+                return false;
+            }
+            const auto local = static_cast<std::uint32_t>(std::stoul(hex, nullptr, 16));
+            if (local < kPoolBase || local >= kPoolBase + kMaxPerGeneration) {
+                return false;
+            }
+            a_out = PoolKey{ generation, local };
+            return true;
+        }
+
+        RE::SpellItem* PoolSpell(PoolKey a_key)
+        {
+            const auto id = ColonIdOf(a_key);
+            if (id.empty()) {
                 return nullptr;
             }
-            auto* form = LookupColon(std::format(
-                "{:06X}:{}", kPoolBase + static_cast<std::uint32_t>(a_slot), kPoolPlugin));
+            auto* form = LookupColon(id);
             return form ? form->As<RE::SpellItem>() : nullptr;
+        }
+
+        // How many abilities a generation actually holds, measured by walking it
+        // until a local id stops resolving. Nothing in a file is trusted for
+        // this: the count is a property of the plugin that is installed, and a
+        // count read from the registry would be a second place for it to be
+        // wrong. Called once per generation at kDataLoaded.
+        std::uint32_t PoolLimit(int a_generation)
+        {
+            std::uint32_t n = 0;
+            while (n < kMaxPerGeneration && PoolSpell(PoolKey{ a_generation, kPoolBase + n })) {
+                ++n;
+            }
+            return n;
+        }
+
+        // The generations installed, contiguous from 1. A generation above a gap
+        // is left out on purpose (§4.2): allocating into it would put a save's
+        // ability in a plugin the user is one step away from removing, and the
+        // gap is what the diagnostic has to name.
+        void MeasureGenerations()
+        {
+            g_generations.clear();
+            g_genCount.clear();
+            for (int generation = 1; generation <= 99; ++generation) {
+                const auto plugin = tokenid::AbilityPoolPluginName(generation);
+                if (plugin.empty() || !PluginIsLoaded(plugin)) {
+                    break;
+                }
+                const auto count = PoolLimit(generation);
+                if (count == 0) {
+                    SKSE::log::error("abilities: {} is loaded but holds no pool spell at {:06X}",
+                        plugin, kPoolBase);
+                    break;
+                }
+                g_generations.push_back(generation);
+                g_genCount[generation] = count;
+                SKSE::log::info("abilities: {} - {} ability slot(s)", plugin, count);
+            }
+        }
+
+        bool GenerationInstalled(int a_generation)
+        {
+            return g_genCount.contains(a_generation);
         }
 
         // Turn condition parameters that are really form pointers into colon
@@ -178,7 +301,12 @@ namespace CostumeFW::abilities
                 return out;
             }
             const auto& [map, lock] = RE::TESForm::GetAllForms();
-            [[maybe_unused]] const RE::BSReadWriteLock l{ lock };
+            // A read GUARD on the engine's lock. The line here was
+            // `const BSReadWriteLock l{ lock }` - CommonLib's own LookupByID
+            // pattern - which constructs a second, unrelated lock object and
+            // holds nothing, while this walks the entire form map (review
+            // 2026-09-23 M9).
+            const RE::BSReadLockGuard guard{ lock.get() };
             if (!map) {
                 return out;
             }
@@ -283,6 +411,16 @@ namespace CostumeFW::abilities
                     a_why = std::format("magic effect {} has no defining plugin", re.mgef);
                     return false;
                 }
+                // The recipe is written into the registry, which is JSON, and an
+                // id carries its plugin's file name - in a legacy codepage it is
+                // not UTF-8 text and the write throws (review 2026-09-23 C1). The
+                // whole recipe goes, like any other field that cannot be saved.
+                if (!policy::IsStrictUtf8(re.mgef)) {
+                    a_why = std::format(
+                        "magic effect {} comes from a plugin whose name is not UTF-8 text",
+                        re.mgef);
+                    return false;
+                }
                 re.magnitude = e ? e->effectItem.magnitude : se.magnitude;
                 re.area = e ? e->effectItem.area : 0u;
                 re.duration = e ? e->effectItem.duration : 0u;
@@ -314,6 +452,12 @@ namespace CostumeFW::abilities
                             a_why = "a condition compares against a global that cannot be identified";
                             return false;
                         }
+                        if (!policy::IsStrictUtf8(it->second)) {  // C1, as above
+                            a_why = std::format(
+                                "a condition compares against {}, whose plugin name is not "
+                                "UTF-8 text", it->second);
+                            return false;
+                        }
                         rc.compareGlobal = it->second;
                     } else {
                         rc.compareFloat = c->data.comparisonValue.f;
@@ -324,6 +468,12 @@ namespace CostumeFW::abilities
                             reinterpret_cast<std::uint64_t>(c->data.functionData.params[i]);
                         const auto it = resolved.find(raw);
                         if (it != resolved.end()) {
+                            if (!policy::IsStrictUtf8(it->second)) {  // C1, as above
+                                a_why = std::format(
+                                    "a condition names {}, whose plugin name is not UTF-8 text",
+                                    it->second);
+                                return false;
+                            }
                             rc.params[i].isForm = true;
                             rc.params[i].form = it->second;
                         } else {
@@ -367,16 +517,6 @@ namespace CostumeFW::abilities
         // ---------------------------------------------------------------
         // Registry
         // ---------------------------------------------------------------
-
-        std::uint64_t Fnv1a(std::string_view a_text)
-        {
-            std::uint64_t h = 1469598103934665603ull;
-            for (const unsigned char c : a_text) {
-                h ^= c;
-                h *= 1099511628211ull;
-            }
-            return h;
-        }
 
         nlohmann::json ToJson(const RecipeCondition& a_c)
         {
@@ -455,27 +595,35 @@ namespace CostumeFW::abilities
         nlohmann::json AbilitiesArray()
         {
             auto arr = nlohmann::json::array();
-            for (int i = 0; i < kPoolSize; ++i) {
-                const auto& s = g_slots[static_cast<std::size_t>(i)];
-                if (!s) {
-                    continue;
-                }
+            for (const auto& [key, e] : g_entries) {
                 nlohmann::json j;
-                j["slot"] = i;
-                j["content"] = s->content;
-                j["generation"] = s->generation;
-                j["tombstone"] = s->tombstone;
-                j["effects"] = EffectsJson(s->effects);
+                // Schema 2 names the ABILITY, not a slot index: a slot index
+                // only identified anything while there was one pool plugin.
+                j["ability"] = ColonIdOf(key);
+                j["content"] = e.content;
+                // Renamed from "generation" (§7.2 / A17). This is the RECIPE
+                // generation - how many times this content's enchantment has
+                // changed - and sat one word away from the POOL generation,
+                // which is now a real number in the same file.
+                j["recipeGeneration"] = e.generation;
+                j["tombstone"] = e.tombstone;
+                j["effects"] = EffectsJson(e.effects);
                 arr.push_back(j);
             }
             return arr;
         }
 
-        // Rotate two generations before replacing. The registry is the only
-        // record of which ability a save is pointing at: lose it and the saves
-        // are not recoverable by inspection, because a pool spell says nothing
-        // about who it was for. Losing settings loses a preference; losing this
-        // loses the mapping.
+        // Keep two generations of backup. The registry is the only record of
+        // which ability a save is pointing at: lose it and the saves are not
+        // recoverable by inspection, because a pool spell says nothing about who
+        // it was for. Losing settings loses a preference; losing this loses the
+        // mapping.
+        //
+        // Called AFTER a successful write, so .bak1 is always the newest file
+        // that was written - a copy of the current one. Called before, it held
+        // the one before the latest allocation, and `cef abilities restore`
+        // then brought back a registry that did not know that allocation: the
+        // very drift the backup is there to prevent (review 2026-09-23 C7).
         void RotateBackups()
         {
             namespace fs = std::filesystem;
@@ -488,33 +636,122 @@ namespace CostumeFW::abilities
                 fs::copy_options::overwrite_existing, ec);
         }
 
+        // Taken at the moment 1.6.4 has just read a 1.6.3 registry, and never
+        // again. CopyFileA with bFailIfExists=TRUE is the whole "once"
+        // mechanism: no flag to keep in step, and a pre164 file the user
+        // restored by hand is not silently overwritten (same shape as the
+        // settings one in BoxStore).
+        void MaybeWritePre164Registry()
+        {
+            if (!g_migratedFromSchema1) {
+                return;
+            }
+            if (::CopyFileA(kRegistryPath, kRegistryPre164Path, TRUE)) {
+                SKSE::log::info(
+                    "abilities: kept the 1.6.3 registry as {} before writing schema {} "
+                    "(CEF never reads it; it is there if you go back)",
+                    kRegistryPre164Path, kSchema);
+            } else if (::GetLastError() != ERROR_FILE_EXISTS) {
+                SKSE::log::warn("abilities: could not keep a pre-1.6.4 copy at {} (error {})",
+                    kRegistryPre164Path, ::GetLastError());
+            }
+        }
+
         bool SaveRegistry()
         {
             nlohmann::json doc;
             doc["schema"] = kSchema;
             const auto arr = AbilitiesArray();
-            const auto body = arr.dump();
-            doc["checksum"] = std::format("{:016x}", Fnv1a(body));
-            doc["abilities"] = arr;
+            // dump() throws on text that is not UTF-8 instead of writing it
+            // (review 2026-09-23 C1): a content id, a magic effect or a condition
+            // form from a plugin whose name is in a legacy codepage. Not written
+            // is the answer every caller already has for a disk that refused -
+            // Allocate takes its entry back out, the rest simply do not persist.
+            std::string text;
+            try {
+                doc["checksum"] = RegistryChecksum(arr);
+                doc["abilities"] = arr;
+                text = doc.dump(2);
+            } catch (const nlohmann::json::exception& e) {
+                SKSE::log::error("abilities: {} NOT written - {} (text that is not UTF-8) - no new "
+                                 "allocation is in effect",
+                    kRegistryPath, e.what());
+                return false;
+            }
 
-            RotateBackups();
-            if (!WriteFileAtomic(kRegistryPath, doc.dump(2))) {
+            if (!WriteFileAtomic(kRegistryPath, text)) {
                 SKSE::log::error("abilities: could not write {} - no new allocation is in effect",
                     kRegistryPath);
                 return false;
             }
+            RotateBackups();
             return true;
         }
 
+        // Whether a file is there at all - as opposed to there and unreadable.
+        bool FileThere(const char* a_path)
+        {
+            if (::GetFileAttributesA(a_path) != INVALID_FILE_ATTRIBUTES) {
+                return true;
+            }
+            const DWORD err = ::GetLastError();
+            return err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND;
+        }
+
+        bool LoadRegistryEntries(std::string& a_why);  // fwd (below)
+
         // Returns false only for a registry that EXISTS and is broken. A
         // missing file is a first run.
+        //
+        // A refusal leaves NOTHING half-read in memory: every false path clears
+        // the entries it had got through, so a disabled pool lists and counts
+        // nothing rather than whatever came before the line that failed.
         bool LoadRegistry(std::string& a_why)
         {
-            g_slots.assign(kPoolSize, std::nullopt);
+            g_entries.clear();
             g_byContent.clear();
+            g_missingGenerations.clear();
+            g_migratedFromSchema1 = false;
+            if (LoadRegistryEntries(a_why)) {
+                return true;
+            }
+            g_entries.clear();
+            g_byContent.clear();
+            return false;
+        }
 
+        bool LoadRegistryEntries(std::string& a_why)
+        {
             std::ifstream in(kRegistryPath);
             if (!in) {
+                // "No registry" used to mean "first run", and that is only one of
+                // the ways to get here. An Overwrite clean-up in MO2, a profile
+                // move, a file held by a sync client - every one of them made an
+                // empty, Ready pool, and the first convergence then handed the
+                // exact abilities a save was holding to OTHER contents, with no
+                // word anywhere (review 2026-09-23 C7). Only a registry that was
+                // never written is a first run: none of its backups exist either.
+                const std::string bak1 = std::string(kRegistryPath) + ".bak1";
+                if (FileThere(kRegistryPath)) {
+                    a_why = std::format("{} is there but cannot be opened - close whatever is "
+                                        "holding it (a sync client, an editor)",
+                        kRegistryPath);
+                    return false;
+                }
+                if (FileThere(bak1.c_str())) {
+                    a_why = std::format("{} is missing but its backup is not, so this is not a "
+                                        "first run - refusing to start an empty registry",
+                        kRegistryPath);
+                    return false;
+                }
+                if (FileThere(kRegistryPre164Path)) {
+                    a_why = std::format(
+                        "{} is missing but {} (the 1.6.3 copy) is not, so this is not a first "
+                        "run - refusing to start an empty registry. If you have no newer copy, "
+                        "copy that file to CEF_abilities.json",
+                        kRegistryPath, kRegistryPre164Path);
+                    return false;
+                }
                 return true;
             }
             nlohmann::json doc;
@@ -524,18 +761,36 @@ namespace CostumeFW::abilities
                 a_why = std::format("{} is not readable ({})", kRegistryPath, e.what());
                 return false;
             }
-            const int schema = doc.value("schema", 0);
-            if (schema != kSchema) {
-                a_why = std::format("{} is schema {}, this build reads {}", kRegistryPath, schema,
-                    kSchema);
+            // Every read from here on is typed. This runs synchronously at
+            // kDataLoaded, so a throw out of it is a crash at EVERY launch - and
+            // one the console never gets to see, which puts `cef abilities
+            // restore` out of reach and leaves deleting the file, straight into
+            // the C7 case (review 2026-09-23 C16). value() throws on a root that
+            // is not an object and on a field of the wrong type, so it is not
+            // used on anything that decides whether the file is sound.
+            if (!doc.is_object()) {
+                a_why = std::format("{} is not a JSON object", kRegistryPath);
                 return false;
             }
-            if (!doc.contains("abilities") || !doc["abilities"].is_array()) {
+            const auto schemaIt = doc.find("schema");
+            if (schemaIt == doc.end() || !schemaIt->is_number_integer()) {
+                a_why = std::format("{} has no schema number this build can read", kRegistryPath);
+                return false;
+            }
+            const int schema = schemaIt->get<int>();
+            if (schema != kSchema && schema != kSchemaLegacy) {
+                a_why = std::format("{} is schema {}, this build reads {} and {}", kRegistryPath,
+                    schema, kSchemaLegacy, kSchema);
+                return false;
+            }
+            const auto listIt = doc.find("abilities");
+            if (listIt == doc.end() || !listIt->is_array()) {
                 a_why = std::format("{} has no abilities list", kRegistryPath);
                 return false;
             }
-            const auto stored = doc.value("checksum", std::string{});
-            const auto actual = std::format("{:016x}", Fnv1a(doc["abilities"].dump()));
+            // A checksum of the wrong type reads as none, which cannot match.
+            const auto stored = JsonStr(doc, "checksum");
+            const auto actual = RegistryChecksum(*listIt);
             if (stored != actual) {
                 a_why = std::format("{} does not match its own checksum - it has been edited or "
                                     "truncated (a copy of the last two good ones is beside it)",
@@ -543,16 +798,45 @@ namespace CostumeFW::abilities
                 return false;
             }
 
-            for (const auto& j : doc["abilities"]) {
-                const int slot = j.value("slot", -1);
-                if (slot < 0 || slot >= kPoolSize) {
-                    a_why = std::format("{} refers to slot {}, which is outside the pool",
-                        kRegistryPath, slot);
+            // The checksum says CEF wrote this list, so the entries should all be
+            // well-formed - but a list CEF wrote with a bug in it is exactly the
+            // case that must not become a crash at every launch. Any throw below
+            // is the whole registry refused, like every other reason here.
+            try {
+            for (const auto& j : *listIt) {
+                PoolKey key;
+                if (schema == kSchemaLegacy) {
+                    // §7.2. 1.6.3 stored an index into the only pool there was,
+                    // so the ability it meant is arithmetic, not a guess. The
+                    // range is checked before anything is written: a migration
+                    // that runs on a file it did not fully understand is how a
+                    // save ends up pointing at the wrong spell.
+                    const int slot = j.value("slot", -1);
+                    if (slot < 0 || slot >= kLegacyPoolSize) {
+                        a_why = std::format("{} refers to slot {}, which is outside the pool",
+                            kRegistryPath, slot);
+                        return false;
+                    }
+                    key = PoolKey{ 1, kPoolBase + static_cast<std::uint32_t>(slot) };
+                } else {
+                    const auto id = j.value("ability", std::string{});
+                    if (!ParseAbilityId(id, key)) {
+                        a_why = std::format("{} names the ability '{}', which is not one of the "
+                                            "pool plugins this build knows",
+                            kRegistryPath, id);
+                        return false;
+                    }
+                }
+                if (g_entries.contains(key)) {
+                    a_why = std::format("{} names the ability {} twice", kRegistryPath,
+                        ColonIdOf(key));
                     return false;
                 }
                 Entry e;
                 e.content = j.value("content", std::string{});
-                e.generation = j.value("generation", 0u);
+                // "generation" was the schema-1 spelling of recipeGeneration.
+                e.generation = schema == kSchemaLegacy ? j.value("generation", 0u)
+                                                       : j.value("recipeGeneration", 0u);
                 e.tombstone = j.value("tombstone", false);
                 for (const auto& ej : j.value("effects", nlohmann::json::array())) {
                     RecipeEffect re;
@@ -564,9 +848,9 @@ namespace CostumeFW::abilities
                     for (const auto& cj : ej.value("conditions", nlohmann::json::array())) {
                         RecipeCondition rc;
                         if (!FromJson(cj, rc)) {
-                            a_why = std::format("{} has a condition this build cannot read (slot "
-                                                "{})",
-                                kRegistryPath, slot);
+                            a_why = std::format(
+                                "{} has a condition this build cannot read ({})", kRegistryPath,
+                                ColonIdOf(key));
                             return false;
                         }
                         re.conditions.push_back(std::move(rc));
@@ -574,9 +858,25 @@ namespace CostumeFW::abilities
                     e.effects.push_back(std::move(re));
                 }
                 if (!e.tombstone && !e.content.empty()) {
-                    g_byContent[e.content] = slot;
+                    g_byContent[e.content] = key;
                 }
-                g_slots[static_cast<std::size_t>(slot)] = std::move(e);
+                g_entries.emplace(key, std::move(e));
+            }
+            } catch (const nlohmann::json::exception& e) {
+                a_why = std::format("{} has an entry this build cannot read ({})", kRegistryPath,
+                    e.what());
+                return false;
+            }
+            if (schema == kSchemaLegacy) {
+                g_migratedFromSchema1 = true;
+                SKSE::log::info(
+                    "abilities: read a schema {} registry - {} entry(ies) migrated to generation 1 "
+                    "abilities", kSchemaLegacy, g_entries.size());
+                // Before this build can write over it, and only once (§7.2 /
+                // test A9). Done HERE rather than at the first save because a
+                // session that loads and never allocates must still leave the
+                // way back.
+                MaybeWritePre164Registry();
             }
             return true;
         }
@@ -623,16 +923,17 @@ namespace CostumeFW::abilities
         // holding the spell yet - which is the rule that matters, because
         // rewriting the effect list under a live ability is what strands a
         // modifier in the first place.
-        bool Hydrate(int a_slot)
+        bool Hydrate(PoolKey a_key)
         {
-            auto& s = g_slots[static_cast<std::size_t>(a_slot)];
-            if (!s) {
+            const auto it = g_entries.find(a_key);
+            if (it == g_entries.end()) {
                 return true;
             }
-            auto* spell = PoolSpell(a_slot);
+            Entry* s = &it->second;
+            auto* spell = PoolSpell(a_key);
             if (!spell) {
                 s->invalid = true;
-                SKSE::log::error("abilities: slot {} does not resolve in {}", a_slot, kPoolPlugin);
+                SKSE::log::error("abilities: {} does not resolve", ColonIdOf(a_key));
                 return false;
             }
 
@@ -642,9 +943,9 @@ namespace CostumeFW::abilities
                 auto* mgef = LookupColon(re.mgef);
                 auto* base = mgef ? mgef->As<RE::EffectSetting>() : nullptr;
                 if (!base) {
-                    SKSE::log::warn("abilities: slot {} wants magic effect {}, which does not "
+                    SKSE::log::warn("abilities: {} wants magic effect {}, which does not "
                                     "resolve - is its plugin still enabled?",
-                        a_slot, re.mgef);
+                        ColonIdOf(a_key), re.mgef);
                     // Remember WHICH plugin, so the warning can name it. The
                     // effect list is left untouched below, which means the
                     // spell stays the empty form the pool plugin ships - and an
@@ -690,9 +991,9 @@ namespace CostumeFW::abilities
                 // is more ways to be wrong than the handful of bytes is worth
                 // on a path that only runs when something is already broken.
                 s->invalid = true;
-                SKSE::log::error("abilities: slot {} ({}) could not be rebuilt - it will not be "
+                SKSE::log::error("abilities: {} ({}) could not be rebuilt - it will not be "
                                  "granted to anyone",
-                    a_slot, s->content);
+                    ColonIdOf(a_key), s->content);
                 return false;
             }
 
@@ -704,18 +1005,61 @@ namespace CostumeFW::abilities
             return true;
         }
 
-        // Take the next free slot for a content and make it live: build the
+        // The next ability §7.3 would lend out: generations ascending, local id
+        // ascending within each. Never one that is already in the registry, not
+        // even a tombstoned one - an old save can still name it, and handing it
+        // to other content would pay somebody else's bonus rather than none at
+        // all, which is harder to notice than a missing one (design 5.2).
+        //
+        // One merged walk rather than a lookup per candidate: g_entries is
+        // ordered by the very key this iterates, so the cursor only moves
+        // forward.
+        std::optional<PoolKey> FirstFreeAbility()
+        {
+            auto it = g_entries.begin();
+            for (const int generation : g_generations) {
+                const auto count = g_genCount[generation];
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    const PoolKey key{ generation, kPoolBase + i };
+                    while (it != g_entries.end() && it->first < key) {
+                        ++it;
+                    }
+                    if (it == g_entries.end() || it->first != key) {
+                        return key;
+                    }
+                    ++it;
+                }
+            }
+            return std::nullopt;
+        }
+
+        // Take the next free ability for a content and make it live: build the
         // recipe, write the registry, fill the spell.
         RE::SpellItem* Allocate(const std::string& a_contentId,
             const std::vector<SourceEffect>& a_effects, std::uint32_t a_generation)
         {
+            // The content id is written into the registry too (C1). A capture
+            // cannot produce one that is not UTF-8 text, but the console's
+            // `cef abilities alloc` takes whatever is typed.
+            if (!policy::IsStrictUtf8(a_contentId)) {
+                SKSE::log::warn("abilities: '{}' is not UTF-8 text - no ability allocated",
+                    a_contentId);
+                return nullptr;
+            }
             std::vector<RecipeEffect> effects;
             std::string why;
             if (!BuildRecipe(a_effects, effects, why)) {
                 // The WHOLE enchantment is refused, not the one effect that
                 // failed (design 5.7). Half an enchantment is a different
                 // enchantment, and the author did not design that one.
-                SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId, why);
+                // Said once per content per session: this runs on every
+                // convergence - every equip event - for every piece with no
+                // enchantment, and the log flushes per line (W13).
+                static std::unordered_set<std::string> s_said;
+                if (s_said.insert(a_contentId).second) {
+                    SKSE::log::info("abilities: {} passes no stats through - {}", a_contentId,
+                        why);
+                }
                 return nullptr;
             }
 
@@ -731,24 +1075,23 @@ namespace CostumeFW::abilities
             // the next toggle doing it again. Slots are never handed to other
             // content (5.2), so one burned this way is burned for good.
             const auto wanted = EffectsJson(effects);
-            for (int i = 0; i < kPoolSize; ++i) {
-                auto& e = g_slots[static_cast<std::size_t>(i)];
-                if (!e || e->invalid || e->content != a_contentId) {
+            for (auto& [key, e] : g_entries) {
+                if (e.invalid || e.content != a_contentId) {
                     continue;
                 }
-                if (EffectsJson(e->effects) != wanted) {
+                if (EffectsJson(e.effects) != wanted) {
                     continue;
                 }
-                const bool revived = e->tombstone;
-                e->tombstone = false;
-                g_byContent[a_contentId] = i;
+                const bool revived = e.tombstone;
+                e.tombstone = false;
+                g_byContent[a_contentId] = key;
                 if (revived) {
                     SaveRegistry();
-                    SKSE::log::info("abilities: {} is worth what slot {} (gen{}) already holds - "
-                                    "reviving it, no new slot taken",
-                        a_contentId, i, e->generation);
+                    SKSE::log::info("abilities: {} is worth what {} (recipe gen{}) already holds - "
+                                    "reviving it, no new ability taken",
+                        a_contentId, ColonIdOf(key), e.generation);
                 }
-                return PoolSpell(i);
+                return PoolSpell(key);
             }
 
             // Monotonic: never reuse a slot for DIFFERENT content, not even a
@@ -757,40 +1100,37 @@ namespace CostumeFW::abilities
             // at all - a wrong number is harder to notice than a missing one
             // (design 5.2). The revival above is the same content at the same
             // value, which is the one case that cannot be mistaken for another.
-            int slot = -1;
-            for (int i = 0; i < kPoolSize; ++i) {
-                if (!g_slots[static_cast<std::size_t>(i)]) {
-                    slot = i;
-                    break;
-                }
-            }
-            if (slot < 0) {
-                SKSE::log::error("abilities: the pool is full ({} slots). New content keeps its "
-                                 "looks and loses its stats; everything already allocated is "
-                                 "unaffected.",
-                    kPoolSize);
+            const auto picked = FirstFreeAbility();
+            if (!picked) {
+                const auto u = PoolUsage();
+                SKSE::log::error(
+                    "abilities: the pool is full ({} abilities across {} generation(s)). New "
+                    "content keeps its looks and loses its stats; everything already allocated is "
+                    "unaffected. Install {} to add more.",
+                    u.total, g_generations.size(), NextPoolPluginName());
                 return nullptr;
             }
+            const PoolKey key = *picked;
 
             Entry e;
             e.content = a_contentId;
             e.generation = a_generation;
             e.effects = std::move(effects);
-            g_slots[static_cast<std::size_t>(slot)] = std::move(e);
+            g_entries.emplace(key, std::move(e));
 
-            // Registry BEFORE the form (design 6). A slot in use but not on
+            // Registry BEFORE the form (design 6). An ability in use but not on
             // disk would be handed out again next launch, to different content,
             // while a save still points at it.
             if (!SaveRegistry()) {
-                g_slots[static_cast<std::size_t>(slot)].reset();
+                g_entries.erase(key);
                 return nullptr;
             }
-            if (!Hydrate(slot)) {
+            if (!Hydrate(key)) {
                 return nullptr;
             }
-            g_byContent[a_contentId] = slot;
-            SKSE::log::info("abilities: {} -> slot {} gen{} ({} effect(s))", a_contentId, slot,
-                a_generation, g_slots[static_cast<std::size_t>(slot)]->effects.size());
+            g_byContent[a_contentId] = key;
+            SKSE::log::info("abilities: {} -> {} recipe gen{} ({} effect(s))", a_contentId,
+                ColonIdOf(key), a_generation, g_entries.at(key).effects.size());
 
             // Say something while there is still room to act. "The pool is full"
             // arrives when the only remaining advice is that the next costume
@@ -807,7 +1147,7 @@ namespace CostumeFW::abilities
                         u.free, u.total, u.used, u.tombstoned);
                 }
             }
-            return PoolSpell(slot);
+            return PoolSpell(key);
         }
     }
 
@@ -820,19 +1160,16 @@ namespace CostumeFW::abilities
         g_state = State::Uninitialized;
         g_why.clear();
 
-        // 1. Is the pool there, and big enough?
-        auto* first = PoolSpell(0);
-        auto* last = PoolSpell(kPoolSize - 1);
-        const bool poolPresent = first && last;
+        // 1. Which generations are installed, and how big is each?
+        MeasureGenerations();
+        const bool poolPresent = !g_generations.empty();
 
         // 2. Read the registry regardless, because whether a MISSING pool is a
         //    broken install or simply an option the user did not tick is
         //    decided by whether anything was ever allocated (design 5.9).
         std::string why;
         const bool registryOk = LoadRegistry(why);
-        const bool registryEmpty = g_byContent.empty() &&
-            std::none_of(g_slots.begin(), g_slots.end(),
-                [](const auto& s) { return s.has_value(); });
+        const bool registryEmpty = g_byContent.empty() && g_entries.empty();
 
         if (!registryOk) {
             // "Nothing has been changed" was true and not enough. With the
@@ -890,21 +1227,63 @@ namespace CostumeFW::abilities
             }
             return;
         }
+        // 2b. §7.4. A generation the registry NAMES but that is not loaded is the
+        //     same danger as the whole pool being gone, in miniature: those
+        //     spells do not resolve, the engine drops the active effects that
+        //     named them without calling Finish(), and the modifiers are already
+        //     stranded. It is NOT healed by re-pointing those entries at another
+        //     pool's same local id - that would pay a different bonus - and the
+        //     registry is not shrunk to fit.
+        for (const auto& [key, e] : g_entries) {
+            if (!GenerationInstalled(key.generation)) {
+                g_missingGenerations.insert(key.generation);
+            }
+        }
+        if (!g_missingGenerations.empty()) {
+            const int firstMissing = *g_missingGenerations.begin();
+            int affected = 0;
+            for (const auto& [key, e] : g_entries) {
+                affected += g_missingGenerations.contains(key.generation) ? 1 : 0;
+            }
+            Disable(std::format(
+                "{0} is not loaded, and this save uses {1} ability(ies) from it.\n\n"
+                "Loading without it has already left those bonuses stuck on your character, and "
+                "there is nothing left to say where they came from.\n\n"
+                "DO NOT SAVE. Quit to desktop, turn {0} back on, and load this save again. The "
+                "bonuses come off by themselves once it is there.\n\n"
+                "Save while it is missing and the numbers are baked into that save for good.",
+                tokenid::AbilityPoolPluginName(firstMissing), affected));
+            return;
+        }
+        // An UNREFERENCED generation above a gap is not an error to act on, but
+        // it is not usable either: §4.2 allocates into a contiguous run only, so
+        // say so rather than leaving the user to wonder why their new plugin
+        // changed nothing.
+        for (int generation = static_cast<int>(g_generations.size()) + 2; generation <= 99;
+             ++generation) {
+            const auto plugin = tokenid::AbilityPoolPluginName(generation);
+            if (!plugin.empty() && PluginIsLoaded(plugin)) {
+                SKSE::log::warn(
+                    "abilities: {} is loaded but {} is not - a generation cannot be skipped, so "
+                    "nothing will be allocated from it until the gap is filled",
+                    plugin, tokenid::AbilityPoolPluginName(
+                        static_cast<int>(g_generations.size()) + 1));
+                break;
+            }
+        }
+
         // PoolValidated -> RecipesLoaded, both reached by getting here: the pool
-        // resolved at both ends and the registry parsed with a matching
-        // checksum. They are named in the enum because the design names them,
-        // not because anything can observe the gap.
+        // resolved and the registry parsed with a matching checksum. They are
+        // named in the enum because the design names them, not because anything
+        // can observe the gap.
         g_state = State::RecipesLoaded;
 
         // 3. Fill every allocated ability NOW, before any save can be read.
         //    Measured: doing this after the save is up strands the modifier.
         int ok = 0;
         int bad = 0;
-        for (int i = 0; i < kPoolSize; ++i) {
-            if (!g_slots[static_cast<std::size_t>(i)]) {
-                continue;
-            }
-            if (Hydrate(i)) {
+        for (const auto& [key, e] : g_entries) {
+            if (Hydrate(key)) {
                 ++ok;
             } else {
                 ++bad;
@@ -971,21 +1350,94 @@ namespace CostumeFW::abilities
         RunAfterDelayMs(3000, [box] { RE::DebugMessageBox(box.c_str()); });
     }
 
+    int AuditSaveAbilities(const std::vector<RE::Actor*>& a_actors)
+    {
+        if (!Ready()) {
+            return 0;
+        }
+        // The registry is the only record of which pool ability means what, and
+        // it lives outside the save. When it is lost together with its backups -
+        // an Overwrite folder wiped clean - the load above had no way to tell a
+        // first run from a lost mapping, and the pool starts empty while the
+        // save still holds abilities from it. The first convergence would then
+        // hand exactly those to other contents (review 2026-09-23 C7). The save
+        // is the one witness left: whatever pool ability an actor carries is
+        // reserved, and the pool stops for the session.
+        std::vector<std::string> reserved;
+        for (auto* actor : a_actors) {
+            if (!actor) {
+                continue;
+            }
+            for (auto* spell : actor->GetActorRuntimeData().addedSpells) {
+                const auto* file = spell ? spell->GetFile(0) : nullptr;
+                if (!file) {
+                    continue;
+                }
+                const int generation = tokenid::AbilityPoolGeneration(file->GetFilename());
+                if (generation <= 0) {
+                    continue;
+                }
+                const PoolKey key{ generation, spell->GetLocalFormID() };
+                if (key.local < kPoolBase || key.local >= kPoolBase + kMaxPerGeneration ||
+                    g_entries.contains(key)) {
+                    continue;
+                }
+                Entry e;
+                e.content = "?held-by-save";  // never a real content id
+                e.tombstone = true;
+                g_entries.emplace(key, std::move(e));
+                reserved.push_back(ColonIdOf(key));
+                SKSE::log::error("abilities: this save holds pool ability {} that the registry "
+                                 "does not know - reserved, pool disabled for this session",
+                    ColonIdOf(key));
+            }
+        }
+        if (reserved.empty()) {
+            return 0;
+        }
+        // Written, so the next launch reserves them too. What they were worth
+        // cannot be recovered from here; that record was in the file that went.
+        SaveRegistry();
+        Disable(std::format(
+            "This save holds {} costume enchantment ability(ies) that CEF_abilities.json does "
+            "not list - the file was lost or replaced (an Overwrite clean-up, a profile move).\n\n"
+            "They are now reserved so nothing else can take them, and enchantment passthrough is "
+            "off for this session.\n\n"
+            "DO NOT SAVE. If you have a copy of CEF_abilities.json from before, put it back and "
+            "restart. Without one, the bonuses those abilities gave cannot be told apart and stay "
+            "as they are.",
+            reserved.size()));
+        return static_cast<int>(reserved.size());
+    }
+
+    std::string NextPoolPluginName()
+    {
+        // The generation AFTER the highest contiguous installed one. g_generations
+        // is that contiguous run (§4.2 allocates into nothing else), so its size
+        // is the highest generation and +1 is what would extend it.
+        return tokenid::AbilityPoolPluginName(static_cast<int>(g_generations.size()) + 1);
+    }
+
     Usage PoolUsage()
     {
         Usage u;
-        u.total = kPoolSize;
-        for (const auto& s : g_slots) {
-            if (!s) {
+        for (const int generation : g_generations) {
+            u.total += static_cast<int>(g_genCount.at(generation));
+        }
+        for (const auto& [key, e] : g_entries) {
+            // An entry in a generation that is not installed is counted as
+            // neither used nor free: it is not occupying anything this build can
+            // hand out, and the fail-closed path has already said so.
+            if (!GenerationInstalled(key.generation)) {
                 continue;
             }
-            if (s->tombstone) {
+            if (e.tombstone) {
                 ++u.tombstoned;
             } else {
                 ++u.used;
             }
         }
-        u.free = u.total - u.used - u.tombstoned;
+        u.free = std::max(0, u.total - u.used - u.tombstoned);
         return u;
     }
 
@@ -996,8 +1448,8 @@ namespace CostumeFW::abilities
             return nullptr;
         }
         if (const auto it = g_byContent.find(a_contentId); it != g_byContent.end()) {
-            const auto& s = g_slots[static_cast<std::size_t>(it->second)];
-            return (s && !s->invalid) ? PoolSpell(it->second) : nullptr;
+            const auto e = g_entries.find(it->second);
+            return (e != g_entries.end() && !e->second.invalid) ? PoolSpell(it->second) : nullptr;
         }
         return Allocate(a_contentId, a_effects, 0);
     }
@@ -1011,11 +1463,12 @@ namespace CostumeFW::abilities
         if (it == g_byContent.end()) {
             return;  // never allocated; the next SyncToActor builds it fresh
         }
-        const int slot = it->second;
-        auto& cur = g_slots[static_cast<std::size_t>(slot)];
-        if (!cur) {
+        const PoolKey key = it->second;
+        const auto curIt = g_entries.find(key);
+        if (curIt == g_entries.end()) {
             return;
         }
+        Entry* cur = &curIt->second;
 
         const auto source = ContentEffectsFor(a_contentId);
         std::vector<RecipeEffect> rebuilt;
@@ -1031,8 +1484,8 @@ namespace CostumeFW::abilities
                 g_byContent.erase(a_contentId);
                 SaveRegistry();
                 SKSE::log::info(
-                    "abilities: {} passes no stats through any more ({}) - slot {} tombstoned",
-                    a_contentId, why, slot);
+                    "abilities: {} passes no stats through any more ({}) - {} tombstoned",
+                    a_contentId, why, ColonIdOf(key));
             }
             return;
         }
@@ -1054,32 +1507,31 @@ namespace CostumeFW::abilities
         // ever been worth, which is what the generations were for.
         const auto rebuiltJson = EffectsJson(rebuilt);
         std::uint32_t highest = cur->generation;
-        int reuse = -1;
-        for (int i = 0; i < kPoolSize; ++i) {
-            const auto& e = g_slots[static_cast<std::size_t>(i)];
-            if (!e || e->content != a_contentId) {
+        std::optional<PoolKey> reuse;
+        for (const auto& [k, e] : g_entries) {
+            if (e.content != a_contentId) {
                 continue;
             }
-            highest = std::max(highest, e->generation);
-            if (reuse < 0 && !e->invalid && EffectsJson(e->effects) == rebuiltJson) {
-                reuse = i;
+            highest = std::max(highest, e.generation);
+            if (!reuse && !e.invalid && EffectsJson(e.effects) == rebuiltJson) {
+                reuse = k;
             }
         }
 
         cur->tombstone = true;
         g_byContent.erase(a_contentId);
-        if (reuse >= 0) {
-            auto& back = g_slots[static_cast<std::size_t>(reuse)];
-            back->tombstone = false;
-            g_byContent[a_contentId] = reuse;
+        if (reuse) {
+            auto& back = g_entries.at(*reuse);
+            back.tombstone = false;
+            g_byContent[a_contentId] = *reuse;
             SaveRegistry();
-            SKSE::log::info("abilities: {} is back to the value it had in slot {} (gen{}) - "
-                            "slot {} tombstoned, no new slot taken",
-                a_contentId, reuse, back->generation, slot);
+            SKSE::log::info("abilities: {} is back to the value it had in {} (recipe gen{}) - "
+                            "{} tombstoned, no new ability taken",
+                a_contentId, ColonIdOf(*reuse), back.generation, ColonIdOf(key));
             return;
         }
-        SKSE::log::info("abilities: {} changed - slot {} tombstoned, taking generation {}",
-            a_contentId, slot, highest + 1);
+        SKSE::log::info("abilities: {} changed - {} tombstoned, taking recipe generation {}",
+            a_contentId, ColonIdOf(key), highest + 1);
         Allocate(a_contentId, source, highest + 1);
     }
 
@@ -1112,14 +1564,11 @@ namespace CostumeFW::abilities
         // modifier, arriving from the one path that MAKES stale slots - which
         // is the exact failure this whole design exists to prevent.
         //
-        // Walking all 1024 is free: the slot is an optional, and only the
-        // handful that hold an entry cost a form lookup.
-        for (int slot = 0; slot < kPoolSize; ++slot) {
-            const auto& e = g_slots[static_cast<std::size_t>(slot)];
-            if (!e) {
-                continue;  // never allocated - there is no form to touch
-            }
-            auto* spell = PoolSpell(slot);
+        // Only the abilities that were ever allocated are in the map, so this
+        // walks exactly the forms there are - no scan over an empty pool.
+        for (const auto& [key, entry] : g_entries) {
+            const Entry* e = &entry;
+            auto* spell = PoolSpell(key);
             if (!spell) {
                 continue;
             }
@@ -1127,16 +1576,18 @@ namespace CostumeFW::abilities
             // Every older one is revoked, which is how a tombstoned slot comes
             // back off the actor it was granted to.
             const auto live = g_byContent.find(e->content);
-            const bool current = live != g_byContent.end() && live->second == slot;
+            const bool current = live != g_byContent.end() && live->second == key;
             const bool grant =
                 current && !e->invalid && !e->tombstone && want.contains(e->content);
-            const std::string key =
+            // Not "key": the loop already has one, and it is a PoolKey. This is
+            // the human-readable label the grant/revoke log line carries.
+            const std::string grantKey =
                 current ? "content:" + e->content
                         : std::format("content:{} (stale gen{})", e->content, e->generation);
             if (grant) {
-                GrantAbility(a_actor, spell, key);
+                GrantAbility(a_actor, spell, grantKey);
             } else {
-                RevokeAbility(a_actor, spell, key);
+                RevokeAbility(a_actor, spell, grantKey);
             }
         }
     }
@@ -1319,6 +1770,36 @@ namespace CostumeFW::abilities
             const auto u = PoolUsage();
             Print(std::format("[CEF abilities] {} - {} used, {} tombstoned, {} free of {}",
                 Ready() ? "ready" : "NOT READY", u.used, u.tombstoned, u.free, u.total));
+            // Per generation (PLAN §9.2). The totals above cannot say WHICH
+            // plugin is full, which is the only question whose answer is an
+            // action - installing the next one.
+            for (const int generation : g_generations) {
+                int used = 0;
+                int tomb = 0;
+                for (const auto& [key, e] : g_entries) {
+                    if (key.generation != generation) {
+                        continue;
+                    }
+                    (e.tombstone ? tomb : used) += 1;
+                }
+                const int total = static_cast<int>(g_genCount.at(generation));
+                Print(std::format("  {}: {} total / {} allocated / {} free",
+                    tokenid::AbilityPoolPluginName(generation), total, used + tomb,
+                    total - used - tomb));
+            }
+            for (const int generation : g_missingGenerations) {
+                int affected = 0;
+                for (const auto& [key, e] : g_entries) {
+                    affected += key.generation == generation ? 1 : 0;
+                }
+                Print(std::format("  {}: NOT LOADED - {} allocated ability(ies) need it",
+                    tokenid::AbilityPoolPluginName(generation), affected));
+            }
+            if (const auto next = FirstFreeAbility(); next) {
+                Print(std::format("  next allocation: {}", ColonIdOf(*next)));
+            } else if (!g_generations.empty()) {
+                Print("  next allocation: none - every generation is full");
+            }
             if (!Ready()) {
                 Print(std::format("  {}", g_why));
             }
@@ -1327,17 +1808,13 @@ namespace CostumeFW::abilities
 
         if (sub == "list") {
             int shown = 0;
-            for (int i = 0; i < kPoolSize; ++i) {
-                const auto& s = g_slots[static_cast<std::size_t>(i)];
-                if (!s) {
-                    continue;
-                }
-                auto* spell = PoolSpell(i);
+            for (const auto& [key, e] : g_entries) {
+                auto* spell = PoolSpell(key);
                 const bool on = spell && player && player->HasSpell(spell);
-                const auto line = std::format("  {:4} {}{}{} {} {} effect(s)  <- {}", i,
-                    s->tombstone ? "tomb " : "live ", s->invalid ? "INVALID " : "",
-                    std::format("gen{}", s->generation), on ? "GRANTED" : "off    ",
-                    s->effects.size(), s->content);
+                const auto line = std::format("  {} {}{}{} {} {} effect(s)  <- {}",
+                    ColonIdOf(key), e.tombstone ? "tomb " : "live ", e.invalid ? "INVALID " : "",
+                    std::format("recipe gen{}", e.generation), on ? "GRANTED" : "off    ",
+                    e.effects.size(), e.content);
                 Print(line);
                 SKSE::log::info("abilities:{}", line);
                 if (++shown >= 40) {

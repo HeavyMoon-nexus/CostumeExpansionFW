@@ -25,9 +25,41 @@ $out = Join-Path $repo "dist\CostumeExpansionFW-$Version.7z"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
+# Verify the core ESP BEFORE staging anything. The pool is "every ARMO this
+# plugin defines", so a stray record, a lost box-token marker, a BOD2 that no
+# longer matches its ARMA or an armature race list that regressed all change
+# what CEF hands the user - and none of them are visible in a file listing.
+# Reads only; the verifier is the Mutagen one in tools/espmerge.
+& dotnet run --project (Join-Path $PSScriptRoot 'espmerge\espmerge.csproj') --no-restore -- `
+    --verify-core "$mod\CostumeFW.esp"
+if ($LASTEXITCODE -ne 0) {
+    throw "espmerge --verify-core FAILED (exit $LASTEXITCODE) on $mod\CostumeFW.esp - nothing staged."
+}
+
+# And the box pool, against the core it derives from. Every pool token inherits
+# generation 0's BOD2 mask and its 23-race armature list; a pool built against a
+# different core looks fine in a file listing and silently does nothing on a
+# custom race. Also checks the carrier keys are unique and the KID ini names
+# every token, because a duplicate key means two boxes overwriting each other's
+# meshes and a missing KID line means a tooltip that never appears.
+# The meshes root is passed too, so the carrier assets each token needs (17
+# files apiece) are counted before anything is archived. A token whose files did
+# not make it is a box that renders nothing and says nothing.
+& dotnet run --project (Join-Path $PSScriptRoot 'espmerge\espmerge.csproj') --no-restore -- `
+    --verify-pool "$repo\package_assets\CostumeFW_BoxPool1.esp" "$mod\CostumeFW.esp" `
+    "$repo\package_assets\meshes"
+if ($LASTEXITCODE -ne 0) {
+    throw "espmerge --verify-pool FAILED (exit $LASTEXITCODE) on CostumeFW_BoxPool1.esp - nothing staged."
+}
+
 # --- from the deployed mod folder (explicit manifest) ---
 Copy-Item "$mod\CostumeFW.esp" $stage
 Copy-Item "$mod\CostumeFW_KID.ini" $stage
+# BoxPool1 and its KID ini are REPO-sourced (they have no deployed twin to
+# mirror - nothing in game rewrites them) and ship in core: a box made on one of
+# their tokens goes dormant without the plugin.
+Copy-Item "$repo\package_assets\CostumeFW_BoxPool1.esp" $stage
+Copy-Item "$repo\package_assets\CostumeFW_BoxPool1_KID.ini" $stage
 # v1.3.2 L3 opt-out template: a static repo file (never modified at runtime),
 # staged from the repo like the licenses.
 Copy-Item "$repo\CostumeFW_NoCapture_KID.ini" $stage

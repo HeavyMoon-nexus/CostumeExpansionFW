@@ -1,6 +1,8 @@
 #include "Papyrus.h"
 #include "BodyMorph.h"
 #include "BoxStore.h"
+#include "Config.h"  // NoInject - SetEnabled must not write while it is set (W3)
+#include "Diag.h"    // NoteThreadOf (M1)
 #include "Preset.h"
 #include "PublishStore.h"
 #include "SkinRebind.h"
@@ -25,9 +27,13 @@ namespace CostumeFW
     {
         constexpr const char* kClass = "CFW_Native";
 
-        // --- Queries (read-only; safe on the Papyrus VM thread) ---------------
-        // g_active is mutated only by main-thread tasks; while the MCM is open the
-        // game is paused, so no Reconcile/equip task races these reads.
+        // --- Queries ------------------------------------------------------------
+        // Every native here is registered without a_callableFromTasklets, so the
+        // VM runs it on the MAIN thread, synchronized with the frame - not on a VM
+        // thread, whatever older comments in this file say (review 2026-09-23
+        // M1). Each call therefore costs a frame, which is why a big MCM page is
+        // slow. Do not make them NoWait to speed that up: they would then run on
+        // VM threads and genuinely race the task pump and the Update hook.
 
         bool NpcEspLoadedNative(RE::StaticFunctionTag*)
         {
@@ -59,22 +65,11 @@ namespace CostumeFW
         // FormKey in Papyrus. TESDataHandler lookup only - no scene graph.
         RE::TESForm* ResolveForm(RE::StaticFunctionTag*, RE::BSFixedString a_colonId)
         {
-            const std::string colonId = a_colonId.c_str();
-            const auto colon = colonId.find(':');
-            if (colon == std::string::npos) {
-                return nullptr;
-            }
-            std::uint32_t localID = 0;
-            try {
-                localID = static_cast<std::uint32_t>(std::stoul(colonId.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return nullptr;
-            }
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
-                return nullptr;
-            }
-            return dh->LookupForm(localID, colonId.substr(colon + 1));
+            // The shared, range-checked resolver (review 2026-09-23 C11) - the
+            // MCM equips what this returns, so another plugin's record here is
+            // another mod's armour on the player.
+            const std::uint32_t id = ResolveFormId(a_colonId.c_str());
+            return id ? RE::TESForm::LookupByID(id) : nullptr;
         }
 
         // --- Mutators (scene-graph touching; deferred to the main thread) ------
@@ -128,6 +123,21 @@ namespace CostumeFW
         RE::BSFixedString GetBoxLabel(RE::StaticFunctionTag*, std::int32_t a_index)
         {
             return BoxAt(a_index).label;
+        }
+
+        // The box's LOGICAL id, and the way back from one. From 1.6.4.1 the MCM
+        // keys its pages on this instead of the biped slot: an index shifts the
+        // moment another box is deleted, and a slot stopped being unique in
+        // 1.6.4, but a boxId is issued once and never changes - not on rename,
+        // not on a contents change, not across a publish round trip.
+        RE::BSFixedString GetBoxId(RE::StaticFunctionTag*, std::int32_t a_index)
+        {
+            return BoxAt(a_index).boxId;
+        }
+
+        std::int32_t GetBoxByIdNative(RE::StaticFunctionTag*, RE::BSFixedString a_boxId)
+        {
+            return FindBoxById(a_boxId.c_str());
         }
 
         RE::BSFixedString GetBoxToken(RE::StaticFunctionTag*, std::int32_t a_index)
@@ -322,9 +332,37 @@ namespace CostumeFW
         }
 
         // The box index on biped slot a_slot, or -1 (slot-keyed page resolution).
+        // -1 ALSO means "this slot holds more than one box" from v1.6.4 on: the
+        // MCM keys its pages by slot, so a slot that names no single box must
+        // resolve to nothing rather than to whichever box came first (I1).
         std::int32_t GetBoxBySlot(RE::StaticFunctionTag*, std::int32_t a_slot)
         {
             return BoxIndexForSlot(a_slot);
+        }
+
+        // How many boxes sit on a biped slot. The MCM uses it to leave shared
+        // slots out of its page list and its new-box picker (I2 / I5).
+        std::int32_t GetBoxesOnSlot(RE::StaticFunctionTag*, std::int32_t a_slot)
+        {
+            return BoxesOnSlot(a_slot);
+        }
+
+        // X7: the NPC arm of "prepare for uninstall" - recall every published
+        // costume and strip NPC persist. SMF has always called this; the MCM's
+        // own cleanup did not, so it returned box contents and active persist,
+        // said "safe to uninstall", and left published costumes on NPCs.
+        void UninstallNpcCleanupNative(RE::StaticFunctionTag*)
+        {
+            SKSE::GetTaskInterface()->AddTask([] { UninstallNpcCleanup(); });
+        }
+
+        // The WHOLE of it (W4). The MCM used to walk the boxes and the persist
+        // catalog in Papyrus and call the NPC arm above at the end - a second
+        // implementation of the same flow, which is how it spent a version
+        // without that call. Both UIs run this now.
+        void UninstallCleanupNative(RE::StaticFunctionTag*)
+        {
+            SKSE::GetTaskInterface()->AddTask([] { UninstallCleanup(); });
         }
 
         // Box "distribute" flag (whether the token is given to the player).
@@ -335,7 +373,8 @@ namespace CostumeFW
 
         bool SetBoxEnabledNative(RE::StaticFunctionTag*, RE::BSFixedString a_token, bool a_enabled)
         {
-            // Flag + json only; the MCM equips/removes the token to apply visually.
+            // Flag + json now; SetBoxEnabled queues the token move and then the
+            // convergence (W1).
             return SetBoxEnabled(a_token.c_str(), a_enabled);
         }
 
@@ -404,6 +443,7 @@ namespace CostumeFW
         // --- Global on/off (Main page) ---------------------------------------
         bool IsEnabled(RE::StaticFunctionTag*)
         {
+            Diag::NoteThreadOf("native IsEnabled");  // M1: which thread a native runs on
             return CefEnabled();
         }
 
@@ -415,10 +455,18 @@ namespace CostumeFW
 
         bool SetEnabled(RE::StaticFunctionTag*, bool a_on)
         {
+            // CEF_NOINJECT.txt overrides the setting without touching it, so a
+            // user who deletes the file gets back what they last chose. The MCM
+            // writing its checkbox through here broke that: it stored ON over
+            // the saved OFF while the file was in place (review 2026-09-23 W3).
+            if (NoInject()) {
+                return CefEnabled();
+            }
             SetCefEnabled(a_on);  // sync def + json
             SKSE::GetTaskInterface()->AddTask([] {
                 Reconcile();  // master off hides everything; on re-shows
                 ApplyBoxAbilities();
+                RestampAllTokens();  // off zeroes the worn token's armor/weight/keywords
                 // Persist head carriers follow the master switch: off deregisters
                 // the pool (head physics gone), on re-registers it (stage 3b).
                 ApplyCarrierOverrides(false);
@@ -448,37 +496,50 @@ namespace CostumeFW
 
         // Export a box's current contents as a new preset file (file I/O only,
         // no scene). Returns the written file name ("" on failure).
-        // Gather the per-content hide rules + gender modes for a content list, to
-        // carry into an exported preset (§8.10/8.11 + gender).
-        void CollectPresetMaps(const std::vector<std::string>& a_contents,
-            std::unordered_map<std::string, std::vector<int>>& a_hide,
-            std::unordered_map<std::string, int>& a_gender)
+        // Gather the per-content settings for a content list, to carry into an
+        // exported preset. All five travel (F15): before 1.6.4 only the hide
+        // slots and gender mode did, so a shared costume arrived without its
+        // shape hides, body-morph opt-in or show-real-body - the settings that
+        // decide whether it sits on the body correctly.
+        std::unordered_map<std::string, Preset::ContentPrefs> CollectPresetPrefs(
+            const std::vector<std::string>& a_contents)
         {
+            std::unordered_map<std::string, Preset::ContentPrefs> out;
             for (const auto& c : a_contents) {
-                auto slots = HideSlotsFor(c);
-                if (!slots.empty()) {
-                    a_hide[c] = std::move(slots);
-                }
-                if (const int g = GenderModeFor(c); g != 0) {
-                    a_gender[c] = g;
-                }
+                Preset::ContentPrefs prefs;
+                prefs.hideSlots = HideSlotsFor(c);
+                prefs.genderMode = GenderModeFor(c);
+                prefs.bodyMorph = BodyMorphOn(c);
+                prefs.hideShapes = HideShapesFor(c);
+                prefs.showRealBody = ShowRealBodyOn(c);
+                // Export decides what is worth writing; keep the entry either way
+                // so a caller can tell "asked about" from "had nothing".
+                out.emplace(c, std::move(prefs));
             }
+            return out;
         }
 
-        // Restore a preset's hide rules + gender modes for its resolvable contents
+        // Restore a preset's per-content settings for its resolvable contents
         // (after assigning it to a box or persist).
-        void RestorePresetMaps(const Preset::PresetInfo& a_preset,
+        void RestorePresetPrefs(const Preset::PresetInfo& a_preset,
             const std::vector<std::string>& a_ok)
         {
-            for (const auto& [cid, slots] : a_preset.hideRules) {
-                if (std::find(a_ok.begin(), a_ok.end(), cid) != a_ok.end()) {
-                    SetHideSlots(cid, slots);
+            for (const auto& [cid, prefs] : a_preset.contentPrefs) {
+                if (std::find(a_ok.begin(), a_ok.end(), cid) == a_ok.end()) {
+                    continue;
                 }
-            }
-            for (const auto& [cid, mode] : a_preset.genderModes) {
-                if (std::find(a_ok.begin(), a_ok.end(), cid) != a_ok.end()) {
-                    SetGenderMode(cid, mode);
+                SetHideSlots(cid, prefs.hideSlots);
+                SetGenderMode(cid, prefs.genderMode);
+                SetBodyMorphOn(cid, prefs.bodyMorph);
+                // SetHideShape is per shape; the preset carries the whole set, so
+                // clear what is there first or an assignment would only ever add.
+                for (const auto& shape : HideShapesFor(cid)) {
+                    SetHideShape(cid, shape, false);
                 }
+                for (const auto& shape : prefs.hideShapes) {
+                    SetHideShape(cid, shape, true);
+                }
+                SetShowRealBodyOn(cid, prefs.showRealBody);
             }
         }
 
@@ -486,10 +547,7 @@ namespace CostumeFW
             RE::BSFixedString a_name)
         {
             const auto contents = BoxContents(a_token.c_str());
-            std::unordered_map<std::string, std::vector<int>> hideRules;
-            std::unordered_map<std::string, int> genderModes;
-            CollectPresetMaps(contents, hideRules, genderModes);
-            return Preset::Export(a_name.c_str(), contents, hideRules, genderModes);
+            return Preset::Export(a_name.c_str(), contents, CollectPresetPrefs(contents));
         }
 
         // Assign a preset (by file) to a box: read + validate (skip missing), set the
@@ -509,13 +567,18 @@ namespace CostumeFW
                     preset.name, missing.size());
             }
             const auto oldContents = BoxContents(token);  // before reassign
-            // The FILE identifies the preset; the name is carried for display.
-            if (!AssignPreset(token, preset.file, preset.name, ok)) {  // sync def + json
-                return false;
+            {
+                // One settings write for the assignment and every preference
+                // it restores, not one per value (W14).
+                SettingsWriteBatch batch;
+                // The FILE identifies the preset; the name is carried for display.
+                if (!AssignPreset(token, preset.file, preset.name, ok)) {  // sync def + json
+                    return false;
+                }
+                // Restore the preset's hide rules + gender modes for its resolvable
+                // contents so a distributed costume keeps its hide/gender behavior.
+                RestorePresetPrefs(preset, ok);
             }
-            // Restore the preset's hide rules + gender modes for its resolvable
-            // contents so a distributed costume keeps its hide/gender behavior.
-            RestorePresetMaps(preset, ok);
             SKSE::GetTaskInterface()->AddTask([token, oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);
@@ -859,10 +922,7 @@ namespace CostumeFW
         RE::BSFixedString ExportPersistNative(RE::StaticFunctionTag*, RE::BSFixedString a_name)
         {
             const auto contents = PersistContents();
-            std::unordered_map<std::string, std::vector<int>> hideRules;
-            std::unordered_map<std::string, int> genderModes;
-            CollectPresetMaps(contents, hideRules, genderModes);
-            return Preset::Export(a_name.c_str(), contents, hideRules, genderModes);
+            return Preset::Export(a_name.c_str(), contents, CollectPresetPrefs(contents));
         }
 
         bool AssignPersistPresetNative(RE::StaticFunctionTag*, RE::BSFixedString a_file)
@@ -878,10 +938,13 @@ namespace CostumeFW
                     preset.name, missing.size());
             }
             const auto oldContents = PersistContents();  // before reassign
-            if (!AssignPresetToPersist(preset.file, preset.name, ok)) {  // sync def + json
-                return false;
+            {
+                SettingsWriteBatch batch;  // one write for all of it (W14)
+                if (!AssignPresetToPersist(preset.file, preset.name, ok)) {  // sync def + json
+                    return false;
+                }
+                RestorePresetPrefs(preset, ok);
             }
-            RestorePresetMaps(preset, ok);
             SKSE::GetTaskInterface()->AddTask([oldContents, ok] {
                 for (const auto& c : oldContents) {
                     DetachSkinned(c);  // unregister old persist contents
@@ -903,7 +966,67 @@ namespace CostumeFW
         // calls it at capture time, before moving the item to the store).
         bool CaptureContentEnchantNative(RE::StaticFunctionTag*, RE::BSFixedString a_content)
         {
-            return CaptureEnchant(a_content.c_str());  // sync def + json (inventory read)
+            // No rebuild here: the MCM moves the item with CaptureToStore right
+            // after, which rebuilds once the original is in storage - a rebuild
+            // now pays from the flat snapshot and burns a pool slot (W22).
+            return CaptureEnchant(a_content.c_str(), false);  // sync def + json (inventory read)
+        }
+
+        // --- the MCM's item custody, through the one native implementation ---
+        // (review 2026-09-23 R7). The MCM used to move items with Papyrus:
+        // its own "store, else a new copy" return and its own RemoveItem
+        // capture, a second custody implementation that knew nothing of
+        // preset-listed ids (C2), the uninstall mark (C3), the copy the enchant
+        // snapshot was taken from (W21) or the rebuild order (W22).
+
+        // Hand back one of a_id: the stored original, else - with aAllowNew -
+        // a new copy, unless a preset only listed it. aNotify says the notices
+        // the MCM gave (and the one for a listed-only id). True if an item
+        // reached the player.
+        bool ReturnItemNative(RE::StaticFunctionTag*, RE::BSFixedString a_id, bool a_allowNew,
+            bool a_notify)
+        {
+            const std::string id = a_id.c_str();
+            bool recreated = false;
+            bool refOnly = false;
+            const bool ok =
+                ReturnStoredItem(id, a_allowNew, &recreated, RecreateContext::kNormal, &refOnly);
+            if (a_notify) {
+                if (ok && recreated) {
+                    RE::DebugNotification(
+                        "CostumeFW: returned as a new copy (none stored on this character)");
+                } else if (!ok && refOnly) {
+                    NotifyRefOnlyReturn(id);
+                }
+            }
+            return ok;
+        }
+
+        // Move one of a_id from the player into the hidden store - the copy the
+        // enchant snapshot was read from - with its custody row, the preset
+        // mark taken off, and the stats rebuilt after the move.
+        bool CaptureToStoreNative(RE::StaticFunctionTag*, RE::BSFixedString a_id)
+        {
+            return CaptureItemToStore(a_id.c_str());
+        }
+
+        // Whether the box at a_index can be used - false for a quarantined one
+        // (its token is not a working box token right now). M12.
+        bool IsBoxUsableNative(RE::StaticFunctionTag*, std::int32_t a_index)
+        {
+            if (a_index < 0 || a_index >= BoxCount()) {
+                return false;
+            }
+            return BoxTokenUsable(BoxAt(a_index));
+        }
+
+        // Always true. A native the DLL never registered answers the Papyrus
+        // default (false) - which is how the MCM tells it is running without
+        // CEF (CEF_DISABLE.txt, a failed load) before trusting any native with
+        // the user's items (C10).
+        bool IsDllRunningNative(RE::StaticFunctionTag*)
+        {
+            return true;
         }
 
         // True if the content's base form has a REAL Papyrus script attached
@@ -975,6 +1098,8 @@ namespace CostumeFW
 
         a_vm->RegisterFunction("GetBoxCount", kClass, GetBoxCount);
         a_vm->RegisterFunction("GetBoxLabel", kClass, GetBoxLabel);
+        a_vm->RegisterFunction("GetBoxId", kClass, GetBoxId);
+        a_vm->RegisterFunction("GetBoxById", kClass, GetBoxByIdNative);
         a_vm->RegisterFunction("GetBoxToken", kClass, GetBoxToken);
         a_vm->RegisterFunction("GetBoxContents", kClass, GetBoxContents);
         a_vm->RegisterFunction("IsBoxWorn", kClass, IsBoxWorn);
@@ -995,6 +1120,13 @@ namespace CostumeFW
         a_vm->RegisterFunction("GetFreeTokenIds", kClass, GetFreeTokenIds);
         a_vm->RegisterFunction("GetTokenSlot", kClass, GetTokenSlot);
         a_vm->RegisterFunction("GetBoxBySlot", kClass, GetBoxBySlot);
+        a_vm->RegisterFunction("GetBoxesOnSlot", kClass, GetBoxesOnSlot);
+        a_vm->RegisterFunction("UninstallNpcCleanup", kClass, UninstallNpcCleanupNative);
+        a_vm->RegisterFunction("UninstallCleanup", kClass, UninstallCleanupNative);
+        a_vm->RegisterFunction("ReturnItem", kClass, ReturnItemNative);
+        a_vm->RegisterFunction("CaptureToStore", kClass, CaptureToStoreNative);
+        a_vm->RegisterFunction("IsBoxUsable", kClass, IsBoxUsableNative);
+        a_vm->RegisterFunction("IsDllRunning", kClass, IsDllRunningNative);
         a_vm->RegisterFunction("GetBoxEnabled", kClass, GetBoxEnabled);
         a_vm->RegisterFunction("SetBoxEnabled", kClass, SetBoxEnabledNative);
         a_vm->RegisterFunction("GetBoxArmorType", kClass, GetBoxArmorType);

@@ -1,11 +1,16 @@
 #include "BoxStore.h"
 #include "BodyMorph.h"
+#include "Cosave.h"  // UnresolvedActiveIds - carried actives are still held (C4)
 #include "SkinRebind.h"
 #include "PublishStore.h"
 #include "Preset.h"  // MigrateAssignments (settings reload re-reads preset assignments)
+#include "Config.h"     // NoInject (the file form of the gentle master switch)
 #include "StoreLock.h"
 #include "AtomicWrite.h"  // WriteFileAtomic (shared with the ability registry)
+#include "JsonRead.h"     // typed reads for carriers.json (C16)
 #include "FormId.h"       // MakeColonId (shared with the ability pool)
+#include "TokenIdentity.h"  // who owns a form, decided from its plugin (v1.6.4)
+#include "AbilityPool.h"  // the audit reports the passthrough state alongside the pools
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "nifcarrier/NifCarrierCore.h"
 
@@ -36,6 +41,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -47,9 +53,14 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <map>
 #include <mutex>
+#include <random>
+#include <set>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -67,7 +78,35 @@ namespace CostumeFW
         // (never touched by WriteJson, so a corrupt main file can't clobber it).
         constexpr const char* kSettingsBakPath = "Data\\SKSE\\Plugins\\CEF_settings.json.bak";
         constexpr const char* kOldBoxesPath = "Data\\SKSE\\Plugins\\costume_boxes.json";  // migrated
+        // The 1.6.3-shaped settings, kept once at the moment 1.6.4 first rewrites
+        // them. The .bak above is "last known good", overwritten on every clean
+        // load - so one save under 1.6.4 and the old shape is nowhere. CEF never
+        // reads this file; it exists so going back to 1.6.3 is a copy, not a
+        // reconstruction. Written once and never again (MaybeWritePre164Backup).
+        constexpr const char* kSettingsPre164Path =
+            "Data\\SKSE\\Plugins\\CEF_settings.pre164.json";
         constexpr const char* kSchema = "cef.settings/1";
+
+        // Why a file cannot be opened for reading: 0 when it can, the Win32 error
+        // otherwise. Asked with the most permissive sharing there is, so a
+        // failure here is the file itself and not the way it was asked for.
+        DWORD OpenErrorFor(const char* a_path)
+        {
+            const HANDLE h = ::CreateFileA(a_path, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) {
+                return ::GetLastError();
+            }
+            ::CloseHandle(h);
+            return 0;
+        }
+
+        // The file is not there - as opposed to there and unreadable (C13).
+        bool IsNotFound(DWORD a_err)
+        {
+            return a_err == ERROR_FILE_NOT_FOUND || a_err == ERROR_PATH_NOT_FOUND;
+        }
 
         // GLOBAL box definitions (config; all saves). One box per token. Mutated
         // only on the main thread (loads + queued native tasks); MCM queries read
@@ -90,6 +129,28 @@ namespace CostumeFW
         // writes normally.
         bool g_settingsUnreadable = false;
 
+        // Settings write batching (review 2026-09-23 W14). A preset restore or
+        // an unpublish set four to a dozen side-map values per content, each
+        // rewriting the whole settings file through usvfs - fifty to a hundred
+        // writes, and a crash part-way left the middle state on disk. Inside a
+        // SettingsWriteBatch a write only marks the file dirty; the outermost
+        // batch's end writes it once.
+        int g_writeBatchDepth = 0;
+        bool g_writeBatchDirty = false;
+        bool g_writeBatchManifest = false;
+
+        // The settings file just read was still in the 1.6.3 shape (no box
+        // carried a boxId). Set at load, consumed by the first write after it:
+        // that write is the moment the old shape stops existing anywhere, so a
+        // copy of it is kept first. See MaybeWritePre164Backup.
+        bool g_settingsWasPre164 = false;
+        // The file that load actually parsed: the main file, the backup when the
+        // main one was corrupt or unreadable, or the legacy costume_boxes.json.
+        // The pre-1.6.4 copy is taken from THIS - taken from the main file, a
+        // load rescued by the backup kept a copy of the corrupt file instead of
+        // the data that was read (review 2026-09-23 M10).
+        const char* g_settingsSource = kSettingsPath;
+
         // Custody history (v1.6.2): ONE row per content id CEF has ever taken
         // custody of, holding what last happened to it. Keyed by id on purpose,
         // not an event stream: the case it exists for is "a piece vanished and I
@@ -98,6 +159,71 @@ namespace CostumeFW
         // One row per id also means a bulk return can't flood out the history.
         std::unordered_map<std::string, CustodyLogEntry> g_custody;
         constexpr std::size_t kCustodyMax = 256;
+
+        // "Reference only": content ids a PRESET put into a box or persist that
+        // CEF never took an item for (review 2026-09-23 C2). A preset lists ids;
+        // it hands over nothing. Everything that returns items used to treat a
+        // listed id like a captured one - store first, else mint a copy - so
+        // assigning any preset and taking its pieces out made every piece, again
+        // and again. Ids here are never minted (policy::DecideReturn) and pay no
+        // stats (StatAdmittedContents, decision D1) until the real item is
+        // captured, which takes the id out. Global like the definitions it
+        // qualifies. Not pruned: it only grows by what presets list, and an id
+        // that leaves every definition costs a few bytes.
+        //
+        // Keyed by RefKey, valued by the id as the definition spells it: the
+        // stat filter asks on every equip, and W26's "same record, other
+        // spelling" has to be an exact lookup there, not a scan.
+        std::map<std::string, std::string> g_refOnly;
+        // The one-time pass that marks assignments made before 1.6.4.1 has run
+        // (see ReconcileRefOnly).
+        bool g_refOnlyChecked = false;
+
+        // One key per record, whatever the spelling - the rule SameColonId
+        // compares by: the local id as a number, the plugin without case.
+        std::string RefKey(std::string_view a_id)
+        {
+            const auto lower = [](std::string a_s) {
+                for (auto& ch : a_s) {
+                    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
+                return a_s;
+            };
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (policy::ParseColonId(a_id, local, plugin)) {
+                return policy::FormatColonId(local, lower(std::move(plugin)));
+            }
+            return lower(std::string(a_id));
+        }
+
+        bool RefOnlyHas(const std::string& a_id)
+        {
+            return !a_id.empty() && g_refOnly.contains(RefKey(a_id));
+        }
+
+        // Whether it was new.
+        bool RefOnlyInsert(const std::string& a_id)
+        {
+            return !a_id.empty() && g_refOnly.emplace(RefKey(a_id), a_id).second;
+        }
+
+        // Whether anything was taken out.
+        bool RefOnlyErase(const std::string& a_id)
+        {
+            return !a_id.empty() && g_refOnly.erase(RefKey(a_id)) > 0;
+        }
+
+        // A box's token FormID, resolved once per box (W13, see tokenFormCache).
+        // 0 while it does not resolve - asked again next time, which only a
+        // quarantined box ever needs, and those are skipped before asking.
+        std::uint32_t TokenFormOf(const BoxDefInfo& a_box)
+        {
+            if (a_box.tokenFormCache == 0) {
+                a_box.tokenFormCache = ResolveFormId(a_box.token);
+            }
+            return a_box.tokenFormCache;
+        }
 
         // Persist content (colon-form ARMA ids): always-injected, token-less. Phase 1
         // stores + injects these; worn-capture UI and seed retirement come in the MCM
@@ -235,6 +361,50 @@ namespace CostumeFW
         std::string g_persistPreset;
         std::string g_persistPresetName;
 
+        // --- text that reaches the settings file (review 2026-09-23 C1) ------
+        // Every settings write is a JSON dump, and dump() throws on text that is
+        // not UTF-8. Catching that (WriteJson) only stops the crash: the bad
+        // text stays in memory and every write after it fails too, for the rest
+        // of the session. So nothing that could carry such text is let in -
+        // these are the entrances.
+
+        // A box label, as stored. Labels come from SMF (UTF-8, but a seed that
+        // used to be cut mid-character by a 64-byte buffer), from the MCM and
+        // from item names, which are in their plugin's codepage. Converted to
+        // UTF-8 and capped at a character boundary.
+        constexpr std::size_t kMaxLabelBytes = 255;
+
+        std::string SanitizeLabel(const std::string& a_label)
+        {
+            std::string out = EnsureUtf8(a_label);  // strictly valid by contract
+            out.resize(policy::Utf8PrefixLength(out, kMaxLabelBytes));
+            return out;
+        }
+
+        // True when a_text can go into the settings. An id carries its plugin's
+        // file name, and a magic effect's id its plugin's - bytes in whatever
+        // codepage that plugin was named in. Said once per text per session:
+        // the heal pass meets the same one on every load.
+        bool WritableText(const std::string& a_text, const char* a_what)
+        {
+            if (policy::IsStrictUtf8(a_text)) {
+                return true;
+            }
+            static std::unordered_set<std::string> s_said;
+            if (s_said.insert(a_text).second) {
+                SKSE::log::warn(
+                    "{}: '{}' is not UTF-8 text, which CEF's settings cannot hold - left out",
+                    a_what, a_text);
+            }
+            return false;
+        }
+
+        // Contents the last carrier manifest left out because their mesh path
+        // (or an NPC assignment's id) is not UTF-8 text. Decision D6: they are
+        // still captured and still SHOWN - the engine reads the path as raw
+        // bytes - they only get no physics carrier. Diagnostics lists them.
+        std::set<std::string> g_nonUtf8Mesh;
+
         int FindBox(const std::string& a_token)
         {
             for (std::size_t i = 0; i < g_boxes.size(); ++i) {
@@ -280,8 +450,32 @@ namespace CostumeFW
         // the same guarantee, and a second copy of it would be a second place to
         // fix.
 
-        void WriteJson(bool a_writeManifest = true)
+        void MaybeWritePre164Backup();  // fwd (defined below)
+
+        // Returns whether the settings actually reached disk. It used to be void,
+        // so every caller reported success no matter what happened (F05 / X5) -
+        // including AddBox, whose true/false the capture flow reads to decide
+        // whether to move the physical item into the hidden store. Taking the
+        // user's item and then failing to record where it went is the one
+        // outcome worth refusing.
+        // a_immediate: write now even inside a SettingsWriteBatch, taking every
+        // change the batch has collected with it. For the callers that act on
+        // the ANSWER - AddBox moves an item only if its entry was saved (F05),
+        // the removals return one only then (W12) - since "dirty, written
+        // later" is not an answer.
+        bool WriteJson(bool a_writeManifest = true, bool a_immediate = false)
         {
+            if (g_writeBatchDepth > 0 && !a_immediate) {
+                g_writeBatchDirty = true;
+                g_writeBatchManifest = g_writeBatchManifest || a_writeManifest;
+                return true;  // the batch's end writes it (W14)
+            }
+            if (g_writeBatchDepth > 0) {
+                // This write carries the batch's changes too.
+                a_writeManifest = a_writeManifest || g_writeBatchManifest;
+                g_writeBatchDirty = false;
+                g_writeBatchManifest = false;
+            }
             if (g_settingsUnreadable) {
                 // One line per attempt: the user needs to know their edits are
                 // not sticking, and why, without a log dive.
@@ -290,14 +484,16 @@ namespace CostumeFW
                     "disk is your real data and is left alone; fix or remove it (a "
                     "last-known-good copy is at {}), then restart the game.",
                     kSettingsPath, kSettingsBakPath);
-                return;
+                return false;
             }
+            MaybeWritePre164Backup();
             nlohmann::json doc;
             doc["schema"] = kSchema;
             doc["enabled"] = g_cefEnabled;
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
                 nlohmann::json jb;
+                jb["boxId"] = b.boxId;
                 jb["label"] = b.label;
                 jb["token"] = b.token;
                 jb["contents"] = b.contents;
@@ -399,16 +595,43 @@ namespace CostumeFW
                 custody[id] = { { "name", e.name }, { "event", e.event }, { "when", e.when } };
             }
             doc["custodyLog"] = std::move(custody);
+            {
+                auto refs = nlohmann::json::array();
+                for (const auto& [key, id] : g_refOnly) {  // key order: stable file
+                    refs.push_back(id);
+                }
+                doc["refOnly"] = std::move(refs);
+            }
+            doc["refOnlyChecked"] = g_refOnlyChecked;
             EmitPublishJson(doc);
 
-            if (!WriteFileAtomic(kSettingsPath, doc.dump(2))) {
+            // dump() does not write text that is not UTF-8 - it THROWS
+            // (type_error.316), and nothing between here and the engine catches
+            // it, so it was a crash from a task or a native. Worse, it came back
+            // on every load once the text was in memory (review 2026-09-23 C1):
+            // a mesh path, a plugin name, a shape name or a label in a legacy
+            // codepage. Refusing the write is the fail-closed answer - AddBox
+            // reads false and rolls back, so a capture moves nothing (F05), and
+            // the file on disk stays the last one that could be written. The
+            // entrances refuse such text too; this is the last line.
+            std::string body;
+            try {
+                body = doc.dump(2);
+            } catch (const nlohmann::json::exception& e) {
+                SKSE::log::error(
+                    "settings: NOT written - {} (text that is not UTF-8 reached the settings)",
+                    e.what());
+                return false;
+            }
+            if (!WriteFileAtomic(kSettingsPath, body)) {
                 SKSE::log::error("settings: cannot write {}", kSettingsPath);
-                return;
+                return false;
             }
             SKSE::log::info("settings: wrote {} box def(s) (enabled={})", g_boxes.size(), g_cefEnabled);
             if (a_writeManifest) {
                 WriteCarrierManifest();
             }
+            return true;
         }
 
         // The single plugin that ships every CEF record (v1.2.1: the old
@@ -434,6 +657,46 @@ namespace CostumeFW
         // MakeColonId moved to src/FormId.h (the ability pool needs it too). Call
         // sites are unchanged: it is still CostumeFW::MakeColonId, just one
         // namespace further out.
+
+        // --- boxId (v1.6.4) ---------------------------------------------------
+        // The logical identity of a box, as opposed to the physical token it
+        // currently holds. Sixteen hex characters either way, so nothing
+        // downstream has to know whether an id was migrated or issued.
+        // DeriveBoxId (the migrated half) is exported - see BoxStore.h.
+        std::string NewBoxId()
+        {
+            // Issued once per box and never reused. Seeded per call from
+            // random_device: boxes are created by hand, minutes apart, so the
+            // cost is irrelevant and a shared engine would be one more piece of
+            // mutable state under the store lock.
+            static std::mt19937_64 s_rng{ std::random_device{}() };
+            char buf[17]{};
+            std::snprintf(buf, sizeof(buf), "%016llX",
+                static_cast<unsigned long long>(s_rng()));
+            return buf;
+        }
+
+        // --- pre-1.6.4 settings snapshot --------------------------------------
+        // Taken at the moment 1.6.4 is about to write a file that was still in
+        // the 1.6.3 shape, and never again. CopyFileA with bFailIfExists=TRUE is
+        // the whole "once" mechanism: no flag to keep in sync, and a pre164 file
+        // the user restored by hand is not silently overwritten.
+        void MaybeWritePre164Backup()
+        {
+            if (!g_settingsWasPre164) {
+                return;
+            }
+            g_settingsWasPre164 = false;  // one attempt per load, whatever happens
+            if (::CopyFileA(g_settingsSource, kSettingsPre164Path, TRUE)) {
+                SKSE::log::info(
+                    "settings: kept the pre-1.6.4 file ({}) as {} before the first 1.6.4 write "
+                    "(CEF never reads it; it is there if you go back to 1.6.3)",
+                    g_settingsSource, kSettingsPre164Path);
+            } else if (::GetLastError() != ERROR_FILE_EXISTS) {
+                SKSE::log::warn("settings: could not keep a pre-1.6.4 copy at {} (error {})",
+                    kSettingsPre164Path, ::GetLastError());
+            }
+        }
 
         // v1.2.1 plugin consolidation: CostumeFW_Boxes.esp and
         // CostumeFW_Boxes_FSMPCarrier_001.esp were merged into CostumeFW.esp
@@ -522,12 +785,22 @@ namespace CostumeFW
         }
 
         RE::TESObjectARMO* ResolveArmo(const std::string& a_colonId);  // fwd (defined below)
+        bool CorePluginLoaded();                                       // fwd (defined below)
+        std::string_view FilenameOf(const RE::TESFile* a_file);        // fwd (defined below)
+        // The keyword that says "this ARMO is a box token". Named once: the
+        // audit prints it, and tools/espmerge stamps it (kMarkerEdid there).
+        constexpr const char* kBoxTokenMarkerEdid = "CFW_BoxTokenMarker";
+        RE::BGSKeyword* BoxTokenMarkerKeyword();                       // fwd (defined below)
         void SetTokenStats(const BoxDefInfo& a_box);                   // fwd (defined below)
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box);            // fwd (defined below)
         void RestoreTokenDefaultName(const std::string& a_token);      // fwd (defined below)
         void ResetTokenStats(const std::string& a_token);              // fwd (defined below)
         void ReapplyStatsForContent(const std::string& a_id);          // fwd (defined below)
         void ResetUnclaimedTokenStats();                               // fwd (defined below)
+        // The inventory name each token carried BEFORE a box label was stamped
+        // on it. Declared here so `cef tokens` can print it beside the current
+        // one; filled by ApplyBoxLabelToToken, far below.
+        extern std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;
 
         // Tokens SetTokenStats has written to in this process. A box's armor,
         // weight, class, name and keywords live on the token ARMO's BASE form,
@@ -543,12 +816,13 @@ namespace CostumeFW
         void RecordCustody(const std::string& a_id, const char* a_event);  // fwd (below)
 
         // --- FSMP carrier manifest (approach B) --------------------------------
-        // Inputs for tools/nifcarrier `sync`: per box, the resolved worn-NIF path
-        // of every content. sync rebuilds Box<slot>_carrier.nif (+ merged physics
-        // XML when 2+ contents carry SMP) from this; the per-token ARMA points at
-        // that carrier, so equipping the token makes FSMP grow the physics bones
-        // CEF's rebind then binds the injected meshes to. Written on every box-def
-        // persist, skipped when nothing changed (keeps sync's hash-skip effective).
+        // Inputs for the carrier `sync` (src/nifcarrier): per box, its carrier
+        // key and the resolved worn-NIF path of every content. sync rebuilds
+        // <carrierKey>_carrier.nif (+ merged physics XML when 2+ contents carry
+        // SMP) from this; the per-token ARMA points at that carrier, so equipping
+        // the token makes FSMP grow the physics bones CEF's rebind then binds the
+        // injected meshes to. Written on every box-def persist, skipped when
+        // nothing changed (keeps sync's hash-skip effective).
         constexpr const char* kManifestPath = "Data\\SKSE\\Plugins\\CEF_carrier_manifest.json";
 
         void ScheduleAutoSync();  // fwd (defined below)
@@ -568,16 +842,52 @@ namespace CostumeFW
 
         void WriteCarrierManifest()
         {
+            // Not while the settings are unreadable. The store is then holding
+            // "loaded empty", which is not the truth, and a manifest built from
+            // it lists no boxes - the sync that follows would rebuild every
+            // carrier to nothing and write that into carriers.json. WriteJson
+            // never reaches here in that state, but SyncPersistManifest and the
+            // settings reload call this directly (review 2026-09-23 M11).
+            if (g_settingsUnreadable) {
+                SKSE::log::info("carrier manifest: not written - the settings did not load");
+                return;
+            }
             // r4: one immutable generation and one resolver for base admission,
             // selected-ARMA hard/id admission, and the exact model path used by
             // injection. No private ARMO->ARMA walk is allowed here.
             const auto pol = CapturePolicySnapshot();
             nlohmann::json doc;
-            doc["version"] = 1;
+            // 2 (v1.6.4): every box entry carries a "carrierKey". A version-1
+            // manifest has only "slot", and the builder reads generation 0's
+            // key off it - "Box<slot>" is exactly what version 1 was already
+            // producing, so the fallback is byte-exact.
+            doc["version"] = 2;
+            // Decision D6 (review 2026-09-23 C1): a mesh path in a legacy
+            // codepage cannot go into this JSON - dump() throws - so such a
+            // content is left out of the manifest. It stays captured and stays
+            // SHOWN (the engine reads the path as raw bytes); it just gets no
+            // physics carrier. Recomputed on every pass, said once per content.
+            g_nonUtf8Mesh.clear();
+            const auto writable = [](const std::string& a_id, const std::string& a_nif) {
+                if (policy::IsStrictUtf8(a_id) && policy::IsStrictUtf8(a_nif)) {
+                    return true;
+                }
+                static std::unordered_set<std::string> s_said;
+                if (g_nonUtf8Mesh.insert(a_id).second && s_said.insert(a_id).second) {
+                    SKSE::log::warn(
+                        "carrier manifest: '{}' has a mesh path that is not UTF-8 text ('{}') - "
+                        "shown, but it gets no physics carrier",
+                        a_id, a_nif);
+                }
+                return false;
+            };
             const auto resolveContent = [&](const std::string& id) -> nlohmann::json {
                 std::string nif;
                 if (!ResolveAdmittedModelPath(
                         id, EffectiveSexFor(id), *pol, nif, false)) {
+                    return nullptr;
+                }
+                if (!writable(id, nif)) {
                     return nullptr;
                 }
                 return { { "id", id }, { "nif", nif } };
@@ -595,13 +905,35 @@ namespace CostumeFW
                 if (!ResolveAdmittedModelPath(id, sex, *pol, nif, false)) {
                     return nullptr;
                 }
+                if (!writable(id, nif)) {
+                    return nullptr;
+                }
                 return { { "id", id }, { "nif", nif } };
             };
             auto arr = nlohmann::json::array();
             for (const auto& b : g_boxes) {
+                // No carrier for a quarantined box (W11). A no-marker token gets
+                // the same "Box<slot>" key as the real generation-0 box on that
+                // slot, and the two fought over one carrier - a full rebuild on
+                // every sync, and each could end up wearing the other's.
+                if (!BoxTokenUsable(b)) {
+                    continue;
+                }
+                // Several boxes share one biped slot from v1.6.4 on, so the slot
+                // cannot name the artifacts any more - they would overwrite each
+                // other's NIF, XML, hash and revision pool. The carrier key names
+                // them, and a box whose token does not resolve has none: it used
+                // to go in as slot 0 and have the builder make a Box0 carrier
+                // nothing could ever wear.
+                const int slot = SlotNumberOf(ResolveArmo(b.token));
+                const std::string carrierKey = tokenid::CarrierKeyFor(b.token, slot);
+                if (carrierKey.empty()) {
+                    continue;
+                }
                 nlohmann::json jb;
-                jb["slot"] = SlotNumberOf(ResolveArmo(b.token));
+                jb["slot"] = slot;
                 jb["token"] = b.token;
+                jb["carrierKey"] = carrierKey;
                 auto contents = nlohmann::json::array();
                 for (const auto& id : b.contents) {
                     if (auto c = resolveContent(id); !c.is_null()) {
@@ -671,7 +1003,20 @@ namespace CostumeFW
                 doc["persist"] = { { "contents", std::move(pcontents) } };
             }
 
-            const std::string out = doc.dump(1);
+            // Same fail-closed rule as WriteJson (C1): a model path in a legacy
+            // codepage would throw out of dump(), and this runs from the load-time
+            // task on EVERY load, so one such costume crashed every save. The old
+            // manifest stays, the carriers stay as they are, and no sync starts.
+            std::string out;
+            try {
+                out = doc.dump(1);
+            } catch (const nlohmann::json::exception& e) {
+                SKSE::log::error(
+                    "carrier manifest: NOT written - {} (a path that is not UTF-8) - carriers "
+                    "are left as they are",
+                    e.what());
+                return;
+            }
             {
                 std::ifstream prev(kManifestPath);
                 if (prev) {
@@ -693,7 +1038,7 @@ namespace CostumeFW
         }
 
         // --- carrier revision overrides (restart-free swaps) --------------------
-        // tools/nifcarrier `sync` rewrites a PRE-CREATED revision slot file and
+        // The carrier `sync` rewrites a PRE-CREATED revision slot file and
         // records it in carriers.json. usvfs shows external REWRITES of existing
         // files but never externally-created NEW files (verified in-game
         // 2026-07-03), which is exactly why the slots are pre-created. Repointing
@@ -843,7 +1188,11 @@ namespace CostumeFW
                 const int count = pj->value("count", -1);
                 // M2: keyed off the per-save ACTIVE set (not the catalog) - a
                 // character with nothing activated must not carry the head parts.
-                const bool active = count != 0 && g_cefEnabled && AnyPersistActive();
+                // CefEnabled(), not the stored flag: CEF_NOINJECT.txt has to
+                // keep the head carriers off too, and it did not - the persist
+                // head part stayed registered and the head rebuilt under a
+                // switch that promises nothing is injected (W3).
+                const bool active = count != 0 && CefEnabled() && AnyPersistActive();
                 const std::string file = pj->value("file", "");
                 if (!file.empty() && !CarrierFileOnDisk(file)) {
                     // Fail-safe (mirrors the box carriers): never point a HDPT at
@@ -937,16 +1286,32 @@ namespace CostumeFW
             try {
             bool anyChanged = false;
             for (const auto& b : g_boxes) {
+                if (!BoxTokenUsable(b)) {
+                    continue;  // W11: never repoint an ARMA CEF does not own
+                }
                 auto* armoA = ResolveArmo(b.token);
                 if (!armoA || armoA->armorAddons.empty()) {
                     continue;
                 }
                 const int slot = SlotNumberOf(armoA);
-                const auto key = std::to_string(slot);
-                if (!doc.contains(key)) {
+                const std::string key = tokenid::CarrierKeyFor(b.token, slot);
+                if (key.empty()) {
+                    continue;  // not a box token: nothing of ours to repoint
+                }
+                auto entry = doc.find(key);
+                if (entry == doc.end() && key == "Box" + std::to_string(slot)) {
+                    // A carriers.json written before v1.6.4 keys generation 0 by
+                    // the bare slot number. The next sync rewrites it under the
+                    // carrier key; until then read the old key, or every box
+                    // would drop back to the ESP-default (stale) carrier for a
+                    // session. Generation 0 only - a pool token must never pick
+                    // up the generation-0 entry that happens to share its slot.
+                    entry = doc.find(std::to_string(slot));
+                }
+                if (entry == doc.end() || !entry->is_object()) {
                     continue;
                 }
-                const std::string file = doc[key].value("file", "");
+                const std::string file = entry->value("file", "");
                 if (file.empty()) {
                     continue;
                 }
@@ -958,7 +1323,7 @@ namespace CostumeFW
                 // relative reads.
                 if (!CarrierFileOnDisk(file)) {
                     SKSE::log::warn(
-                        "carrier override: slot {} carrier '{}' missing/invalid on disk - keeping ESP default",
+                        "carrier override: {} carrier '{}' missing/invalid on disk - keeping ESP default",
                         key, file);
                     continue;
                 }
@@ -968,7 +1333,7 @@ namespace CostumeFW
                 // equip queue and can't be automated reliably). A manual re-equip reloads
                 // cleanly once FSMP has settled.
                 if (RepointCarrier(armoA, file)) {
-                    SKSE::log::info("carrier override: slot {} token '{}' -> {} (re-equip to apply)",
+                    SKSE::log::info("carrier override: {} token '{}' -> {} (re-equip to apply)",
                         key, b.token, file);
                     anyChanged = true;
                 }
@@ -1160,20 +1525,52 @@ namespace CostumeFW
                 si.hStdError = hLog;
                 si.hStdInput = INVALID_HANDLE_VALUE;
             }
+            // The child runs in a job that dies with its handle (review
+            // 2026-09-23 M15). A .cmd command is cmd.exe starting the real
+            // tool, and TerminateProcess on a timeout only ever stopped
+            // cmd.exe: the wedged tool kept running and raced the rerun on the
+            // same carrier files. Terminating the JOB takes the whole tree, and
+            // KILL_ON_JOB_CLOSE means nothing it started outlives the game
+            // either. Not inheritable, so the child cannot hold it open.
+            HANDLE job = CreateJobObjectA(nullptr, nullptr);
+            if (job) {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits,
+                        sizeof(limits))) {
+                    CloseHandle(job);
+                    job = nullptr;
+                }
+            }
+            // Suspended until it is in the job, so nothing it starts is born
+            // outside it.
             BOOL ok = CreateProcessA(nullptr, buf.data(), nullptr, nullptr, inherit,
-                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+                CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0), nullptr, nullptr, &si, &pi);
             if (hLog != INVALID_HANDLE_VALUE) {
                 CloseHandle(hLog);  // child holds its own inherited copy
             }
             if (!ok) {
                 SKSE::log::error("auto-sync: CreateProcess failed ({}) for: {}", GetLastError(), cmd);
+                if (job) {
+                    CloseHandle(job);
+                }
                 g_lastSyncExit = -3;
                 g_syncRunning = false;
                 return;
             }
+            if (job) {
+                if (!AssignProcessToJobObject(job, pi.hProcess)) {
+                    SKSE::log::warn("auto-sync: could not put the sync command in a job ({}) - a "
+                                    "timeout will stop only its first process",
+                        GetLastError());
+                    CloseHandle(job);
+                    job = nullptr;
+                }
+                ResumeThread(pi.hThread);
+            }
             SKSE::log::info("auto-sync: rebuilding carriers ({})", cmd);
             CloseHandle(pi.hThread);
-            std::thread([h = pi.hProcess]() {
+            std::thread([h = pi.hProcess, job]() {
                 DWORD code = 1;
                 if (WaitForSingleObject(h, kSyncTimeoutMs) == WAIT_OBJECT_0) {
                     GetExitCodeProcess(h, &code);
@@ -1184,24 +1581,39 @@ namespace CostumeFW
                     // carrier slots + sync log (review A-3). nifcarrier
                     // publishes atomically, so a mid-build kill cannot leave a
                     // partial carrier behind.
-                    SKSE::log::warn("auto-sync: nifcarrier timed out - terminating child");
-                    TerminateProcess(h, 1);
+                    SKSE::log::warn("auto-sync: nifcarrier timed out - terminating {}",
+                        job ? "the sync command and everything it started" : "the child");
+                    if (job) {
+                        TerminateJobObject(job, 1);
+                    } else {
+                        TerminateProcess(h, 1);
+                    }
                     WaitForSingleObject(h, 5000);
                     g_lastSyncExit = -2;
                 }
                 CloseHandle(h);
+                if (job) {
+                    CloseHandle(job);  // KILL_ON_JOB_CLOSE: whatever it left running stops here
+                }
                 g_syncRunning = false;
                 if (g_syncRerun.exchange(false)) {
                     SpawnSyncProcess();
                     return;
                 }
-                if (code == 0) {
+                // Same rule as the in-proc path (W10a): a failed exit can
+                // still have built some carriers, and carriers.json names only
+                // what did - applying it is a no-op for the rest. A timeout
+                // (-2 above) is the one case with nothing trustworthy to read.
+                if (code != 0) {
+                    SKSE::log::error("auto-sync: nifcarrier failed (exit {}) - applying whatever it "
+                                     "rebuilt (see CEF_sync.log)",
+                        code);
+                }
+                if (g_lastSyncExit != -2) {
                     SKSE::GetTaskInterface()->AddTask([]() {
                         SKSE::log::info("auto-sync: done - applying carrier revisions");
                         ApplyCarrierOverridesImpl(true);
                     });
-                } else {
-                    SKSE::log::error("auto-sync: nifcarrier failed (exit {}) - carriers unchanged", code);
                 }
             }).detach();
         }
@@ -1309,7 +1721,23 @@ namespace CostumeFW
                     RunInProcSync();
                     return;
                 }
-                if (sr.ok) {
+                if (sr.crashCode != 0) {
+                    // Contained inside Sync (C15): the builder faulted in
+                    // hardware on some content, and the game goes on.
+                    SKSE::log::error("auto-sync: the carrier builder crashed (code {:#x}) - "
+                                     "carriers unchanged (see CEF_sync.log)",
+                        sr.crashCode);
+                }
+                // Apply what was built even when something else failed. One
+                // content that never builds used to hold back every other
+                // box's new carrier until the next save load (review
+                // 2026-09-23 W10a); carriers.json only names what did build.
+                if (!sr.ok && sr.built > 0) {
+                    SKSE::log::error("auto-sync: {} rebuilt, {} failed - applying the rebuilt ones "
+                                     "(see CEF_sync.log)",
+                        sr.built, sr.failed);
+                }
+                if (sr.ok || sr.built > 0) {
                     const int built = sr.built;
                     SKSE::GetTaskInterface()->AddTask([built]() {
                         SKSE::log::info("auto-sync: done - applying carrier revisions");
@@ -1347,6 +1775,24 @@ namespace CostumeFW
         }
     }
 
+    std::string DeriveBoxId(std::string_view a_seed)
+    {
+        // FNV-1a 64. Not a security hash; it needs to be stable across runs and
+        // builds, which std::hash explicitly is not.
+        //
+        // A box that existed before 1.6.4 seeds this with its canonical token,
+        // which is sound exactly because one box holds one token (ROOT B) - a
+        // rule 1.6.4 keeps; only the biped slot stops being unique.
+        std::uint64_t h = 1469598103934665603ULL;
+        for (const unsigned char c : a_seed) {
+            h ^= c;
+            h *= 1099511628211ULL;
+        }
+        char buf[17]{};
+        std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(h));
+        return buf;
+    }
+
     void LoadBoxes()
     {
         StoreLock lk;
@@ -1366,6 +1812,8 @@ namespace CostumeFW
         g_persistPreset.clear();
         g_persistPresetName.clear();
         g_custody.clear();
+        g_refOnly.clear();
+        g_refOnlyChecked = false;
         PublishPolicy({});
         g_cefEnabled = true;
         g_settingsLoadOk = false;  // set only on the clean path below
@@ -1374,8 +1822,53 @@ namespace CostumeFW
         // (migration) and rewrite into the new file at the end of load.
         bool migrated = false;
         g_settingsUnreadable = false;  // re-decided by this load
+        g_settingsSource = kSettingsPath;
+        nlohmann::json doc;
+        bool fromBackup = false;
+        // The last-known-good copy, for a main file that cannot be used. False
+        // when there is none that parses.
+        const auto loadBackup = [&doc]() {
+            std::ifstream bak(kSettingsBakPath);
+            if (!bak) {
+                SKSE::log::error("settings: no readable {} either", kSettingsBakPath);
+                return false;
+            }
+            try {
+                bak >> doc;
+            } catch (const std::exception& e) {
+                SKSE::log::error("settings: backup parse error: {}", e.what());
+                return false;
+            }
+            return true;
+        };
         std::ifstream f(kSettingsPath);
-        if (!f) {
+        // "Cannot open" used to mean "no file", and a file that is there but
+        // cannot be read right now - a sync client or an editor holding it, a
+        // permission problem - loaded as a fresh install. The first change after
+        // that wrote the empty state over the real file, and the next clean start
+        // copied the empty one over the backup (review 2026-09-23 C13). Only a
+        // main file AND a backup that are both really absent make a fresh start.
+        const DWORD openErr = f ? 0 : OpenErrorFor(kSettingsPath);
+        const bool mainAbsent = IsNotFound(openErr);
+        if (!f && (!mainAbsent || !IsNotFound(OpenErrorFor(kSettingsBakPath)))) {
+            if (mainAbsent) {
+                SKSE::log::warn("settings: {} is missing but {} is there - loading the backup",
+                    kSettingsPath, kSettingsBakPath);
+            } else {
+                SKSE::log::error("settings: {} exists but cannot be opened (error {}) - loading "
+                                 "the backup",
+                    kSettingsPath, openErr);
+            }
+            if (!loadBackup()) {
+                g_settingsUnreadable = true;  // every WriteJson refuses while set
+                return;
+            }
+            fromBackup = true;
+            g_settingsSource = kSettingsBakPath;
+            SKSE::log::warn("settings: recovered from {} (it is written back to {} on the next "
+                            "settings change)",
+                kSettingsBakPath, kSettingsPath);
+        } else if (!f) {
             std::ifstream old(kOldBoxesPath);
             if (!old) {
                 // No file at all: a fresh install, not a failure - writing must
@@ -1384,46 +1877,94 @@ namespace CostumeFW
                 // still holds a full store is the case we know LEAST about, and
                 // an empty held set there would hand back everything at once.
                 SKSE::log::info("settings: no {} (no settings yet)", kSettingsPath);
+                // Nothing here predates the reference-only set, so its one-time
+                // pass has nothing to look at - and running it later would read
+                // this install's first MCM captures (they get a custody row only
+                // at the next load) as items nobody ever held.
+                g_refOnlyChecked = true;
                 return;
             }
             SKSE::log::info("settings: migrating legacy {} -> {}", kOldBoxesPath, kSettingsPath);
             f.swap(old);
             migrated = true;
+            g_settingsSource = kOldBoxesPath;
         }
-        nlohmann::json doc;
-        bool fromBackup = false;
-        try {
-            f >> doc;
-        } catch (const std::exception& e) {
-            SKSE::log::error("settings: JSON parse error: {}", e.what());
-            if (migrated) {
-                g_settingsUnreadable = true;
-                return;  // legacy file was corrupt; nothing else to try
-            }
-            // Corrupt main file: fall back to the last-known-good backup taken at
-            // the previous successful load. Without this, the cleared state above
-            // would look like "no settings" and the next WriteJson would make the
-            // loss permanent (Codex review 2026-07-05 A-1).
-            std::ifstream bak(kSettingsBakPath);
-            if (!bak) {
-                g_settingsUnreadable = true;
-                return;
-            }
+        if (!fromBackup) {
             try {
-                bak >> doc;
-            } catch (const std::exception& e2) {
-                SKSE::log::error("settings: backup parse error: {}", e2.what());
-                g_settingsUnreadable = true;
-                return;
+                f >> doc;
+            } catch (const std::exception& e) {
+                SKSE::log::error("settings: JSON parse error: {}", e.what());
+                if (migrated) {
+                    g_settingsUnreadable = true;
+                    return;  // legacy file was corrupt; nothing else to try
+                }
+                // Corrupt main file: fall back to the last-known-good backup taken
+                // at the previous successful load. Without this, the cleared state
+                // above would look like "no settings" and the next WriteJson would
+                // make the loss permanent (Codex review 2026-07-05 A-1).
+                if (!loadBackup()) {
+                    g_settingsUnreadable = true;
+                    return;
+                }
+                fromBackup = true;
+                g_settingsSource = kSettingsBakPath;
+                SKSE::log::warn("settings: recovered from {} (main file corrupt; "
+                                "it is rewritten on the next settings change)",
+                    kSettingsBakPath);
             }
-            fromBackup = true;
-            SKSE::log::warn("settings: recovered from {} (main file corrupt; "
-                            "it is rewritten on the next settings change)",
-                kSettingsBakPath);
+        }
+        // The read handle goes NOW, before anything below can write. This
+        // function writes from inside its own body - the v1.2.1 id heal and the
+        // legacy migration both call WriteJson - and WriteFileAtomic replaces the
+        // file with MoveFileEx(MOVEFILE_REPLACE_EXISTING), which needs DELETE
+        // access on the destination. MSVC opens an ifstream without
+        // FILE_SHARE_DELETE, so while this stream lives that rename fails with
+        // ERROR_ACCESS_DENIED (5) and the write is lost.
+        //
+        // v1.6.4 made that path the normal one for everybody: a box with no
+        // boxId sets `healed`, so the FIRST load after the upgrade is exactly
+        // when the settings are written from in here. Before, `healed` was a rare
+        // repair and the failure went unnoticed.
+        f.close();
+        // --- CoreMissing: judge nothing, change nothing (v1.6.4) -------------
+        // Every question this function asks about a token - is it an ARMO, does
+        // its plugin define box tokens - is answered against the loaded plugins.
+        // Without CostumeFW.esp the honest answer to all of them is "cannot say",
+        // not "broken", so the definitions are left exactly as they are and the
+        // file is not rewritten. CEF can do nothing useful this session anyway.
+        //
+        // This runs BEFORE the G3 circuit breaker below on purpose: G3 only trips
+        // at two or more dropped boxes, so a user with a single box would not be
+        // covered by it.
+        if (!CorePluginLoaded()) {
+            SKSE::log::error(
+                "settings: {} is not loaded - leaving {} untouched. Box definitions are "
+                "not read, judged or rewritten this session; install/enable the plugin "
+                "and restart.",
+                tokenid::kCorePlugin, kSettingsPath);
+            g_settingsUnreadable = true;  // every WriteJson refuses while set
+            return;
+        }
+        // CoreOutdated: the plugin is there but CFW_BoxTokenMarker is not, so the
+        // DLL is 1.6.4 and the plugin files are still 1.6.3. Every token would
+        // fail the marker test and be quarantined - a whole catalogue declared
+        // broken by a half-finished install. The VR patch has shipped as a
+        // DLL-only download before, so this is a real way to arrive here.
+        if (!BoxTokenMarkerKeyword()) {
+            SKSE::log::error(
+                "settings: {} is older than this DLL - it has no CFW_BoxTokenMarker, so no "
+                "token can be recognised. Leaving {} untouched; update the plugin files to "
+                "1.6.4 and restart.",
+                tokenid::kCorePlugin, kSettingsPath);
+            g_settingsUnreadable = true;
+            return;
         }
         // Heal pre-merge colon-ids (v1.2.1 plugin consolidation) wherever the
         // settings persist them; a healed file is rewritten once below.
         bool healed = false;
+        // Set when a box arrives without a boxId: the file is still in the 1.6.3
+        // shape, so a copy of it is kept before the first 1.6.4 write.
+        bool wasPre164 = false;
         // ROOT B (border audit 2026-07-09): the field reads below are typed
         // value()/get<> accesses. A WRONG-TYPED field in a hand-edited settings file
         // (e.g. "boxes": 5) throws json::type_error - which the parse-only guard above
@@ -1433,33 +1974,66 @@ namespace CostumeFW
         // invariants here (one box per token, one holder per content id).
         std::vector<std::string> seenTokens;    // ROOT B: one box per token
         std::vector<std::string> seenContents;  // ROOT B: one holder per content id
+        std::vector<std::string> seenBoxIds;    // v1.6.4: one definition per boxId
+        int boxesSeen = 0;                      // rows the file offered
+        int boxesDropped = 0;                   // rows this load refused (G3)
         try {
         g_cefEnabled = doc.value("enabled", true);
         const auto boxes = doc.value("boxes", nlohmann::json::array());
         for (const auto& jb : boxes) {
+            ++boxesSeen;
             BoxDefInfo b;
+            b.boxId = jb.value("boxId", std::string{});
             b.label = jb.value("label", std::string{});
             b.token = jb.value("token", std::string{});
             healed |= MigrateLegacyColonId(b.token);
             healed |= CanonicalizeColonId(b.token);  // ROOT D
+            // v1.6.4: fold a CEF plugin name written in the wrong case onto the
+            // official spelling. Both resolve to the same record, but the store
+            // keys on the STRING - so "costumefw.esp" and "CostumeFW.esp" were two
+            // different tokens, and FreeTokens would offer a token a box already
+            // held.
+            healed |= tokenid::CanonicalizeCefColonId(b.token);
             if (b.token.empty()) {
+                ++boxesDropped;
                 continue;
             }
-            if (!IsTokenColonId(b.token)) {
-                // ROOT C: a box token must be a CEF plugin record; anything else means
-                // SetTokenStats below would rewrite a foreign/vanilla ARMO's stats.
-                SKSE::log::warn("boxes: LoadBoxes drops box with non-CEF token '{}'", b.token);
+            if (b.boxId.empty()) {
+                // Pre-1.6.4 definition. Derive the id from the canonical token
+                // rather than issuing a random one: migrating the same file twice
+                // then produces the same ids, so a migration interrupted before
+                // the save cannot hand one box two identities.
+                b.boxId = DeriveBoxId(b.token);
+                wasPre164 = true;
+                healed = true;
+            }
+            if (std::find(seenBoxIds.begin(), seenBoxIds.end(), b.boxId) != seenBoxIds.end()) {
+                SKSE::log::warn("boxes: LoadBoxes drops a second definition on boxId '{}'", b.boxId);
+                ++boxesDropped;
                 healed = true;
                 continue;
+            }
+            // What the CURRENT load order can deliver for this token. The entry is
+            // kept either way (see TokenState): a definition is the only record of
+            // what a costume was made of, and dropping it to tidy the file is how
+            // that record is lost. An unusable token is quarantined instead.
+            b.tokenState = ClassifyBoxToken(b.token);
+            if (b.tokenState != TokenState::Resolved) {
+                SKSE::log::warn(
+                    "boxes: box '{}' token '{}' is not usable ({}) - the definition is KEPT and "
+                    "quarantined; see the Recovery page to re-point or remove it",
+                    b.boxId, b.token, TokenStateReason(b.tokenState));
             }
             if (std::find(seenTokens.begin(), seenTokens.end(), b.token) != seenTokens.end()) {
                 // ROOT B: token-keyed mutators only ever reach the first box, so a
                 // second box on the same token is a dead "item printer" - drop it.
                 SKSE::log::warn("boxes: LoadBoxes drops second box on token '{}'", b.token);
+                ++boxesDropped;
                 healed = true;
                 continue;
             }
             seenTokens.push_back(b.token);
+            seenBoxIds.push_back(b.boxId);
             for (const auto& c : jb.value("contents", nlohmann::json::array())) {
                 if (c.is_string()) {
                     auto id = c.get<std::string>();
@@ -1503,6 +2077,32 @@ namespace CostumeFW
             b.uiVisible = jb.value("uiVisible", true);
             b.wear = jb.value("wear", false);
             g_boxes.push_back(std::move(b));
+        }
+        // --- G3: the all-or-nothing circuit breaker (v1.6.4) -----------------
+        // If this load refused EVERY box the file offered, the likely cause is
+        // something wrong on our side - a plugin that failed to load, an ingest
+        // rule of ours that is too strict, a schema mistake - not a user who
+        // corrupted all of their boxes at once. Applying that result and writing
+        // it back turns a bad session into permanent data loss. The 2026-09-08
+        // incident is exactly this shape, and only the .bak saved those boxes.
+        //
+        // Two or more, because refusing the single box a one-box file contains is
+        // a legitimate outcome (it really was a publish token) and must stay
+        // reportable. The one-box user is covered by the CoreMissing guard above,
+        // which is the case that actually produces a false wipe.
+        if (boxesDropped >= 2 && boxesDropped >= boxesSeen) {
+            SKSE::log::error(
+                "settings: REFUSED every box in {} ({} of {}) - that is far more likely to be "
+                "our fault than yours, so nothing is applied and the file is left alone. "
+                "Check the warnings above, then restart.",
+                kSettingsPath, boxesDropped, boxesSeen);
+            g_boxes.clear();
+            // A reload that lands here leaves the tokens the PREVIOUS load
+            // stamped carrying their armour, weight and name with no box
+            // behind them (M11). Nothing claims them now, so undo them.
+            ResetUnclaimedTokenStats();
+            g_settingsUnreadable = true;  // every WriteJson refuses while set
+            return;
         }
         const auto persist = doc.value("persist", nlohmann::json::object());
         for (const auto& c : persist.value("contents", nlohmann::json::array())) {
@@ -1701,6 +2301,15 @@ namespace CostumeFW
             ev.when = it.value().value("when", std::string{});
             g_custody[std::move(key)] = std::move(ev);
         }
+        for (const auto& e : JsonArray(doc, "refOnly")) {
+            if (!e.is_string()) {
+                continue;
+            }
+            std::string id = e.get<std::string>();
+            healed |= CanonicalizeColonId(id);
+            RefOnlyInsert(id);
+        }
+        g_refOnlyChecked = JsonBool(doc, "refOnlyChecked", false);
         ParsePublishJson(doc);
         } catch (const std::exception& e) {
             // ROOT B: a wrong-typed field threw mid-extraction. Discard the partial
@@ -1708,21 +2317,35 @@ namespace CostumeFW
             // no crash, and no data-destroying WriteJson of an empty store.
             SKSE::log::error("settings: field type error ({}) - loaded empty; "
                              "CEF_settings.json left intact for repair", e.what());
+            // EVERY map the extraction above can have started filling. This list
+            // used to stop short: the per-content shape hides, the show-real-body
+            // set and the published costumes survived a failed load holding
+            // whatever had been read before the bad field, and the session went
+            // on acting on them (review 2026-09-23 M11).
             g_boxes.clear();
             g_persist.clear();
             g_hideRules.clear();
             g_genderModes.clear();
             g_bodyMorphOn.clear();
-        g_statEnchantOff.clear();
-        g_statWeightOff.clear();
-        g_statArmorOff.clear();
+            g_statEnchantOff.clear();
+            g_statWeightOff.clear();
+            g_statArmorOff.clear();
+            g_hideShapes.clear();
+            g_contentShapes.clear();
+            g_showRealBody.clear();
             g_contentEnchants.clear();
             g_contentTemper.clear();
             g_persistPreset.clear();
             g_persistPresetName.clear();
             g_custody.clear();
+            g_refOnly.clear();
+            g_refOnlyChecked = false;
+            DropPublishedSnapshots();
             PublishPolicy({});
             g_cefEnabled = true;
+            // Tokens a previous load stamped (a reload from the MCM/SMF) keep
+            // their armour, weight and name otherwise - no box claims them now.
+            ResetUnclaimedTokenStats();
             // g_settingsLoadOk stays false: the orphan sweep must not run - and the
             // empty state we are holding must never reach the file (this is the
             // path a schema mistake of ours took on 2026-09-08, and only the .bak
@@ -1732,6 +2355,14 @@ namespace CostumeFW
         }
         // Clean, fully validated load - the held sets are now trustworthy.
         g_settingsLoadOk = true;
+        // Only now: the file really was the 1.6.3 shape and we really did read it.
+        // The next write is the moment that shape stops existing anywhere, so
+        // WriteJson keeps a copy of it first (MaybeWritePre164Backup).
+        g_settingsWasPre164 = wasPre164;
+        if (wasPre164) {
+            SKSE::log::info("settings: pre-1.6.4 file - {} box(es) given a boxId derived from "
+                            "their token", g_boxes.size());
+        }
         // ROOT B: snapshot the last-known-good backup only AFTER a clean, fully
         // validated load (previously taken before the field reads, so a file that
         // parsed but had a bad field could clobber the good .bak).
@@ -1749,8 +2380,20 @@ namespace CostumeFW
 
         // Register every box content for worn-gated injection (no inject yet) and
         // write each box's aggregate armor/weight onto its token.
+        //
+        // A quarantined box registers NOTHING. Its token cannot be worn, so the
+        // gate that decides whether its contents show can never say yes on
+        // purpose - and registering them anyway is what let a pool-missing box
+        // reach the persist branch (see the tokenId/tokenForm note in
+        // SkinRebind). The definition is still kept and still listed; it simply
+        // stops putting anything on the player until its plugin is back.
         int contentCount = 0;
+        int quarantinedSkipped = 0;
         for (const auto& b : g_boxes) {
+            if (!BoxTokenUsable(b)) {
+                quarantinedSkipped += static_cast<int>(b.contents.size());
+                continue;
+            }
             for (const auto& c : b.contents) {
                 if (RegisterBoxById(c, b.token)) {
                     ++contentCount;
@@ -1767,6 +2410,12 @@ namespace CostumeFW
         // character starts with nothing shown.
         SKSE::log::info("settings: loaded {} box(es) ({} content), {} persist (catalog), enabled={}",
             g_boxes.size(), contentCount, g_persist.size(), g_cefEnabled);
+        if (quarantinedSkipped > 0) {
+            SKSE::log::info(
+                "settings: {} content(s) not registered - they belong to quarantined box(es), "
+                "whose definitions are kept but put nothing on the player",
+                quarantinedSkipped);
+        }
         // Point each token ARMA at its current carrier revision (carriers.json).
         // No refresh here: tokens haven't equipped yet at load time.
         ApplyCarrierOverridesImpl(false);
@@ -1803,17 +2452,25 @@ namespace CostumeFW
                 doc = nlohmann::json::object();
             }
         }
-        if (const auto pj = doc.find("persist"); pj != doc.end() && pj->is_object()) {
-            say("[CEF] persist entry: rev=" + std::to_string(pj->value("rev", -1)) +
-                " count=" + std::to_string(pj->value("count", -1)) +
-                " file=" + pj->value("file", std::string{ "?" }) +
-                " parts=" + std::to_string(pj->value("parts", nlohmann::json::array()).size()));
-        } else {
-            say("[CEF] persist entry: none (no persist build yet)");
+        // Typed reads: carriers.json is written by the builder and edited by
+        // hand when someone is debugging, and value() throws on a field of the
+        // wrong type - "rev": null crashed the console command whose job is to
+        // look at a broken file (review 2026-09-23 C16).
+        try {
+            if (const auto pj = doc.find("persist"); pj != doc.end() && pj->is_object()) {
+                say("[CEF] persist entry: rev=" + std::to_string(JsonInt(*pj, "rev", -1)) +
+                    " count=" + std::to_string(JsonInt(*pj, "count", -1)) +
+                    " file=" + JsonStr(*pj, "file", "?") +
+                    " parts=" + std::to_string(JsonArray(*pj, "parts").size()));
+            } else {
+                say("[CEF] persist entry: none (no persist build yet)");
+            }
+        } catch (const std::exception& e) {
+            say(std::string("[CEF] persist entry: carriers.json unreadable (") + e.what() + ")");
         }
         say("[CEF] persist: catalog=" + std::to_string(g_persist.size()) +
             " active(this save)=" + std::to_string(ActivePersistIds().size()) +
-            std::string(g_cefEnabled ? "" : " (CEF disabled)"));
+            std::string(CefEnabled() ? "" : " (CEF disabled)"));
         for (auto* part : pool) {
             const char* ed = part->GetFormEditorID();
             const bool reg = PlayerHasHeadPart(part);
@@ -1848,7 +2505,10 @@ namespace CostumeFW
     bool CefEnabled()
     {
         StoreLock lk;
-        return g_cefEnabled;
+        // CEF_NOINJECT.txt overrides the stored setting for the session without
+        // touching it: WriteJson keeps writing g_cefEnabled, so deleting the file
+        // restores whatever the user last chose (Config.h::NoInject).
+        return g_cefEnabled && !NoInject();
     }
 
     bool SetCefEnabled(bool a_on)
@@ -1859,6 +2519,49 @@ namespace CostumeFW
         return g_cefEnabled;
     }
 
+    void RestampAllTokens()
+    {
+        StoreLock lk;
+        // The master switch reaches the token's NUMBERS, not just its mesh.
+        // Turning CEF off hid the costume and revoked the ability, and left the
+        // token's armor rating, weight and passed-through keywords stamped on a
+        // piece of gear the player is still wearing - an invisible suit of armour
+        // that goes on protecting them. Nobody asked for "hide the look, keep the
+        // defence", and it is the sort of thing that comes back as a bug report
+        // about armour ratings that do not add up.
+        //
+        // SetTokenStats reads CefEnabled() itself, so this is only the sweep that
+        // makes it see the new answer: off writes zeroes, on writes the sums back.
+        // Main thread only - it edits ARMO forms.
+        for (const auto& b : g_boxes) {
+            if (!BoxTokenUsable(b)) {
+                continue;  // W11
+            }
+            SetTokenStats(b);
+        }
+        SKSE::log::info("boxes: re-stamped {} token(s) for master {}", g_boxes.size(),
+            g_cefEnabled ? "ON" : "OFF");
+    }
+
+    bool BoxTokenUsable(const BoxDefInfo& a_box)
+    {
+        return a_box.tokenState == TokenState::Resolved;
+    }
+
+    const char* TokenStateReason(TokenState a_state)
+    {
+        switch (a_state) {
+        case TokenState::Resolved:       return "";
+        case TokenState::PoolMissing:    return "pool-missing";
+        case TokenState::ParseError:     return "parse-error";
+        case TokenState::ForeignPlugin:  return "foreign-plugin";
+        case TokenState::NotArmo:        return "not-armo";
+        case TokenState::NoMarker:       return "no-marker";
+        case TokenState::UnresolvedForm: return "unresolved-form";
+        }
+        return "unknown";
+    }
+
     bool IsBoxToken(std::uint32_t a_form)
     {
         StoreLock lk;
@@ -1866,14 +2569,16 @@ namespace CostumeFW
             return false;
         }
         for (const auto& b : g_boxes) {
-            if (ResolveFormId(b.token) == a_form) {
+            // A quarantined box's token is not a box token to the equip and
+            // container sinks (W11): it may be a publish token an NPC wears.
+            if (BoxTokenUsable(b) && TokenFormOf(b) == a_form) {
                 return true;
             }
         }
         return false;
     }
 
-    void ReplenishToken(std::uint32_t a_tokenForm)
+    void ReplenishToken(std::uint32_t a_tokenForm, std::uint32_t a_movedTo)
     {
         StoreLock lk;
         if (a_tokenForm == 0) {
@@ -1886,14 +2591,19 @@ namespace CostumeFW
         }
         // Only replenish a token whose box is ENABLED (distribution on). A disabled
         // box's token is meant to be gone, so don't fight the user removing it.
-        bool enabledBox = false;
+        const BoxDefInfo* box = nullptr;
         for (const auto& b : g_boxes) {
             if (ResolveFormId(b.token) == a_tokenForm) {
-                enabledBox = b.enabled;
+                box = &b;
                 break;
             }
         }
-        if (!enabledBox) {
+        if (!box || !box->enabled) {
+            return;
+        }
+        // W11: a quarantined box's token is not part of any working box (the
+        // contract at the top of BoxStore.h), so nothing hands it out.
+        if (!BoxTokenUsable(*box)) {
             return;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1901,6 +2611,24 @@ namespace CostumeFW
         auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
         if (!player || !obj) {
             return;
+        }
+        // Given to someone, sold, put in a chest: take THAT one back. Minting a
+        // replacement left the original out there - a second token, with the
+        // box's armour rating, every time (M7). The hidden store is CEF's own
+        // and never a destination to take from.
+        if (a_movedTo != 0 && a_movedTo != StoreFormId()) {
+            auto* destForm = RE::TESForm::LookupByID(a_movedTo);
+            if (auto* dest = destForm ? destForm->As<RE::TESObjectREFR>() : nullptr) {
+                const auto there = dest->GetInventoryCounts();
+                if (const auto t = there.find(obj); t != there.end() && t->second > 0) {
+                    dest->RemoveItem(obj, t->second, RE::ITEM_REMOVE_REASON::kStoreInContainer,
+                        nullptr, player);
+                    SKSE::log::info("boxes: took token {:08X} back from {:08X} - a box token "
+                                    "stays with the player",
+                        a_tokenForm, a_movedTo);
+                    return;
+                }
+            }
         }
         const auto counts = player->GetInventoryCounts();
         const auto it = counts.find(obj);
@@ -1935,12 +2663,31 @@ namespace CostumeFW
     void ReapplyBoxes()
     {
         StoreLock lk;
+        int quarantined = 0;
         for (const auto& b : g_boxes) {
+            // Same gate as LoadBoxes, and it has to be: this runs on EVERY save
+            // load, so without it the quarantine lasted exactly as long as the
+            // three seconds between reading the settings and the first
+            // kPostLoadGame pass. In-game 2026-09-17, with all 20 tokens
+            // unresolvable: "0 content(s) registered" at load, "54 content(s)
+            // registered" right after this function. Nothing reached the player
+            // there only because an unresolvable token is never worn - the state
+            // was still the one the load had just refused to produce, and a
+            // second path that does not read tokenState is how the dormant box
+            // put its costume on in the first place (7032ecc).
+            if (!BoxTokenUsable(b)) {
+                quarantined += static_cast<int>(b.contents.size());
+                continue;
+            }
             for (const auto& c : b.contents) {
                 RegisterBoxById(c, b.token);
             }
             SetTokenStats(b);  // token fields revert on load - re-apply
             ApplyBoxLabelToToken(b);  // inventory name too (rename feature)
+        }
+        if (quarantined > 0) {
+            SKSE::log::info("settings: {} content(s) left unregistered - quarantined box(es)",
+                quarantined);
         }
         // Persist actives are per-save: the co-save restore (which precedes this
         // kPostLoadGame pass) already re-registered them (M2, CEF_STATE_SCOPE.md §3).
@@ -1951,8 +2698,18 @@ namespace CostumeFW
     {
         StoreLock lk;
         // Snapshot this save's persist actives BEFORE the registry is wiped -
-        // they are co-save state, invisible to the settings JSON.
-        const auto actives = ActivePersistIds();
+        // they are co-save state, invisible to the settings JSON. The carried
+        // ones (their plugin was off at load, or the policy refused them) are
+        // re-tried with the rest: a reload is often the moment the reason went
+        // away - a blacklist entry lifted - and whatever fails again is carried
+        // again below (review 2026-09-23 W20).
+        auto actives = ActivePersistIds();
+        for (auto& id : TakeUnresolvedActives()) {
+            if (std::none_of(actives.begin(), actives.end(),
+                    [&id](const std::string& a_id) { return policy::SameColonId(a_id, id); })) {
+                actives.push_back(std::move(id));
+            }
+        }
         // The re-derive used to be HERE, before LoadBoxes, and that was right
         // while RebuildBoxAbility meant "drop the synthesized spell and mark it
         // stale" - dropping it early, refilling it from the reloaded file
@@ -1984,6 +2741,11 @@ namespace CostumeFW
         for (const auto& id : actives) {
             if (RegisterBoxById(id, {})) {
                 ++restored;
+            } else {
+                // Not dropped (W20): the next save keeps it, the held set keeps
+                // its original out of the sweep, and a later load or reload
+                // that can register it brings it back.
+                CarryPersistActive(id);
             }
         }
         // ClearRegistry above wiped EVERY actor, not just the player - published
@@ -2056,12 +2818,26 @@ namespace CostumeFW
         // "Already added" means ACTIVE ON THIS SAVE (M2, CEF_STATE_SCOPE.md §3):
         // capturing a catalog entry on a second character must succeed - only a
         // same-save duplicate fails (so the MCM never swallows the item).
+        // Case-blind like ContentHolder (W26): a second spelling of the same
+        // plugin is the same item, and a second catalog row for it would be a
+        // second registry entry drawing it twice.
+        // A preset-listed entry is the exception (C2): it is active with no item
+        // behind it, and capturing the real one is how it gets its original -
+        // so that succeeds instead, adding nothing. The capture that follows
+        // takes the mark off.
+        const bool backing = RefOnlyHas(content);
         for (const auto& it : ActiveSnapshot()) {
-            if (it.tokenId.empty() && it.id == content) {
-                return false;
+            if (it.tokenId.empty() && policy::SameColonId(it.id, content)) {
+                if (!backing) {
+                    return false;
+                }
+                SKSE::log::info("persist: '{}' backs the preset-listed entry with a real item",
+                    content);
+                break;
             }
         }
-        if (std::find(g_persist.begin(), g_persist.end(), content) == g_persist.end()) {
+        if (std::none_of(g_persist.begin(), g_persist.end(),
+                [&content](const std::string& a_id) { return policy::SameColonId(a_id, content); })) {
             g_persist.push_back(content);  // catalog add (shared across saves)
             WriteJson();
         }
@@ -2157,7 +2933,10 @@ namespace CostumeFW
         StoreLock lk;
         std::vector<std::string> out;
         out.push_back("# Status");
-        out.push_back(std::string("CEF master: ") + (g_cefEnabled ? "enabled" : "DISABLED"));
+        out.push_back(std::string("CEF master: ") + (CefEnabled() ? "enabled" : "DISABLED") +
+                      (NoInject() ? " (CEF_NOINJECT.txt - the setting itself says " +
+                                        std::string(g_cefEnabled ? "enabled" : "disabled") + ")"
+                                  : ""));
         out.push_back(std::string("RaceMenu/skee body morph: ") +
                       (BodyMorph::Available() ? "acquired" : "NOT AVAILABLE"));
         out.push_back(std::string("FSMP (hdtSMP64.dll): ") +
@@ -2243,12 +3022,23 @@ namespace CostumeFW
         auto* player = RE::PlayerCharacter::GetSingleton();
 
         out.push_back("# Boxes");
+        {
+            const auto stats = BoxTokenPoolStats();
+            out.push_back(std::format(
+                "token pool: {} total ({} in boxes, {} reserved by publish, {} free); "
+                "box definitions: {}",
+                stats.total, stats.inBoxes, stats.reserved, stats.free, stats.definitions));
+        }
         if (g_boxes.empty()) {
             out.push_back("(no boxes)");
         }
         for (const auto& b : g_boxes) {
             const int slot = SlotNumberOf(ResolveArmo(b.token));
-            std::string line = "box " + std::to_string(slot) + ": " +
+            // The carrier key, not the slot: a slot can hold several boxes now,
+            // and "box 55" alone would name three of them the same.
+            const std::string key = tokenid::CarrierKeyFor(b.token, slot);
+            std::string line = "box " + std::to_string(slot) + " [" +
+                               (key.empty() ? b.token : key) + "]: " +
                                std::to_string(b.contents.size()) + " item(s)";
             if (!b.enabled) {
                 line += ", disabled";
@@ -2257,15 +3047,27 @@ namespace CostumeFW
             if (player && tf && player->GetWornArmor(tf)) {
                 line += ", WORN";
             }
-            const std::string key = std::to_string(slot);
-            if (cj.contains(key) && cj[key].is_object()) {
-                line += ", carrier r" + std::to_string(cj[key].value("rev", 0));
-                const std::string file = cj[key].value("file", std::string{});
-                if (!file.empty() && !CarrierFileOnDisk(file)) {
-                    line += " (FILE MISSING)";
+            // Same pre-1.6.4 fallback as ApplyCarrierOverridesImpl, so the
+            // report agrees with the carrier the token is actually pointed at.
+            // Typed reads, and a catch behind them: this is the page someone
+            // opens BECAUSE a file looks wrong, and "rev": null used to crash
+            // it on the spot (review 2026-09-23 C16).
+            try {
+                auto entry = key.empty() ? cj.end() : cj.find(key);
+                if (entry == cj.end() && key == "Box" + std::to_string(slot)) {
+                    entry = cj.find(std::to_string(slot));
                 }
-            } else {
-                line += ", carrier: none built";
+                if (entry != cj.end() && entry->is_object()) {
+                    line += ", carrier r" + std::to_string(JsonInt(*entry, "rev", 0));
+                    const std::string file = JsonStr(*entry, "file");
+                    if (!file.empty() && !CarrierFileOnDisk(file)) {
+                        line += " (FILE MISSING)";
+                    }
+                } else {
+                    line += ", carrier: none built";
+                }
+            } catch (const std::exception&) {
+                line += ", carriers.json unreadable";
             }
             out.push_back(line);
         }
@@ -2273,13 +3075,16 @@ namespace CostumeFW
         out.push_back("# Persist");
         out.push_back("catalog=" + std::to_string(g_persist.size()) +
                       "  active(this save)=" + std::to_string(ActivePersistIds().size()));
-        if (const auto pj = cj.find("persist"); pj != cj.end() && pj->is_object()) {
-            out.push_back("carrier r" + std::to_string(pj->value("rev", -1)) +
-                          ", smp content=" + std::to_string(pj->value("count", -1)) +
-                          ", proxy parts=" +
-                          std::to_string(pj->value("parts", nlohmann::json::array()).size()));
-        } else {
-            out.push_back("carrier: none built");
+        try {
+            if (const auto pj = cj.find("persist"); pj != cj.end() && pj->is_object()) {
+                out.push_back("carrier r" + std::to_string(JsonInt(*pj, "rev", -1)) +
+                              ", smp content=" + std::to_string(JsonInt(*pj, "count", -1)) +
+                              ", proxy parts=" + std::to_string(JsonArray(*pj, "parts").size()));
+            } else {
+                out.push_back("carrier: none built");
+            }
+        } catch (const std::exception&) {
+            out.push_back("carriers.json unreadable");
         }
         {
             const auto pool = PersistPool();
@@ -2298,6 +3103,33 @@ namespace CostumeFW
             const auto lines = StoreDiagLines();
             out.push_back(lines.empty() ? "(unavailable)" : lines.front().substr(6));
             out.push_back("full listing: console `cef store`");
+        }
+        // Only when there are any: a section that is empty on every healthy
+        // setup is a section nobody reads on the one that is not.
+        if (const auto legacy = LegacyNifRefusals(); !legacy.empty()) {
+            out.push_back("# Legacy (LE) meshes - captured, kept, NOT injected");
+            out.insert(out.end(), legacy.begin(), legacy.end());
+        }
+        // Same rule: a section only when there is something in it (decision D6).
+        if (!g_nonUtf8Mesh.empty()) {
+            out.push_back("# Mesh paths that are not UTF-8 text");
+            out.push_back(std::format(
+                "{} item(s): mesh path is not UTF-8 - shown, but no physics carrier",
+                g_nonUtf8Mesh.size()));
+            for (const auto& id : g_nonUtf8Mesh) {
+                out.push_back("  " + EnsureUtf8(id));
+            }
+        }
+        // Same rule. The question this answers is "why does this piece give no
+        // stats, and why did taking it out give me nothing" (C2 / D1).
+        if (!g_refOnly.empty()) {
+            out.push_back("# Listed by a preset only");
+            out.push_back(std::format(
+                "{} item(s): shown, no stats, never recreated - capture the real item to back one",
+                g_refOnly.size()));
+            for (const auto& [key, id] : g_refOnly) {
+                out.push_back(std::format("  {}  {}", id, ItemDisplayName(id)));
+            }
         }
         const auto npc = NpcDiagLines();
         out.insert(out.end(), npc.begin(), npc.end());
@@ -2322,18 +3154,35 @@ namespace CostumeFW
         // claiming a setting that does nothing and then silently reverts.
         // Item-data (stat) toggles are NOT gated here: publish reads those live
         // on every ability rebuild, so they are meant to apply while published.
+        //
+        // Every caller asks this BEFORE deciding what the edit is, not only when
+        // it turns something ON. Frozen is frozen in both directions: the ON path
+        // was refused and the OFF path went through, so a published costume could
+        // not be given a hide rule but could have one taken away - and it came
+        // back at unpublish anyway, since the snapshot is what restores. The
+        // asymmetry only ever let someone edit a setting and be told nothing.
+        //
+        // NPC-persist assignments freeze the same way (RegisterNpr copies the
+        // settings at assign time), so they get the same answer rather than
+        // accepting an edit that does nothing until the NPC is re-assigned.
         bool RefusedAsPublished(const char* a_what, const std::string& a_id,
             const std::string& a_holder)
         {
-            const int slot = PublishSlotOfHolder(a_holder);
-            if (slot < 0) {
-                return false;
+            if (const int slot = PublishSlotOfHolder(a_holder); slot >= 0) {
+                SKSE::log::warn(
+                    "{}: '{}' belongs to published costume #{} - its look is frozen at publish "
+                    "time; unpublish it first to change this",
+                    a_what, a_id, slot + 1);
+                return true;
             }
-            SKSE::log::warn(
-                "{}: '{}' belongs to published costume #{} - its look is frozen at publish "
-                "time; unpublish it first to change this",
-                a_what, a_id, slot + 1);
-            return true;
+            if (a_holder.starts_with("npr:")) {
+                SKSE::log::warn(
+                    "{}: '{}' belongs to an NPC persist assignment - its look was frozen when it "
+                    "was assigned; re-assign the NPC to change this",
+                    a_what, a_id);
+                return true;
+            }
+            return false;
         }
     }
 
@@ -2345,6 +3194,11 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        // Before the branch: clearing the rule is an edit too.
+        if (RefusedAsPublished("hide", id, holder)) {
+            return false;
+        }
         // Keep only valid vanilla biped slots (30-61), de-duplicated.
         std::vector<int> clean;
         for (const int s : a_slots) {
@@ -2356,17 +3210,13 @@ namespace CostumeFW
         if (clean.empty()) {
             g_hideRules.erase(id);  // empty list = clear the rule
         } else {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E [1476]: no orphan side-map entries
                 SKSE::log::warn("hide: '{}' is held by no box/persist - ignoring", id);
                 return false;
             }
-            if (RefusedAsPublished("hide", id, holder)) {
-                return false;
-            }
             g_hideRules[id] = std::move(clean);
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -2385,13 +3235,13 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("gender", id, holder)) {  // both directions
+            return false;
+        }
         if (a_mode == 1 || a_mode == 2) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E [1476]: no orphan side-map entries
                 SKSE::log::warn("gender: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("gender", id, holder)) {
                 return false;
             }
             g_genderModes[id] = a_mode;
@@ -2419,20 +3269,20 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("morph", id, holder)) {  // both directions
+            return false;
+        }
         if (a_on) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E [1498]: no orphan bodyMorph entries
                 SKSE::log::warn("morph: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("morph", id, holder)) {
                 return false;
             }
             g_bodyMorphOn.insert(id);
         } else {
             g_bodyMorphOn.erase(id);
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -2450,20 +3300,20 @@ namespace CostumeFW
         }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("realbody", id, holder)) {  // both directions
+            return false;
+        }
         if (a_on) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E: no orphan entries
                 SKSE::log::warn("realbody: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("realbody", id, holder)) {
                 return false;
             }
             g_showRealBody.insert(id);
         } else {
             g_showRealBody.erase(id);
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -2488,15 +3338,25 @@ namespace CostumeFW
         if (a_id.empty() || a_shape.empty()) {
             return false;
         }
+        // Shape names reach here already converted (SkinRebind's ShapeKey is
+        // what the UIs list and what injection compares against), so this only
+        // refuses raw bytes typed or passed in by something else - which would
+        // otherwise sit in the hide list and fail every settings write after
+        // it (review 2026-09-23 C1).
+        if (!policy::IsStrictUtf8(a_shape)) {
+            SKSE::log::warn("hideshape: '{}' - shape name '{}' is not UTF-8 text - refused", a_id,
+                a_shape);
+            return false;
+        }
         std::string id = a_id;
         CanonicalizeColonId(id);  // ROOT D
+        const std::string holder = ContentHolder(id);
+        if (RefusedAsPublished("hideshape", id, holder)) {  // both directions
+            return false;
+        }
         if (a_on) {
-            const std::string holder = ContentHolder(id);
             if (holder.empty()) {  // ROOT E: no orphan hide-shape entries
                 SKSE::log::warn("hideshape: '{}' is held by no box/persist - ignoring", id);
-                return false;
-            }
-            if (RefusedAsPublished("hideshape", id, holder)) {
                 return false;
             }
             auto& names = g_hideShapes[id];
@@ -2513,7 +3373,7 @@ namespace CostumeFW
                 }
             }
         }
-        WriteJson();
+        WriteJson(false);  // W14: nothing here reaches the carrier manifest
         return true;
     }
 
@@ -2705,11 +3565,22 @@ namespace CostumeFW
         std::vector<std::string> out;
         out.reserve(a_ids.size());
         for (const auto& id : a_ids) {
+            // D1: listed by a preset, never captured - it looks the part and is
+            // worth nothing until the real item backs it.
+            if (RefOnlyHas(id)) {
+                continue;
+            }
             if (IsContentAdmissible(id, *pol, nullptr, false)) {
                 out.push_back(id);
             }
         }
         return out;
+    }
+
+    bool IsRefOnly(const std::string& a_id)
+    {
+        StoreLock lk;
+        return RefOnlyHas(a_id);
     }
 
     namespace
@@ -2732,6 +3603,22 @@ namespace CostumeFW
         // ARMA/model gate. Unresolved content keeps the pre-1.3.2 UX message.
         const auto pol = CapturePolicySnapshot();
         if (!IsContentAdmissible(a_id, *pol, a_why)) {
+            return false;
+        }
+        // The id is written into the settings file, and it carries the plugin's
+        // file name verbatim. A name in a legacy codepage ('Rüstung.esp' saved
+        // as cp1252, a Japanese name as cp932) is not UTF-8 text, and the JSON
+        // write throws on it - review 2026-09-23 C1, where this was a crash on
+        // every load. Refused here, at the one gate every capture passes
+        // through (AddBox, AddPersistContent, a preset's Validate), so the item
+        // never leaves the player. Loading data that is already stored does not
+        // come through here: nothing stored can hold such an id.
+        if (!policy::IsStrictUtf8(a_id)) {
+            SKSE::log::warn("capture: '{}' refused - its plugin's file name is not UTF-8 text",
+                a_id);
+            if (a_why) {
+                *a_why = "its plugin's file name is not UTF-8 text, which CEF cannot store";
+            }
             return false;
         }
         // M4-J guard (capture gate ONLY - registration, load of already-
@@ -2778,7 +3665,14 @@ namespace CostumeFW
         if (!ResolveAdmittedModelPath(
                 a_id, EffectiveSexFor(a_id), *pol, nif)) {
             if (a_why) {
-                *a_why = "this item's mesh could not be resolved - not captured (see log)";
+                // The resolver refuses an LE mesh (the geometry the SSE skin-
+                // partition loader divides by zero on), and that is worth saying
+                // in full: it names a mod the user can fix and the tool that
+                // fixes it. Everything else keeps the pre-1.3.2 wording.
+                const std::string legacy = LegacyNifRefusal(a_id);
+                *a_why = legacy.empty()
+                    ? "this item's mesh could not be resolved - not captured (see log)"
+                    : legacy;
             }
             return false;
         }
@@ -2889,7 +3783,10 @@ namespace CostumeFW
         // Copy-and-publish (review P1-5).
         auto next = *CapturePolicySnapshot();
         auto* bucket = BlacklistBucket(next, a_kind);
-        std::string value = TrimCopy(a_value);
+        // UTF-8 before it is stored (C1): the list is written into the settings,
+        // and a value typed in the MCM or the console can arrive in the game's
+        // codepage - which would then fail every settings write after it.
+        std::string value = EnsureUtf8(TrimCopy(a_value));
         if (!bucket || value.empty()) {
             return false;
         }
@@ -2918,8 +3815,9 @@ namespace CostumeFW
         if (!bucket) {
             return false;
         }
+        const std::string value = EnsureUtf8(a_value);  // the spelling Add stored
         const auto it = std::find_if(bucket->begin(), bucket->end(),
-            [&](const std::string& a_e) { return policy::EqualsCI(a_e, a_value); });
+            [&](const std::string& a_e) { return policy::EqualsCI(a_e, value); });
         if (it == bucket->end()) {
             return false;
         }
@@ -3050,20 +3948,31 @@ namespace CostumeFW
         if (!dh) {
             return {};
         }
+        auto* marker = BoxTokenMarkerKeyword();
         for (auto* armo : dh->GetFormArray<RE::TESObjectARMO>()) {
             if (!armo) {
                 continue;
             }
-            auto* file = armo->GetFile(0);
-            if (!IsTokenPluginFile(file)) {
+            // GetFile(0) is the plugin that DEFINED the record, not the load-order
+            // winner, so a patch that overrides a token still answers CostumeFW.esp
+            // and a translated copy of the plugin changes nothing here.
+            if (!tokenid::IsBoxTokenPlugin(FilenameOf(armo->GetFile(0)))) {
                 continue;
             }
-            const char* nm = armo->GetFullName();
-            if (nm && std::string_view(nm).starts_with("Costume Box")) {
-                pairs.emplace_back(SlotNumberOf(armo), MakeColonId(armo));
+            // The marker, not the display name. A token's FULL is overwritten with
+            // the box's label while it is in use, and an xTranslator'd copy of the
+            // plugin translates it - so the old "name starts with Costume Box" test
+            // dropped every renamed token out of the pool (F10) and would have
+            // emptied the pool entirely for anyone running a translation.
+            if (marker && !armo->HasKeyword(marker)) {
+                continue;
             }
+            pairs.emplace_back(SlotNumberOf(armo), MakeColonId(armo));
         }
-        std::sort(pairs.begin(), pairs.end());  // by slot number
+        // (slot, colon-id): the slot orders the list for the pickers, and the
+        // colon-id breaks ties. From 1.6.4 a slot can hold several tokens, so
+        // without the tie-break the order would depend on form-array order.
+        std::sort(pairs.begin(), pairs.end());
         std::vector<std::string> out;
         out.reserve(pairs.size());
         for (auto& p : pairs) {
@@ -3077,10 +3986,48 @@ namespace CostumeFW
         StoreLock lk;
         std::vector<std::string> out;
         for (const auto& t : TokenPool()) {
-            if (FindBox(t) < 0) {
-                out.push_back(t);
+            if (FindBox(t) >= 0) {
+                continue;
             }
+            // Publishing a box does not RELEASE its token, it RESERVES it
+            // (PLAN §5.3). Offering it here is what used to let a new box take
+            // the slot a published costume came from, after which unpublish had
+            // nowhere to put the costume back and landed it on whatever token
+            // the allocator happened to reach - a different biped slot, hiding
+            // different things (test run 2026-09-10).
+            if (TokenReservedByPublish(t)) {
+                continue;
+            }
+            out.push_back(t);
         }
+        // §5.2's candidate order - (slot, GENERATION, local id) - not the pool's
+        // own (slot, colon-id). Within a slot the colon-id sorts on the local id
+        // first, and generation 0 numbers the low slots ABOVE BoxPool1 (slot 30
+        // is 000A01, slot 31 is 000913, against the pool's 000800-000846), so on
+        // slots 30-43 a pool token came out ahead of the core one.
+        //
+        // That is what the MCM's picker hands the user: it keeps the FIRST free
+        // token per empty slot (I5), so it was offering a BoxPool1 token while
+        // the core token for the same slot sat free - and a box on a pool token
+        // goes dormant if that pool is ever removed, which a box on generation 0
+        // cannot. Silently picking the more fragile of two equally free options,
+        // and only on some slots.
+        //
+        // FreeTokenOnSlot already re-sorted exactly this way for exactly this
+        // reason, and NextFreeToken ranks generation-ascending too; only the raw
+        // list every caller reads was still in pool order. Both of those re-rank
+        // what they get, so this is purely a better default for the ones that do
+        // not: the MCM picker, and SMF's list.
+        std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+            const auto key = [](const std::string& t) {
+                std::uint32_t local = 0;
+                std::string plugin;
+                // Parses by construction: TokenPool built these ids with MakeColonId.
+                (void)policy::ParseColonId(t, local, plugin);
+                return std::tuple{ TokenSlot(t), tokenid::BoxPoolGeneration(plugin), local };
+            };
+            return key(a) < key(b);
+        });
         return out;
     }
 
@@ -3106,16 +4053,48 @@ namespace CostumeFW
         if (free.empty()) {
             return {};
         }
-        for (const auto& token : free) {
-            if (!IsRiskyAutoSlot(TokenSlot(token))) {
-                return token;
-            }
+        // How many boxes each biped slot already holds. Asked for every
+        // candidate below, and a box's slot costs a form lookup, so once.
+        std::unordered_map<int, int> boxesPerSlot;
+        for (const auto& b : g_boxes) {
+            ++boxesPerSlot[SlotNumberOf(ResolveArmo(b.token))];
         }
-        SKSE::log::warn(
-            "boxes: only head/hair slots are free - auto-picking '{}' (slot {}); wearing it "
-            "hides that body part",
-            free.front(), TokenSlot(free.front()));
-        return free.front();
+        // PLAN §5.2 / review A07. The pool is offered in slot order, so before
+        // BoxPool1 the first free token WAS the lowest free slot. With four
+        // tokens per slot that stopped being true: slot 32's three pool tokens
+        // all sort ahead of slot 33's, and a run of NewBox calls would have put
+        // every box on one biped slot - where they fight over the same
+        // equipment slot and hide the same thing.
+        //
+        //   1. a slot no box is on yet          (spread out first)
+        //   2. a slot that already has one      (generation ascending)
+        //   3. head and hair                    (see IsRiskyAutoSlot)
+        //
+        // Within a tier: generation ascending, then local FormID, which is the
+        // candidate order §5.2 defines and FreeTokenOnSlot also implements.
+        std::vector<std::tuple<int, int, int, std::uint32_t, std::string>> ranked;
+        for (const auto& token : free) {
+            const int slot = TokenSlot(token);
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                continue;
+            }
+            ranked.emplace_back(IsRiskyAutoSlot(slot) ? 1 : 0,
+                boxesPerSlot[slot] > 0 ? 1 : 0, tokenid::BoxPoolGeneration(plugin), local, token);
+        }
+        if (ranked.empty()) {
+            return free.front();  // nothing parsed: keep the old answer
+        }
+        std::sort(ranked.begin(), ranked.end());
+        const auto& pick = ranked.front();
+        if (std::get<0>(pick) == 1) {
+            SKSE::log::warn(
+                "boxes: only head/hair slots are free - auto-picking '{}' (slot {}); wearing it "
+                "hides that body part",
+                std::get<4>(pick), TokenSlot(std::get<4>(pick)));
+        }
+        return std::get<4>(pick);
     }
 
     int TokenSlot(const std::string& a_token)
@@ -3124,22 +4103,597 @@ namespace CostumeFW
         return SlotNumberOf(ResolveArmo(a_token));
     }
 
+    // What the current load order can say about a box's token. Cheap and
+    // stateless: it reads the live data handler, so it re-derives correctly
+    // after a plugin is added or removed without anything to invalidate.
+    //
+    // NOTE the ordering. The plugin question is asked BEFORE the form is
+    // resolved, because "resolves to an ARMO" is not the same as "is a box
+    // token": a publish token in CostumeFW_NPC.esp resolves to an ARMO perfectly
+    // well, and letting it through is the whole defect this release exists to
+    // close.
+    std::uint32_t TokenSlotMask(const std::string& a_token)
+    {
+        StoreLock lk;
+        auto* armo = ResolveArmo(a_token);
+        return armo ? static_cast<std::uint32_t>(armo->GetSlotMask()) : 0u;
+    }
+
+    std::string CarrierKeyForToken(const std::string& a_token)
+    {
+        StoreLock lk;
+        return tokenid::CarrierKeyFor(a_token, TokenSlot(a_token));
+    }
+
+    const RE::TESFile* LoadedFile(std::string_view a_name);  // fwd (defined below)
+
+    // The master files a loaded plugin declares, in order. Empty when the
+    // plugin is not loaded - which the caller has already established, so an
+    // empty answer here means "no masters", the thing the ability pools are
+    // supposed to have none of beyond Skyrim.esm.
+    std::vector<std::string> MastersOf(std::string_view a_plugin)
+    {
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!dh) {
+            return {};
+        }
+        const RE::TESFile* file = LoadedFile(a_plugin);
+        if (!file) {
+            return {};
+        }
+        // masterPtrs / masterCount rather than the `masters` name list: the
+        // name list is a BSSimpleList whose const iterator does not compile
+        // here, and the resolved pointers carry the same names in the same
+        // order once the load order is built (which it is, at kDataLoaded).
+        std::vector<std::string> out;
+        for (std::uint32_t i = 0; file->masterPtrs && i < file->masterCount; ++i) {
+            if (const auto* master = file->masterPtrs[i]) {
+                out.emplace_back(master->GetFilename());
+            }
+        }
+        return out;
+    }
+
+    // The loaded TESFile for a plugin name, or nullptr.
+    //
+    // NOT LookupLoadedModByName/LookupLoadedLightModByName, which is what this
+    // used to be. Those take their loop bound from GetLoadedModCount() and
+    // GetLoadedLightModCount(), and BOTH of those return a std::uint8_t. The
+    // regular list tops out at 255 so its cast is harmless, but the light list
+    // holds up to 4096 - so with 256+ ESLs installed the light count wraps and
+    // the lookup scans only (count & 0xFF) of them, answering "not loaded" for
+    // every light plugin past that point. Measured on the owner's load order:
+    // 523 ESLs, 523 & 0xFF = 11 scanned, and CostumeFW.esp sits at light index
+    // 426. CEF's own plugins are all ESL, so the whole store went inert (the
+    // CoreMissing guard read "core is missing" and left every box unread) while
+    // CostumeFW_Abilities.esp - the one full plugin - resolved fine.
+    //
+    // LookupModByName walks the data handler's file list, which is neither split
+    // nor counted through a byte, and compileIndex == 0xFF is how a file that is
+    // present but not loaded says so. This is the same pair CommonLibSSE itself
+    // uses in TESDataHandler::LookupFormID, VR branch included, which is why
+    // form resolution by colon-id kept working throughout.
+    const RE::TESFile* LoadedFile(std::string_view a_name)
+    {
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!dh) {
+            return nullptr;
+        }
+        const RE::TESFile* file = dh->LookupModByName(a_name);
+        return (file && file->compileIndex != 0xFF) ? file : nullptr;
+    }
+
+    bool PluginIsLoaded(std::string_view a_name)
+    {
+        return LoadedFile(a_name) != nullptr;
+    }
+
+    TokenState ClassifyBoxToken(const std::string& a_colonId)
+    {
+        StoreLock lk;
+        std::uint32_t local = 0;
+        std::string plugin;
+        if (!policy::ParseColonId(a_colonId, local, plugin)) {
+            return TokenState::ParseError;
+        }
+        if (!tokenid::IsBoxTokenPlugin(plugin)) {
+            return TokenState::ForeignPlugin;
+        }
+        if (!PluginIsLoaded(plugin)) {
+            // A pool generation that is simply not installed right now. The box
+            // is dormant, not broken: put the plugin back and it returns with
+            // the same boxId, token and carrier.
+            return TokenState::PoolMissing;
+        }
+        const std::uint32_t formId = ResolveFormId(a_colonId);
+        auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
+        if (!form) {
+            return TokenState::UnresolvedForm;
+        }
+        auto* armo = form->As<RE::TESObjectARMO>();
+        if (!armo) {
+            return TokenState::NotArmo;
+        }
+        // Condition 3 of the role test. LoadBoxes refuses to run at all when the
+        // marker's own record is missing (CoreOutdated), so reaching here with a
+        // null marker means a caller outside that path - treat "cannot check" as
+        // "do not reject", the same way TokenPool does.
+        if (auto* marker = BoxTokenMarkerKeyword(); marker && !armo->HasKeyword(marker)) {
+            return TokenState::NoMarker;
+        }
+        return TokenState::Resolved;
+    }
+
+    std::string Gen0TokenForSlot(int a_slot)
+    {
+        StoreLock lk;
+        if (a_slot < 30 || a_slot > 61) {
+            return {};
+        }
+        for (const auto& token : TokenPool()) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                continue;
+            }
+            if (policy::EqualsCI(plugin, tokenid::kCorePlugin) && TokenSlot(token) == a_slot) {
+                return token;
+            }
+        }
+        return {};
+    }
+
+    std::vector<std::string> TokenDiagLines()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        const auto pool = TokenPool();
+
+        // Per generation. "not installed" is a normal answer for the ones above
+        // what is here, and the interesting case is a generation that IS
+        // installed but holds nothing.
+        std::map<int, int> perGeneration;
+        for (const auto& token : pool) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (policy::ParseColonId(token, local, plugin)) {
+                ++perGeneration[policy::EqualsCI(plugin, tokenid::kCorePlugin)
+                        ? 0 : tokenid::BoxPoolGeneration(plugin)];
+            }
+        }
+        out.push_back(std::format("core legacy: {} resolved", perGeneration[0]));
+        for (int generation = 1; generation <= 9; ++generation) {
+            const auto plugin = tokenid::BoxPoolPluginName(generation);
+            if (PluginIsLoaded(plugin)) {
+                out.push_back(std::format("BoxPool{}: {} resolved", generation,
+                    perGeneration[generation]));
+            } else if (generation == 1 || perGeneration.contains(generation)) {
+                out.push_back(std::format("BoxPool{}: not installed", generation));
+            }
+        }
+
+        // Per biped slot. Several tokens on one slot is the NORMAL state from
+        // v1.6.4 and is not called out as a problem.
+        std::map<int, std::array<int, 4>> perSlot;  // slot -> {total, active, reserved, free}
+        int dormant = 0;
+        for (const auto& token : pool) {
+            const int slot = TokenSlot(token);
+            auto& row = perSlot[slot];
+            ++row[0];
+            if (FindBox(token) >= 0) {
+                ++row[1];
+            } else if (TokenReservedByPublish(token)) {
+                ++row[2];
+            } else {
+                ++row[3];
+            }
+        }
+        for (const auto& b : g_boxes) {
+            dormant += b.tokenState != TokenState::Resolved ? 1 : 0;
+        }
+        for (const auto& [slot, row] : perSlot) {
+            out.push_back(std::format("slot {}: total {} / active {} / reserved {} / free {}", slot,
+                row[0], row[1], row[2], row[3]));
+        }
+
+        out.push_back(std::format("non-pool CEF tokens: publish 8, npc-persist 8 ({}){}",
+            tokenid::kNpcPlugin, NpcEspLoaded() ? "" : " - NOT LOADED, so 0 of each"));
+        int invalid = 0;
+        for (const auto& b : g_boxes) {
+            invalid += (b.tokenState != TokenState::Resolved &&
+                        b.tokenState != TokenState::PoolMissing) ? 1 : 0;
+        }
+        out.push_back(std::format("box definitions: {} (resolved {} / dormant {} / invalid {})",
+            g_boxes.size(), g_boxes.size() - dormant, dormant - invalid, invalid));
+
+        // One row per token. `now` is what the inventory shows; `pre-CEF` is the
+        // name before a box label was stamped on it - NOT "the ESP default",
+        // because a translated copy of the plugin is the load-order winner and
+        // its name is what CEF saw first.
+        out.push_back("token / carrierKey / slot / state / boxId / gen / now / pre-CEF");
+        for (const auto& token : pool) {
+            auto* armo = ResolveArmo(token);
+            const int slot = SlotNumberOf(armo);
+            std::uint32_t local = 0;
+            std::string plugin;
+            // Cannot fail - TokenPool built every one of these ids itself, with
+            // MakeColonId. Discarded explicitly rather than silently ([[nodiscard]]).
+            (void)policy::ParseColonId(token, local, plugin);
+            const int generation = policy::EqualsCI(plugin, tokenid::kCorePlugin)
+                ? 0 : tokenid::BoxPoolGeneration(plugin);
+            const int box = FindBox(token);
+            const char* state = box >= 0 ? "active"
+                : (TokenReservedByPublish(token) ? "reserved" : "free");
+            const std::string boxId = box >= 0 ? g_boxes[static_cast<std::size_t>(box)].boxId : "-";
+            const char* nowName = armo ? armo->GetFullName() : nullptr;
+            std::string pre = nowName ? nowName : "?";
+            if (armo) {
+                if (const auto it = g_tokenDefaultNames.find(armo->GetFormID());
+                    it != g_tokenDefaultNames.end() && !it->second.empty()) {
+                    pre = it->second;
+                }
+            }
+            out.push_back(std::format("  {} / {} / {} / {} / {} / gen{} / {} / {}", token,
+                tokenid::CarrierKeyFor(token, slot), slot, state, boxId, generation,
+                nowName ? nowName : "?", pre));
+        }
+        return out;
+    }
+
+    void AuditTokenPools()
+    {
+        StoreLock lk;
+        int errors = 0;
+        int warnings = 0;
+        const auto err = [&](const std::string& a_line) {
+            ++errors;
+            SKSE::log::error("audit: {}", a_line);
+        };
+        const auto warn = [&](const std::string& a_line) {
+            ++warnings;
+            SKSE::log::warn("audit: {}", a_line);
+        };
+        SKSE::log::info("audit: reading the box token pools");
+
+        // 1. The predicates, before anything that rests on them. An allowlist
+        //    edited in the wrong direction is invisible in normal play and
+        //    turns a publish token into a box token, which is the defect this
+        //    whole release exists to close (old plan C4 / M05).
+        for (const auto name : { tokenid::kNpcPlugin, tokenid::kAbilityGen1Plugin }) {
+            if (tokenid::IsBoxTokenPlugin(name)) {
+                err(std::format("IsBoxTokenPlugin('{}') is TRUE - that plugin does NOT define box "
+                                "tokens, and treating its records as box tokens is how a published "
+                                "costume's token becomes a box", name));
+            }
+            if (!tokenid::IsCefPlugin(name)) {
+                err(std::format("IsCefPlugin('{}') is FALSE - the broad test has been narrowed, "
+                                "and CEF's own records can now be captured as box CONTENT", name));
+            }
+        }
+        if (!tokenid::IsBoxTokenPlugin(tokenid::kCorePlugin) ||
+            !tokenid::IsBoxTokenPlugin(tokenid::BoxPoolPluginName(1))) {
+            err("IsBoxTokenPlugin is FALSE for the core plugin or BoxPool1 - no token can be "
+                "recognised at all");
+        }
+
+        // 2. Which generations are here, and is the run unbroken? A generation
+        //    above a gap is not used (PLAN §4.2), so the gap has to be named
+        //    rather than left as "my new pool did nothing".
+        int highestInstalled = 0;
+        std::vector<int> installed;
+        for (int generation = 1; generation <= 99; ++generation) {
+            const auto plugin = tokenid::BoxPoolPluginName(generation);
+            if (plugin.empty() || !PluginIsLoaded(plugin)) {
+                continue;
+            }
+            installed.push_back(generation);
+            highestInstalled = generation;
+        }
+        for (int generation = 1; generation <= highestInstalled; ++generation) {
+            if (std::find(installed.begin(), installed.end(), generation) == installed.end()) {
+                err(std::format("{} is loaded but {} is missing - a generation cannot be skipped, "
+                                "so nothing is allocated from the later one and any box on it is "
+                                "dormant",
+                    tokenid::BoxPoolPluginName(highestInstalled),
+                    tokenid::BoxPoolPluginName(generation)));
+            }
+        }
+
+        // 3. Masters, per plugin. BoxPoolN = Skyrim.esm + the core plugin, and
+        //    nothing else: a stray master is a plugin the user can remove and
+        //    take the whole pool down with (PLAN §1.3).
+        const auto checkMasters = [&](std::string_view a_plugin,
+                                      const std::vector<std::string>& a_want) {
+            const auto have = MastersOf(a_plugin);
+            if (have.size() != a_want.size()) {
+                err(std::format("{} has {} master(s), expected {}", a_plugin, have.size(),
+                    a_want.size()));
+                return;
+            }
+            for (std::size_t i = 0; i < have.size(); ++i) {
+                if (!policy::EqualsCI(have[i], a_want[i])) {
+                    err(std::format("{} master {} is '{}', expected '{}'", a_plugin, i, have[i],
+                        a_want[i]));
+                }
+            }
+        };
+        if (PluginIsLoaded(tokenid::kCorePlugin)) {
+            checkMasters(tokenid::kCorePlugin, { "Skyrim.esm" });
+        }
+        for (const int generation : installed) {
+            checkMasters(tokenid::BoxPoolPluginName(generation),
+                { "Skyrim.esm", std::string(tokenid::kCorePlugin) });
+        }
+
+        // 4. The tokens themselves. Every pool token is checked against the
+        //    generation-0 token on its slot - the BOD2 mask is inherited, and
+        //    slot 31's is 31|41 rather than one bit.
+        std::unordered_map<int, std::uint32_t> gen0Mask;
+        std::unordered_map<std::string, std::string> byCarrierKey;  // key -> token
+        int gen0Count = 0;
+        std::unordered_map<int, int> perGeneration;
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        auto* marker = BoxTokenMarkerKeyword();
+        const auto pool = TokenPool();
+        // The whole generation-0 map BEFORE any pool token is judged against it.
+        // Filling it in the same pass made the check depend on the pool's order,
+        // and TokenPool sorts by (slot, colon-id) - so within a slot the local id
+        // decides, and generation 0 holds the LOW slots under its HIGH ids
+        // (slot 34 is 000A07, 37 is 000A0D, 38 is 000A0F) while BoxPool1 numbers
+        // those same slots from 000800 up. Every pool token on slots 30-43 was
+        // therefore read before its generation-0 counterpart existed in the map
+        // and reported as sitting on a slot "which no generation-0 token
+        // occupies" - 36 of 81 tokens, all of them false, including the slot
+        // 31|41 wig mask this check exists to protect.
+        for (const auto& token : pool) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin) ||
+                !policy::EqualsCI(plugin, tokenid::kCorePlugin)) {
+                continue;
+            }
+            if (auto* armo = ResolveArmo(token)) {
+                gen0Mask[SlotNumberOf(armo)] = static_cast<std::uint32_t>(armo->GetSlotMask());
+            }
+        }
+        for (const auto& token : pool) {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                err(std::format("token '{}' does not parse", token));
+                continue;
+            }
+            const int generation = policy::EqualsCI(plugin, tokenid::kCorePlugin) ?
+                0 : tokenid::BoxPoolGeneration(plugin);
+            ++perGeneration[generation];
+            gen0Count += generation == 0 ? 1 : 0;
+
+            auto* armo = ResolveArmo(token);
+            if (!armo) {
+                err(std::format("token {} is in the pool but does not resolve", token));
+                continue;
+            }
+            if (marker && !armo->HasKeyword(marker)) {
+                err(std::format("token {} has no {}", token, kBoxTokenMarkerEdid));
+                continue;
+            }
+            const auto mask = static_cast<std::uint32_t>(armo->GetSlotMask());
+            const int slot = SlotNumberOf(armo);
+            if (mask == 0) {
+                err(std::format("token {} has an empty BOD2 (mask {:08X})", token, mask));
+            } else if (slot < 30 || slot > 61) {
+                err(std::format("token {} sits on biped slot {} (mask {:08X}), outside 30-61",
+                    token, slot, mask));
+            }
+            if (armo->armorAddons.size() != 1) {
+                err(std::format("token {} references {} ARMA (want exactly 1, mask {:08X})", token,
+                    armo->armorAddons.size(), mask));
+            } else if (auto* addon = armo->armorAddons.front(); addon) {
+                const auto addonMask =
+                    static_cast<std::uint32_t>(addon->bipedModelData.bipedObjectSlots.underlying());
+                if (addonMask != mask) {
+                    err(std::format("token {} BOD2 {:08X} does not match its ARMA's {:08X}", token,
+                        mask, addonMask));
+                }
+            }
+            if (generation == 0) {
+                // Already in gen0Mask - the pre-pass above put it there.
+            } else if (const auto it = gen0Mask.find(slot); it == gen0Mask.end()) {
+                err(std::format("token {} is on biped slot {} (mask {:08X}), which no generation-0 "
+                                "token occupies", token, slot, mask));
+            } else if (it->second != mask) {
+                err(std::format("token {} BOD2 {:08X} differs from generation 0's {:08X} for biped "
+                                "slot {}", token, mask, it->second, slot));
+            }
+
+            const auto carrierKey = tokenid::CarrierKeyFor(token, slot);
+            if (carrierKey.empty()) {
+                err(std::format("token {} has no carrier key (mask {:08X})", token, mask));
+            } else if (const auto [it, fresh] = byCarrierKey.emplace(carrierKey, token); !fresh) {
+                err(std::format("tokens {} and {} both claim the carrier key {} - they would "
+                                "overwrite each other's meshes", it->second, token, carrierKey));
+            }
+
+            // The tuple, not the bare local id (gaps P6). Every pool plugin and
+            // CostumeFW_NPC.esp number their records from 0x800, so comparing
+            // local ids alone reports a collision between every token and a
+            // publish token that is simply a different record in another file.
+            if (dh && armo->GetFile(0) &&
+                policy::EqualsCI(FilenameOf(armo->GetFile(0)), tokenid::kNpcPlugin)) {
+                err(std::format("token {} is DEFINED by {} - a publish or NPC-persist token has "
+                                "been admitted to the box pool", token, tokenid::kNpcPlugin));
+            }
+        }
+
+        // The other direction of the same question.
+        if (NpcEspLoaded()) {
+            for (int slot = 0; slot < 8; ++slot) {
+                for (auto* armo : { PubTokenArmo(slot), NprTokenArmo(slot) }) {
+                    if (!armo || !armo->GetFile(0)) {
+                        continue;
+                    }
+                    if (tokenid::IsBoxTokenPlugin(FilenameOf(armo->GetFile(0)))) {
+                        err(std::format("{} is treated as a box token plugin - its publish and "
+                                        "NPC-persist tokens would be handed out as boxes",
+                            FilenameOf(armo->GetFile(0))));
+                    }
+                }
+            }
+        }
+
+        // 5. Counts. Generation 0 is a fixed 27 and a drift there means the core
+        //    plugin is not the one that shipped; a pool generation's size is
+        //    whatever it holds, so it is reported rather than judged.
+        constexpr int kGen0TokenCount = 27;
+        if (gen0Count != kGen0TokenCount) {
+            warn(std::format("generation 0 holds {} token(s), expected {} - is {} the one that "
+                             "shipped with this version?",
+                gen0Count, kGen0TokenCount, tokenid::kCorePlugin));
+        }
+        for (const auto& [generation, count] : std::map<int, int>(perGeneration.begin(),
+                 perGeneration.end())) {
+            SKSE::log::info("audit: {} - {} token(s)",
+                generation == 0 ? std::string(tokenid::kCorePlugin)
+                                : tokenid::BoxPoolPluginName(generation),
+                count);
+        }
+
+        // 6. Ownership. A box holding a token that a published costume also
+        //    names is legal (PLAN §5.1 rule 3 - the box wins) but it is also the
+        //    one state where unpublish refuses, so it is worth a line before the
+        //    user finds out by clicking.
+        for (const auto& b : g_boxes) {
+            if (TokenReservedByPublish(b.token) && !b.token.empty()) {
+                warn(std::format("box '{}' holds {}, which a published costume also names - that "
+                                 "costume cannot be unpublished until this box frees it",
+                    b.label.empty() ? b.boxId : b.label, b.token));
+            }
+            if (b.tokenState != TokenState::Resolved) {
+                warn(std::format("box '{}' token {} is {} - the definition is kept and quarantined",
+                    b.label.empty() ? b.boxId : b.label, b.token,
+                    TokenStateReason(b.tokenState)));
+            }
+        }
+
+        const auto stats = BoxTokenPoolStats();
+        SKSE::log::info("audit: {} token(s) total, {} in boxes, {} reserved by publish, {} free; "
+                        "{} box definition(s)",
+            stats.total, stats.inBoxes, stats.reserved, stats.free, stats.definitions);
+        SKSE::log::info("audit: enchantment passthrough {}",
+            abilities::Ready() ? "ready" : ("OFF - " + abilities::DisabledReason()));
+        if (errors == 0 && warnings == 0) {
+            SKSE::log::info("audit: no problems found");
+        } else {
+            SKSE::log::warn("audit: {} error(s), {} warning(s) - see the lines above", errors,
+                warnings);
+        }
+    }
+
+    TokenPoolStats BoxTokenPoolStats()
+    {
+        StoreLock lk;
+        TokenPoolStats out;
+        out.definitions = static_cast<int>(g_boxes.size());
+        for (const auto& token : TokenPool()) {
+            ++out.total;
+            if (FindBox(token) >= 0) {
+                ++out.inBoxes;
+            } else if (TokenReservedByPublish(token)) {
+                ++out.reserved;
+            } else {
+                ++out.free;
+            }
+        }
+        return out;
+    }
+
+    std::string FreeTokenOnSlot(int a_slot)
+    {
+        StoreLock lk;
+        if (a_slot < 30 || a_slot > 61) {
+            return {};
+        }
+        // (generation, local id) rather than the pool's own (slot, colon-id)
+        // order: the colon-id sorts on the local id FIRST, so with two pool
+        // generations installed it would offer BoxPool2's 0x800 ahead of
+        // BoxPool1's 0x801 and the generations would interleave.
+        std::vector<std::pair<std::pair<int, std::uint32_t>, std::string>> ranked;
+        for (const auto& token : FreeTokens()) {
+            if (TokenSlot(token) != a_slot) {
+                continue;
+            }
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(token, local, plugin)) {
+                continue;
+            }
+            // Generation 0 is the core plugin, whose generation number is 0 -
+            // so it sorts first without a special case.
+            ranked.push_back({ { tokenid::BoxPoolGeneration(plugin), local }, token });
+        }
+        if (ranked.empty()) {
+            return {};
+        }
+        std::sort(ranked.begin(), ranked.end());
+        return ranked.front().second;
+    }
+
+    int BoxesOnSlot(int a_slot)
+    {
+        StoreLock lk;
+        int n = 0;
+        for (const auto& b : g_boxes) {
+            if (SlotNumberOf(ResolveArmo(b.token)) == a_slot) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    // I1 (v1.6.4 MCM interlock). A biped slot stopped naming one box the moment
+    // BoxPool1 existed, so "the box on slot 55" is a question with no answer when
+    // that slot holds two. This used to return the FIRST match, which is how the
+    // MCM - whose pages are keyed by slot - would have deleted, renamed or
+    // re-packed the wrong box without a word.
+    //
+    // -1 for an ambiguous slot rather than a guess. The MCM already handles a
+    // negative index gracefully (OnPageReset falls through to ResetDeletedBoxPage,
+    // a page with no controls on it), so refusing to answer is enough to make the
+    // damage impossible. Callers that want every box on a slot ask BoxesOnSlot /
+    // BoxesForSlot instead.
+    //
+    // This is the interlock, NOT support: operating a shared slot from the MCM is
+    // 1.6.4.1, which keys its pages by boxId. The guard goes when the MCM does
+    // (1.6.5), together with this function.
     int BoxIndexForSlot(int a_slot)
     {
         StoreLock lk;
+        int found = -1;
         for (std::size_t i = 0; i < g_boxes.size(); ++i) {
-            if (SlotNumberOf(ResolveArmo(g_boxes[i].token)) == a_slot) {
-                return static_cast<int>(i);
+            if (SlotNumberOf(ResolveArmo(g_boxes[i].token)) != a_slot) {
+                continue;
             }
+            if (found >= 0) {
+                return -1;  // ambiguous: two or more boxes share this slot
+            }
+            found = static_cast<int>(i);
         }
-        return -1;
+        return found;
     }
 
-    std::string LoreBoxContentsForSlot(int a_slot)
+    std::string LoreBoxContentsForCarrierKey(const std::string& a_carrierKey)
     {
         StoreLock lk;
+        if (a_carrierKey.empty()) {
+            return {};
+        }
         for (const auto& b : g_boxes) {
-            if (SlotNumberOf(ResolveArmo(b.token)) != a_slot) {
+            auto* armo = ResolveArmo(b.token);
+            if (!armo) {
+                continue;
+            }
+            if (!policy::EqualsCI(tokenid::CarrierKeyFor(b.token, SlotNumberOf(armo)),
+                    a_carrierKey)) {
                 continue;
             }
             std::string out;
@@ -3151,7 +4705,7 @@ namespace CostumeFW
             }
             return out;  // "" if this box is empty
         }
-        return {};  // no box on this slot
+        return {};  // no box holds that token
     }
 
     bool BoxEnabled(const std::string& a_token)
@@ -3189,7 +4743,19 @@ namespace CostumeFW
         // event happened to trigger one. Measured 2026-09-14: five minutes
         // between ticking the box back on (01:28:46) and the ability actually
         // landing, which took re-equipping the token (01:33:59).
-        ApplyBoxAbilities();
+        //
+        // But not HERE, synchronously: the token was still on the player at
+        // this point, and ApplyBoxAbilities' "a worn box cannot have its token
+        // withheld" rule switched distribution straight back on and wrote that
+        // - so a worn box could never be switched off, which is exactly when
+        // the switch is the way out of a load-order conflict (review 2026-09-23
+        // W1). Token first, convergence second, in ONE task; this function
+        // does the token move now, so no caller should queue one of its own.
+        const std::string token = a_token;
+        SKSE::GetTaskInterface()->AddTask([token, a_enabled] {
+            GiveOrRemoveToken(token, a_enabled);
+            ApplyBoxAbilities();
+        });
         return true;
     }
 
@@ -3224,43 +4790,6 @@ namespace CostumeFW
         return AddBox(a_label, token, {});  // definition only
     }
 
-    namespace
-    {
-        // Strict UTF-8 validity scan (no decode, no allocation).
-        bool IsValidUtf8(std::string_view a_s)
-        {
-            std::size_t i = 0;
-            const auto n = a_s.size();
-            while (i < n) {
-                const auto c = static_cast<unsigned char>(a_s[i]);
-                std::size_t need = 0;
-                if (c < 0x80) {
-                    ++i;
-                    continue;
-                } else if ((c & 0xE0) == 0xC0 && c >= 0xC2) {
-                    need = 1;
-                } else if ((c & 0xF0) == 0xE0) {
-                    need = 2;
-                } else if ((c & 0xF8) == 0xF0 && c <= 0xF4) {
-                    need = 3;
-                } else {
-                    return false;
-                }
-                if (i + need >= n + 1 && need > n - i - 1) {
-                    return false;
-                }
-                for (std::size_t k = 1; k <= need; ++k) {
-                    if (i + k >= n ||
-                        (static_cast<unsigned char>(a_s[i + k]) & 0xC0) != 0x80) {
-                        return false;
-                    }
-                }
-                i += need + 1;
-            }
-            return true;
-        }
-    }
-
     std::string EnsureUtf8(const std::string& a_text)
     {
         // ImGui expects UTF-8; a byte sequence it cannot decode renders as one
@@ -3269,13 +4798,21 @@ namespace CostumeFW
         // If the text is not valid UTF-8, reinterpret it in the SYSTEM codepage
         // - on the machine playing a cp932 mod that is almost always cp932 -
         // and convert. Valid UTF-8 (the common case) passes through untouched.
-        if (a_text.empty() || IsValidUtf8(a_text)) {
+        //
+        // "Valid" is the STRICT test now (review 2026-09-23 C1). The old scan
+        // passed overlong three-byte forms, surrogates and code points past
+        // U+10FFFF, which nlohmann's dump() refuses - so a name could come out
+        // of here "clean" and still crash the settings write it went into.
+        // And the result is always valid: a conversion that fails, or yields
+        // something still not well-formed, falls back to \xNN escapes instead
+        // of returning the raw bytes. Every caller can put the answer in JSON.
+        if (a_text.empty() || policy::IsStrictUtf8(a_text)) {
             return a_text;
         }
         const int wlen = ::MultiByteToWideChar(CP_ACP, 0, a_text.data(),
             static_cast<int>(a_text.size()), nullptr, 0);
         if (wlen <= 0) {
-            return a_text;
+            return policy::EscapeInvalidUtf8(a_text);
         }
         std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
         ::MultiByteToWideChar(CP_ACP, 0, a_text.data(),
@@ -3283,12 +4820,12 @@ namespace CostumeFW
         const int ulen = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen,
             nullptr, 0, nullptr, nullptr);
         if (ulen <= 0) {
-            return a_text;
+            return policy::EscapeInvalidUtf8(a_text);
         }
         std::string out(static_cast<std::size_t>(ulen), '\0');
         ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen, out.data(), ulen,
             nullptr, nullptr);
-        return out;
+        return policy::IsStrictUtf8(out) ? out : policy::EscapeInvalidUtf8(a_text);
     }
 
     std::string ItemDisplayName(const std::string& a_colonId)
@@ -3378,6 +4915,18 @@ namespace CostumeFW
         bool TokenWorn(const std::string& a_token)
         {
             const std::uint32_t form = ResolveFormId(a_token);
+            if (form == 0) {
+                return false;
+            }
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            return player && player->GetWornArmor(form) != nullptr;
+        }
+
+        // The same, through the box's cached token FormID (W13) - the form the
+        // per-box loops use.
+        bool TokenWorn(const BoxDefInfo& a_box)
+        {
+            const std::uint32_t form = TokenFormOf(a_box);
             if (form == 0) {
                 return false;
             }
@@ -3509,6 +5058,53 @@ namespace CostumeFW
             return form ? form->As<RE::TESObjectARMO>() : nullptr;
         }
 
+        // The defining plugin's file name, or "" when a form has none (a runtime
+        // form). string_view over TESFile's own buffer; valid for the call.
+        std::string_view FilenameOf(const RE::TESFile* a_file)
+        {
+            return a_file ? a_file->GetFilename() : std::string_view{};
+        }
+
+        // CFW_BoxTokenMarker, resolved once per process. Null means the DLL is
+        // 1.6.4 but CostumeFW.esp is still the 1.6.3 file (CoreOutdated): the
+        // keyword's own record does not exist, so no token can carry it and
+        // testing for it would empty the pool. Callers treat null as "cannot
+        // check" rather than "nothing qualifies".
+        RE::BGSKeyword* BoxTokenMarkerKeyword()
+        {
+            // Latches only on SUCCESS. A plain "compute once" static would cache
+            // whatever the first call saw - and a call that happens to land
+            // before the data handler is up would then pin null for the rest of
+            // the process, which reads exactly like "the plugin is out of date".
+            // Caching the miss is the initialisation-order hazard this codebase
+            // has been bitten by before; not caching it costs one form-array
+            // walk on the paths that run before kDataLoaded.
+            static RE::BGSKeyword* s_marker = nullptr;
+            if (s_marker) {
+                return s_marker;
+            }
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) {
+                return nullptr;
+            }
+            for (auto* kw : dh->GetFormArray<RE::BGSKeyword>()) {
+                if (kw && kw->formEditorID == kBoxTokenMarkerEdid) {
+                    s_marker = kw;
+                    return s_marker;
+                }
+            }
+            return nullptr;
+        }
+
+        // Is the plugin that defines generation 0 present at all? Everything the
+        // box store does assumes it, so when it is absent the answer is not
+        // "every box is broken" - it is "CEF cannot judge anything right now",
+        // and the settings must be left exactly as they are.
+        bool CorePluginLoaded()
+        {
+            return PluginIsLoaded(tokenid::kCorePlugin);
+        }
+
         RE::EffectSetting* ResolveMgef(const std::string& a_colonId)
         {
             const std::uint32_t formId = ResolveFormId(a_colonId);
@@ -3560,6 +5156,16 @@ namespace CostumeFW
             if (stored.inStore && armo && armo->formEnchanting) {
                 pushLive(armo->formEnchanting);
                 return effs;  // this content is done
+            }
+            if (stored.inStore) {
+                // The original is in storage and carries no enchantment of its
+                // own, and neither does its base form: it is worth nothing, and
+                // that is the answer. The snapshot and the frozen copy below are
+                // for an original that cannot be reached - falling through to
+                // them here paid for an enchantment the stored piece does not
+                // have, e.g. one snapshotted off a second, enchanted copy the
+                // player kept (review 2026-09-23 W21).
+                return effs;
             }
             const auto snap = g_contentEnchants.find(c);
             if (snap != g_contentEnchants.end()) {
@@ -3699,7 +5305,10 @@ namespace CostumeFW
             }
             ClearTokenKeywords(a_tokenId, token);
             auto& mine = g_boxKeywords[a_tokenId];
-            if (a_box.enabled) {
+            // Master switch as well as the box's own Distribute toggle: see
+            // RestampAllTokens. A keyword is as much a stat as the armor rating -
+            // other mods read them off the worn token - so the two travel together.
+            if (a_box.enabled && CefEnabled()) {
                 for (const auto& c : StatAdmittedContents(a_box.contents)) {  // blacklist only
                     auto* armo = ResolveArmo(c);
                     if (!armo) {
@@ -3747,9 +5356,20 @@ namespace CostumeFW
         // drops the passthrough keywords / stats a consumer mod reads on the token.
         void SetTokenStats(const BoxDefInfo& a_box)
         {
+            // A quarantined box's token is not ours to stamp (the contract at
+            // the top of BoxStore.h). The case that bites: a box an old build
+            // put on 000800:CostumeFW_NPC.esp - a PUBLISH token an NPC may be
+            // wearing - had its armour, weight, keywords and name overwritten at
+            // every master switch, uninstall and removal (review 2026-09-23 W11).
+            if (!BoxTokenUsable(a_box)) {
+                return;
+            }
             float armorSum = 0.0f;
             float weightSum = 0.0f;
-            if (a_box.enabled) {
+            // a_box.enabled is the box's own Distribute toggle; CefEnabled() is
+            // the master switch. Either one off means the token pays nothing
+            // through - sums stay 0 and the fields below are written as 0.
+            if (a_box.enabled && CefEnabled()) {
                 for (const auto& c : StatAdmittedContents(a_box.contents)) {  // blacklist only
                     if (auto* armo = ResolveArmo(c)) {
                         if (!g_statArmorOff.contains(c)) {
@@ -3868,6 +5488,7 @@ namespace CostumeFW
 
     std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content)
     {
+        StoreLock lk;
         std::vector<EnchantEffectInfo> out;
         if (const auto it = g_contentEnchants.find(a_content); it != g_contentEnchants.end()) {
             for (const auto& effect : it->second)
@@ -3876,8 +5497,13 @@ namespace CostumeFW
         }
         if (auto* armor = ResolveArmo(a_content); armor && armor->formEnchanting) {
             for (auto* effect : armor->formEnchanting->effects) {
-                if (effect && effect->baseEffect) {
-                    out.push_back({ MakeColonId(effect->baseEffect), effect->effectItem.magnitude });
+                if (!effect || !effect->baseEffect) {
+                    continue;
+                }
+                // A published costume freezes this list into the settings (C1).
+                std::string mgef = MakeColonId(effect->baseEffect);
+                if (WritableText(mgef, "published enchant")) {
+                    out.push_back({ std::move(mgef), effect->effectItem.magnitude });
                 }
             }
         }
@@ -3945,9 +5571,28 @@ namespace CostumeFW
             auto* armo = a_entry->object ? a_entry->object->As<RE::TESObjectARMO>() : nullptr;
             return MeasureTemperMult(armo, xlist, health);
         }
+
+        // The enchantment of the copy a capture MOVES: that list's own
+        // ExtraEnchantment, else the base form's. InventoryEntryData::
+        // GetEnchantment answers for the whole stack instead - the first list
+        // that has one - so with a plain piece and a self-enchanted one of the
+        // same item, the snapshot came from the enchanted copy while the plain
+        // one went into storage, and the token paid for an enchantment the
+        // player was still holding (review 2026-09-23 W21).
+        RE::EnchantmentItem* EntryInstanceEnchantment(const RE::InventoryEntryData* a_entry)
+        {
+            if (auto* xlist = EntryInstanceList(a_entry)) {
+                if (const auto* xe = xlist->GetByType<RE::ExtraEnchantment>(); xe && xe->enchantment) {
+                    return xe->enchantment;
+                }
+            }
+            auto* armo = a_entry && a_entry->object ? a_entry->object->As<RE::TESObjectARMO>()
+                                                    : nullptr;
+            return armo ? armo->formEnchanting : nullptr;
+        }
     }
 
-    bool CaptureEnchant(const std::string& a_content)
+    bool CaptureEnchant(const std::string& a_content, bool a_rebuildNow)
     {
         StoreLock lk;
         // v1.3.2 r3 (re-review P2-2): function-boundary admission. The UIs
@@ -3979,6 +5624,7 @@ namespace CostumeFW
         float temper = 1.0f;
         float carriedTemper = 1.0f;
         bool sawWorn = false;
+        bool owned = false;  // the player really has one to capture
         // Target-only filter (review P1-2): the old Armor-wide filter made
         // GetInventory copy EVERY armor's InventoryEntryData - capturing a
         // perfectly safe item still copied a foreign runtime item's hostile
@@ -3995,14 +5641,15 @@ namespace CostumeFW
             if (count <= 0 || !entry) {
                 continue;
             }
+            owned = true;
             if (entry->IsWorn()) {
-                ench = entry->GetEnchantment();
+                ench = EntryInstanceEnchantment(entry.get());  // W21: the copy that moves
                 temper = EntryTemperMult(entry.get());
                 sawWorn = true;
                 break;
             }
             if (!carried) {
-                carried = entry->GetEnchantment();
+                carried = EntryInstanceEnchantment(entry.get());
                 carriedTemper = EntryTemperMult(entry.get());
             }
         }
@@ -4012,11 +5659,29 @@ namespace CostumeFW
         if (!sawWorn) {
             temper = carriedTemper;
         }
+        // Both UIs' captures pass through here with the item still on the
+        // player - the MCM moves it with Papyrus afterwards, so this is the one
+        // point every capture shares. A preset-listed id that the user now
+        // captures for real stops being reference-only: it gets its stats, and
+        // a later take-out returns this item (C2). Only when the player has
+        // one - an external call naming an item nobody owns must not lift it.
+        if (owned && RefOnlyErase(a_content)) {
+            SKSE::log::info("capture: '{}' was listed by a preset only - it has its original now",
+                a_content);
+        }
         std::vector<EnchEffect> effs;
         if (ench) {
             for (auto* e : ench->effects) {
-                if (e && e->baseEffect) {
-                    effs.push_back({ MakeColonId(e->baseEffect), e->effectItem.magnitude });
+                if (!e || !e->baseEffect) {
+                    continue;
+                }
+                // The snapshot is written into the settings, and a magic effect
+                // from a plugin named in a legacy codepage has an id that is not
+                // UTF-8 text (C1). Left out rather than stored and failing every
+                // write after it; the live form still pays it where it can.
+                std::string mgef = MakeColonId(e->baseEffect);
+                if (WritableText(mgef, "enchant snapshot")) {
+                    effs.push_back({ std::move(mgef), e->effectItem.magnitude });
                 }
             }
         }
@@ -4041,9 +5706,17 @@ namespace CostumeFW
         // the persist aggregate builds at load, and the MCM flow runs the add
         // native (which queues its rebuild) BEFORE this capture - a snapshot
         // stored now would silently sit out until the next game load (07-21
-        // finding; the reporter's "enchant not reflected"). Rebuild + re-apply
-        // here so the caller's ordering can't matter.
-        ReapplyStatsForContent(a_content);
+        // finding; the reporter's "enchant not reflected"). So the stats are
+        // rebuilt - but NOT here when the caller moves the item next: at this
+        // point the original is not in storage yet, the rebuild pays from the
+        // flat snapshot, and the one after the move pays from the stored
+        // original's live enchantment. Two different effect sets are two pool
+        // generations, and the first is kept forever for old saves - one slot
+        // burned per capture (review 2026-09-23 W22). CaptureItemToStore
+        // rebuilds once the original is where it will be read from.
+        if (a_rebuildNow) {
+            ReapplyStatsForContent(a_content);
+        }
         return has;
     }
 
@@ -4114,7 +5787,7 @@ namespace CostumeFW
         // can be stated once.
         if (cefOn) {
             for (const auto& b : g_boxes) {
-                if (b.enabled || b.contents.empty() || !TokenWorn(b.token)) {
+                if (!BoxTokenUsable(b) || b.enabled || b.contents.empty() || !TokenWorn(b)) {
                     continue;
                 }
                 SKSE::log::info("boxes: '{}'{} is WORN, so its token distribution is turned back "
@@ -4133,7 +5806,10 @@ namespace CostumeFW
             // ability only asked whether the token was worn - so a token put
             // on by any other means still granted the enchantments of a box
             // the user had turned off (review 2026-09-11 N2).
-            const bool worn = cefOn && b.enabled && TokenWorn(b.token);
+            // A quarantined box pays nothing even if its token is on the player
+            // - it can be a publish token someone else's costume uses (W11). Not
+            // skipped outright: its manual ability still has to come off.
+            const bool worn = cefOn && b.enabled && BoxTokenUsable(b) && TokenWorn(b);
             if (worn) {
                 admit(b.contents, "a worn box");
             }
@@ -4323,6 +5999,65 @@ namespace CostumeFW
     // SetStoreRef (MCM OnConfigOpen); cleared on game load (per-save ref).
     static std::uint32_t g_storeFormId = 0;
 
+    // "Prepare for uninstall" already ran on the loaded save (co-save 'UNIN').
+    // Per save, like the store whose originals it says went back. Atomic because
+    // SMF reads it while drawing the uninstall dialog.
+    static std::atomic<bool> g_uninstallRan{ false };
+
+    namespace
+    {
+        // This save's hidden store, or null when it has none or it no longer
+        // resolves. Caller holds StoreLock.
+        RE::TESObjectREFR* CurrentStore()
+        {
+            auto* form = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+            return form ? form->As<RE::TESObjectREFR>() : nullptr;
+        }
+
+        // FormIDs of everything this save's store holds: one inventory walk
+        // answers "is it in storage?" for a whole list of ids.
+        std::unordered_set<RE::FormID> StoreHeldFormIds()
+        {
+            std::unordered_set<RE::FormID> out;
+            if (auto* store = CurrentStore()) {
+                for (const auto& [obj, count] : store->GetInventoryCounts()) {
+                    if (obj && count > 0) {
+                        out.insert(obj->GetFormID());
+                    }
+                }
+            }
+            return out;
+        }
+
+        // A preset assignment is the one way an id enters a definition without
+        // an item (C2). Marks what the assignment brings in that the definition
+        // did not list before and this save's store does not hold. An id the
+        // definition already had keeps whatever it was: a real capture - on this
+        // character or another - stays real. Returns how many were marked.
+        int MarkRefOnlyFromPreset(const std::vector<std::string>& a_incoming,
+            const std::vector<std::string>& a_before)
+        {
+            const auto held = StoreHeldFormIds();
+            int marked = 0;
+            for (const auto& c : a_incoming) {
+                const bool had = std::any_of(a_before.begin(), a_before.end(),
+                    [&c](const std::string& a_id) { return policy::SameColonId(a_id, c); });
+                if (had) {
+                    continue;
+                }
+                if (const std::uint32_t formId = ResolveFormId(c); formId && held.contains(formId)) {
+                    continue;  // its original is right here
+                }
+                std::string id = c;
+                CanonicalizeColonId(id);
+                if (RefOnlyInsert(id)) {
+                    ++marked;
+                }
+            }
+            return marked;
+        }
+    }
+
     void SetStoreRef(RE::TESObjectREFR* a_store)
     {
         StoreLock lk;
@@ -4358,6 +6093,51 @@ namespace CostumeFW
         g_storeFormId = a_id;
     }
 
+    bool UninstallRanOnThisSave()
+    {
+        return g_uninstallRan.load(std::memory_order_relaxed);
+    }
+
+    void RestoreUninstallRan(bool a_ran)
+    {
+        g_uninstallRan.store(a_ran, std::memory_order_relaxed);
+    }
+
+    bool MayRecreate(const std::string& a_id, RecreateContext a_ctx)
+    {
+        StoreLock lk;
+        return policy::DecideReturn(false, true, RefOnlyHas(a_id),
+                   a_ctx == RecreateContext::kUninstall,
+                   UninstallRanOnThisSave()) == policy::ReturnAction::kRecreate;
+    }
+
+    namespace
+    {
+        // A new hidden store: CFW_Storage (0x80D) placed at the player, disabled,
+        // FORCE-PERSISTENT. Does not record it anywhere. Main thread only.
+        RE::TESObjectREFR* CreateStoreRef()
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            auto* base = dh ? dh->LookupForm<RE::TESObjectCONT>(0x00080D, "CostumeFW.esp") : nullptr;
+            if (!player || !base) {
+                SKSE::log::warn(
+                    "custody: cannot create hidden store (player or CostumeFW.esp 0x80D missing)");
+                return nullptr;
+            }
+            // Force-persist: nothing else holds this ref. Without the flag the
+            // engine keeps a placed ref only while a script property points at
+            // it - which is all that kept the MCM's container alive (C12).
+            auto ref = player->PlaceObjectAtMe(base, true);
+            if (!ref) {
+                SKSE::log::warn("custody: PlaceObjectAtMe failed for the hidden store");
+                return nullptr;
+            }
+            ref->Disable();
+            return ref.get();
+        }
+    }
+
     RE::TESObjectREFR* EnsureStoreRef()
     {
         StoreLock lk;
@@ -4369,24 +6149,82 @@ namespace CostumeFW
             SKSE::log::warn("custody: recorded store {:08X} no longer resolves - creating a new one",
                 g_storeFormId);
         }
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        auto* dh = RE::TESDataHandler::GetSingleton();
-        auto* base = dh ? dh->LookupForm<RE::TESObjectCONT>(0x00080D, "CostumeFW.esp") : nullptr;
-        if (!player || !base) {
-            SKSE::log::warn("custody: cannot create hidden store (player or CostumeFW.esp 0x80D missing)");
-            return nullptr;
-        }
-        // Force-persist: unlike the MCM's container (pinned by a persistent
-        // Papyrus ObjectReference property), nothing else holds this ref.
-        auto ref = player->PlaceObjectAtMe(base, true);
+        auto* ref = CreateStoreRef();
         if (!ref) {
-            SKSE::log::warn("custody: PlaceObjectAtMe failed for the hidden store");
             return nullptr;
         }
-        ref->Disable();
         g_storeFormId = ref->GetFormID();
         SKSE::log::info("custody: created hidden store {:08X}", g_storeFormId);
-        return ref.get();
+        return ref;
+    }
+
+    int MakeStorePersistent()
+    {
+        StoreLock lk;
+        // Before P2 the MCM created the store: PlaceAtMe without force-persist,
+        // kept alive only by the script's ObjectReference property. The co-save
+        // adopted that ref as it was. The day the MCM goes (1.6.5), nothing
+        // points at it and the engine is free to drop it - with every captured
+        // original inside, tempering and enchantments included (review
+        // 2026-09-23 C12). So the contents move into a store CEF owns properly.
+        auto* old = CurrentStore();
+        if (!old || old->IsPersistent()) {
+            return 0;
+        }
+        auto* fresh = CreateStoreRef();
+        if (!fresh) {
+            SKSE::log::warn("custody: store {:08X} is not persistent and a permanent one could "
+                            "not be made - left as it is",
+                g_storeFormId);
+            return 0;
+        }
+        // Collect first: every move below changes the container being walked.
+        // One move per extra-data list, so tempering and enchantments travel
+        // with their item exactly as a capture moved them in; then whatever the
+        // lists do not account for, in one go.
+        struct Move
+        {
+            RE::TESBoundObject* obj;
+            RE::ExtraDataList* xlist;
+            std::int32_t count;
+        };
+        std::vector<Move> moves;
+        for (auto& [obj, data] : old->GetInventory()) {
+            const auto& [count, entry] = data;
+            if (!obj || count <= 0) {
+                continue;
+            }
+            std::int32_t listed = 0;
+            if (entry && entry->extraLists) {
+                for (auto* x : *entry->extraLists) {
+                    if (!x) {
+                        continue;
+                    }
+                    const std::int32_t n = std::min(std::max(x->GetCount(), 1), count - listed);
+                    if (n <= 0) {
+                        break;
+                    }
+                    moves.push_back({ obj, x, n });
+                    listed += n;
+                }
+            }
+            if (count > listed) {
+                moves.push_back({ obj, nullptr, count - listed });
+            }
+        }
+        for (const auto& m : moves) {
+            old->RemoveItem(m.obj, m.count, RE::ITEM_REMOVE_REASON::kStoreInContainer, m.xlist,
+                fresh);
+        }
+        const std::uint32_t oldId = g_storeFormId;
+        g_storeFormId = fresh->GetFormID();
+        // The old ref stays, empty and disabled: an MCM property may still point
+        // at it, and an empty container is harmless. The MCM prefers the native
+        // store (GetStoreRef) and SetStoreRef keeps the one that resolves.
+        SKSE::log::info("custody: moved the hidden store to a permanent container ({} stack(s), "
+                        "{:08X} -> {:08X})",
+            moves.size(), oldId, g_storeFormId);
+        return static_cast<int>(moves.size());
     }
 
     bool CaptureItemToStore(const std::string& a_id)
@@ -4408,24 +6246,24 @@ namespace CostumeFW
         }
         // Prefer the worn / any instance-data list so tempering + player enchants
         // travel with the stored copy (the engine unequips a worn list on remove).
-        RE::ExtraDataList* xlist = nullptr;
-        if (const auto& entry = it->second.second; entry && entry->extraLists) {
-            for (auto* x : *entry->extraLists) {
-                if (x && (x->HasType<RE::ExtraWorn>() || x->HasType<RE::ExtraWornLeft>())) {
-                    xlist = x;
-                    break;
-                }
-            }
-            if (!xlist && !entry->extraLists->empty()) {
-                xlist = entry->extraLists->front();
-            }
-        }
+        // EntryInstanceList is the one choice CaptureEnchant snapshots from, so
+        // the numbers and the item that goes into storage are the same copy
+        // (W21).
+        RE::ExtraDataList* xlist = EntryInstanceList(it->second.second.get());
         player->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, xlist, store);
         SKSE::log::info("custody: captured 1x '{}' into the hidden store", a_id);
         // The custody row starts here. This is the ONLY moment the id is
         // guaranteed to be recorded somewhere the user can reach later: if the
         // box entry is rolled back away, the row is all that is left of it.
         RecordCustody(a_id, "captured");
+        // CaptureEnchant normally took the mark off already; this covers a
+        // caller that moves the item without snapshotting it first (C2).
+        if (RefOnlyErase(a_id)) {
+            SKSE::log::info("custody: '{}' now has its original - no longer reference-only", a_id);
+        }
+        // Now that the original is where every stat source reads it from, the
+        // one rebuild of this capture (W22 - see CaptureEnchant).
+        ReapplyStatsForContent(a_id);
         return true;
     }
 
@@ -4479,9 +6317,13 @@ namespace CostumeFW
         }
     }
 
-    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate, bool* a_wasRecreated)
+    bool ReturnStoredItem(const std::string& a_id, bool a_fabricate, bool* a_wasRecreated,
+        RecreateContext a_ctx, bool* a_wasRefOnly)
     {
         StoreLock lk;
+        if (a_wasRefOnly) {
+            *a_wasRefOnly = false;
+        }
         auto* player = RE::PlayerCharacter::GetSingleton();
         const std::uint32_t formId = ResolveFormId(a_id);
         auto* form = formId ? RE::TESForm::LookupByID(formId) : nullptr;
@@ -4491,24 +6333,26 @@ namespace CostumeFW
         }
         // Prefer the captured original in the hidden store (keeps tempering /
         // player-enchant instance data), exactly like the MCM's ReturnItem.
-        if (g_storeFormId) {
-            auto* sform = RE::TESForm::LookupByID(g_storeFormId);
-            auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr;
-            if (store) {
-                const auto counts = store->GetInventoryCounts();
-                const auto it = counts.find(obj);
-                if (it != counts.end() && it->second > 0) {
-                    store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
-                    SKSE::log::info("custody: returned stored '{}' to player", a_id);
-                    RecordCustody(a_id, "returned");
-                    if (a_wasRecreated) {
-                        *a_wasRecreated = false;
-                    }
-                    return true;
-                }
-            }
+        auto* store = CurrentStore();
+        bool inStore = false;
+        if (store) {
+            const auto counts = store->GetInventoryCounts();
+            const auto it = counts.find(obj);
+            inStore = it != counts.end() && it->second > 0;
         }
-        if (a_fabricate) {
+        const bool uninstall = a_ctx == RecreateContext::kUninstall;
+        const bool refOnly = RefOnlyHas(a_id);
+        switch (policy::DecideReturn(inStore, a_fabricate, refOnly, uninstall,
+            UninstallRanOnThisSave())) {
+        case policy::ReturnAction::kFromStore:
+            store->RemoveItem(obj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, nullptr, player);
+            SKSE::log::info("custody: returned stored '{}' to player", a_id);
+            RecordCustody(a_id, "returned");
+            if (a_wasRecreated) {
+                *a_wasRecreated = false;
+            }
+            return true;
+        case policy::ReturnAction::kRecreate:
             player->AddObjectToContainer(obj, nullptr, 1, nullptr);
             SKSE::log::info("custody: fabricated 1x '{}' (none stored on this save)", a_id);
             RecordCustody(a_id, "recreated");
@@ -4516,8 +6360,30 @@ namespace CostumeFW
                 *a_wasRecreated = true;
             }
             return true;
+        case policy::ReturnAction::kNothing:
+            break;
+        }
+        if (a_fabricate && uninstall && UninstallRanOnThisSave()) {
+            SKSE::log::info("custody: '{}' is not in storage and this save was already prepared "
+                            "for uninstall - not recreated",
+                a_id);
+        } else if (a_fabricate && refOnly) {
+            SKSE::log::info("custody: '{}' was only listed by a preset - no item to hand back, "
+                            "none made",
+                a_id);
+            if (a_wasRefOnly) {
+                *a_wasRefOnly = true;
+            }
         }
         return false;
+    }
+
+    void NotifyRefOnlyReturn(const std::string& a_id)
+    {
+        RE::DebugNotification(std::format("CostumeFW: {} was only listed by a preset - there was "
+                                          "no item to hand back.",
+            ItemDisplayName(a_id))
+                .c_str());
     }
 
     bool RecoverContentItem(const std::string& a_id)
@@ -4526,7 +6392,8 @@ namespace CostumeFW
         // ROOT A ([2279]): drain the store first, fabricate only on a store miss -
         // so recovering a still-stored item no longer mints a second copy.
         bool recreated = false;
-        if (ReturnStoredItem(a_id, true, &recreated)) {
+        bool refOnly = false;
+        if (ReturnStoredItem(a_id, true, &recreated, RecreateContext::kNormal, &refOnly)) {
             SKSE::log::info("recover: granted 1x '{}' ({}, {})", ItemDisplayName(a_id), a_id,
                 recreated ? "plain copy - the original was not in storage" : "the captured original");
             // Say WHICH it was. A recreated copy has no tempering and no player
@@ -4540,6 +6407,13 @@ namespace CostumeFW
             );
             WriteJson(false);  // console / Recovery UI callers do not persist otherwise
             return true;
+        }
+        if (refOnly) {
+            // Recovery exists for items that went missing; a preset-listed id
+            // never had one to go missing (C2).
+            SKSE::log::info("recover: '{}' was only listed by a preset - nothing to recover", a_id);
+            NotifyRefOnlyReturn(a_id);
+            return false;
         }
         SKSE::log::warn("recover: '{}' does not resolve to an inventory item", a_id);
         return false;
@@ -4634,8 +6508,14 @@ namespace CostumeFW
                 std::vector<EnchEffect> effs;
                 if (ench) {
                     for (auto* e : ench->effects) {
-                        if (e && e->baseEffect) {
-                            effs.push_back({ MakeColonId(e->baseEffect), e->effectItem.magnitude });
+                        if (!e || !e->baseEffect) {
+                            continue;
+                        }
+                        // Same rule as CaptureEnchant (C1): only what the
+                        // settings can hold.
+                        std::string mgef = MakeColonId(e->baseEffect);
+                        if (WritableText(mgef, "enchant heal")) {
+                            effs.push_back({ std::move(mgef), e->effectItem.magnitude });
                         }
                     }
                 }
@@ -4675,6 +6555,13 @@ namespace CostumeFW
             if (a_id.empty()) {
                 return;
             }
+            // The custody log is part of the settings file (C1). Nothing CEF
+            // captures can carry such an id - the capture gate refuses it - so
+            // this only meets an item something else put in the store, and a
+            // row for it would fail every settings write after this one.
+            if (!WritableText(a_id, "custody")) {
+                return;
+            }
             auto& row = g_custody[a_id];
             row.id = a_id;
             row.name = ItemDisplayName(a_id);
@@ -4683,26 +6570,52 @@ namespace CostumeFW
             if (g_custody.size() <= kCustodyMax) {
                 return;
             }
-            // Over the cap: drop the oldest row. Stamps are sortable strings.
-            auto oldest = g_custody.begin();
+            // Over the cap: drop the oldest "held" row if there is one, else the
+            // oldest row. A "held" row is the history backfill's, and the next
+            // load writes it again for anything still held; "lost" and
+            // "returned-orphan" are written once, by the pass that saw it
+            // happen, and are the rows the Recovery page exists for - evicting
+            // by age alone dropped those first (review 2026-09-23 M6). The row
+            // just written is never the one that goes. Stamps are sortable.
+            auto victim = g_custody.end();
+            bool victimHeld = false;
             for (auto it = g_custody.begin(); it != g_custody.end(); ++it) {
-                if (it->second.when < oldest->second.when) {
-                    oldest = it;
+                if (it->first == a_id) {
+                    continue;
+                }
+                const bool held = it->second.event == "held";
+                if (victim == g_custody.end() || (held && !victimHeld) ||
+                    (held == victimHeld && it->second.when < victim->second.when)) {
+                    victim = it;
+                    victimHeld = held;
                 }
             }
-            g_custody.erase(oldest);
+            if (victim != g_custody.end()) {
+                g_custody.erase(victim);
+            }
         }
 
         // Every content id something still holds. The sweep returns what is NOT
         // in here, so a forgotten source means handing back a costume that is
-        // still in use - all four are load-bearing:
-        //   box contents / persist catalog / PUBLISHED snapshots / NPC-persist.
-        // The last two are the easy ones to miss: their items sit in the same
-        // hidden store while an NPC wears them. NPC assignments must include the
+        // still in use - all of them are load-bearing:
+        //   box contents / persist catalog / this save's persist ACTIVES /
+        //   PUBLISHED snapshots / NPC-persist.
+        // The NPC ones are easy to miss: their items sit in the same hidden
+        // store while an NPC wears them. NPC assignments must include the
         // UNRESOLVED ones - at load the actor's cell usually is not loaded yet -
-        // which is why this reads NprAssignmentsForSave() and not the live list.
-        // The persist CATALOG (not this save's active set) is deliberate: it is
-        // the wider set, and a wider held set can only mean returning less.
+        // which is why this reads NprAssignmentsHeld() and not the live list.
+        // (Nor NprAssignmentsForSave(), which since C5 leaves the unresolved ones
+        // out of the next save: until that save they still hold their items.)
+        //
+        // The catalog is NOT a superset of the actives, which is what this used
+        // to assume. An entry another character took out of the catalog stays
+        // ACTIVE on a save that had it on (M2: "this save keeps showing it until
+        // deactivated"), and its original is in THIS save's store. Judged by the
+        // catalog alone it was an orphan: the sweep handed back the original
+        // while the costume went on showing, and Deactivate then minted a second
+        // one (review 2026-09-23 C4). So the actives count, and so do the actives
+        // the co-save carried unresolved - a costume whose plugin is off this
+        // session is still that save's, and would come back as a duplicate.
         //
         // Keyed by resolved FormID rather than colon-id string, so no spelling
         // difference between sources can make a held item look orphaned.
@@ -4722,12 +6635,18 @@ namespace CostumeFW
             for (const auto& c : PersistContents()) {
                 add(c);
             }
+            for (const auto& c : ActivePersistIds()) {
+                add(c);
+            }
+            for (const auto& c : UnresolvedActiveIds()) {
+                add(c);
+            }
             for (const auto& snap : PublishedSnapshot()) {
                 for (const auto& c : snap.contents) {
                     add(c);
                 }
             }
-            for (const auto& npr : NprAssignmentsForSave()) {
+            for (const auto& npr : NprAssignmentsHeld()) {
                 for (const auto& c : npr.contents) {
                     add(c);
                 }
@@ -4743,8 +6662,8 @@ namespace CostumeFW
 
     namespace
     {
-        // Who holds each content id, by resolved FormID - the same four sources
-        // the sweep judges by, but keeping WHO rather than yes/no. One builder so
+        // Who holds each content id, by resolved FormID - the same sources the
+        // sweep judges by, but keeping WHO rather than yes/no. One builder so
         // the store listing, the sweep and the Recovery list can never disagree
         // about what "held" means.
         std::unordered_map<std::uint32_t, std::string> BuildHolderLabels()
@@ -4763,12 +6682,20 @@ namespace CostumeFW
             for (const auto& c : PersistContents()) {
                 mark(c, "persist");
             }
+            // After the catalog, so an entry in both keeps the plain label
+            // (emplace does not overwrite). See BuildHeldFormIds (C4).
+            for (const auto& c : ActivePersistIds()) {
+                mark(c, "persist (active on this save only)");
+            }
+            for (const auto& c : UnresolvedActiveIds()) {
+                mark(c, "persist (active on this save only)");
+            }
             for (const auto& snap : PublishedSnapshot()) {
                 for (const auto& c : snap.contents) {
                     mark(c, "published '" + snap.label + "'");
                 }
             }
-            for (const auto& npr : NprAssignmentsForSave()) {
+            for (const auto& npr : NprAssignmentsHeld()) {
                 for (const auto& c : npr.contents) {
                     mark(c, "NPC persist");
                 }
@@ -4925,7 +6852,13 @@ namespace CostumeFW
         }
         g_lastStoreLoss.store(lost, std::memory_order_relaxed);
         if (lost > 0) {
-            WriteJson(false);
+            // Only over settings that really loaded. Without them CEF holds an
+            // empty stand-in, and writing the "lost" rows would write that
+            // stand-in over whatever the user's file is (review 2026-09-23 C13).
+            // The rows stay in memory for the Recovery page either way.
+            if (g_settingsLoadOk) {
+                WriteJson(false);
+            }
             SKSE::log::warn("store manifest: {} captured item(s) no longer in storage", lost);
             RE::DebugNotification(std::format(
                 "CostumeFW: {} captured item(s) are no longer in storage - see Recovery",
@@ -4936,6 +6869,104 @@ namespace CostumeFW
         }
         return lost;
     }
+
+    int ReconcileRefOnly()
+    {
+        StoreLock lk;
+        if (!g_settingsLoadOk) {
+            return 0;  // the definitions in memory are not the user's this session
+        }
+        const auto held = StoreHeldFormIds();
+        int changes = 0;
+
+        // Heal. An original in this save's store got there by being captured,
+        // whatever the set says - and the pass below is a judgement from
+        // incomplete evidence, so a mark that meets the real item goes.
+        for (auto it = g_refOnly.begin(); it != g_refOnly.end();) {
+            const std::uint32_t formId = ResolveFormId(it->second);
+            if (formId && held.contains(formId)) {
+                SKSE::log::info("custody: '{}' has its original in this save's storage - no "
+                                "longer reference-only",
+                    it->second);
+                it = g_refOnly.erase(it);
+                ++changes;
+            } else {
+                ++it;
+            }
+        }
+
+        // Once per install: the assignments made before the set existed. There
+        // is no record of which entries a preset brought in, so this reads the
+        // custody log for a sign that an original was ever held:
+        //   - no row at all: CEF never saw a capture, a return or a loss of it.
+        //     Only trusted while the log has never been full - past its cap the
+        //     oldest rows were dropped, and a real capture can have lost its row.
+        //   - a row that says only "held" or "recreated": "held" is the history
+        //     backfill, written for everything a definition names whether or not
+        //     an item stood behind it, and "recreated" is exactly the minted copy
+        //     C2 is about. Neither proves an original, so they count only where a
+        //     preset fed the definition.
+        // Runs BEFORE this load's BackfillCustodyRows, which would give every
+        // unrecorded id a "held" row and erase the first signal. (The review
+        // placed it after, where its "no row" condition can never be true.)
+        //
+        // A wrong mark costs the convenience copy and the stats of an item that
+        // exists on another character, until the load that finds it in storage
+        // heals it - and it never costs an original, since store-first wins.
+        int marked = 0;
+        if (!g_refOnlyChecked) {
+            const bool rowsComplete = g_custody.size() < kCustodyMax;
+            const auto rowFor = [](const std::string& a_id) -> const CustodyLogEntry* {
+                if (const auto it = g_custody.find(a_id); it != g_custody.end()) {
+                    return &it->second;
+                }
+                for (const auto& [id, row] : g_custody) {
+                    if (policy::SameColonId(id, a_id)) {
+                        return &row;
+                    }
+                }
+                return nullptr;
+            };
+            const auto consider = [&](const std::string& a_id, bool a_presetFed) {
+                const std::uint32_t formId = ResolveFormId(a_id);
+                // Unresolvable this session: its plugin is off, and the store
+                // cannot be asked about it. Left alone.
+                if (!formId || held.contains(formId) || RefOnlyHas(a_id)) {
+                    return;
+                }
+                const CustodyLogEntry* row = rowFor(a_id);
+                const bool noProof = row && (row->event == "held" || row->event == "recreated");
+                if ((!row && rowsComplete) || (noProof && a_presetFed)) {
+                    std::string id = a_id;
+                    CanonicalizeColonId(id);
+                    RefOnlyInsert(id);
+                    ++marked;
+                    SKSE::log::info("custody: '{}' marked reference-only ({})", a_id,
+                        row ? "a preset fed it and its history shows no original" : "no history");
+                }
+            };
+            for (const auto& b : g_boxes) {
+                const bool fed = !b.preset.empty() || !b.presetName.empty();
+                for (const auto& c : b.contents) {
+                    consider(c, fed);
+                }
+            }
+            const bool persistFed = !g_persistPreset.empty() || !g_persistPresetName.empty();
+            for (const auto& c : g_persist) {
+                consider(c, persistFed);
+            }
+            g_refOnlyChecked = true;
+            changes += marked + 1;  // the flag itself has to reach the file
+            SKSE::log::info("custody: one-time check of existing box and persist entries - {} "
+                            "marked as listed by a preset only{}",
+                marked, rowsComplete ? "" : " (custody log was full: rowless ids left alone)");
+        }
+        if (changes > 0) {
+            WriteJson(false);  // stats move, the carrier manifest does not
+        }
+        return changes;
+    }
+
     int BackfillCustodyRows()
     {
         StoreLock lk;
@@ -5026,6 +7057,73 @@ namespace CostumeFW
         return out;
     }
 
+    namespace
+    {
+        // What one pass over the hidden store moved out of it.
+        struct StoreDrain
+        {
+            int stacks{ 0 };      // stacks moved
+            int count{ 0 };       // items, stack counts added up
+            int leftover{ 0 };    // stacks the cap left behind
+            std::string firstId;  // the first one moved, for the singular notification
+        };
+
+        // Move every stack the held set does not account for out of the store and
+        // into the player's hands. Container move, not fabricate: the original
+        // travels back WITH its instance data (tempering, a player enchantment),
+        // and nothing is ever created, so a pass that runs twice cannot duplicate.
+        //
+        // Two callers with opposite settings, one walk: the load-time sweep passes
+        // everything a definition names as held and a cap of 64, uninstall passes
+        // an EMPTY held set and no cap - "take the rest" - after the definitions
+        // have already had their turn. Sharing the walk is the point: the filter
+        // that decides what is held is the one thing here that must not differ
+        // between them.
+        StoreDrain MoveStoreToPlayer(RE::TESObjectREFR* a_store, RE::PlayerCharacter* a_player,
+            const std::unordered_set<std::uint32_t>& a_held, int a_cap,
+            const char* a_custodyEvent, const char* a_tag)
+        {
+            StoreDrain out;
+            struct Stack
+            {
+                RE::TESBoundObject* obj{ nullptr };
+                std::string id;
+                std::int32_t count{ 0 };
+            };
+            std::vector<Stack> loose;
+            auto inv = a_store->GetInventory([&a_held](RE::TESBoundObject& a_obj) {
+                // CEF's own tokens are never contents; they can legitimately sit here.
+                return !a_held.contains(a_obj.GetFormID()) && !IsCefToken(a_obj.GetFormID());
+            });
+            for (auto& [obj, data] : inv) {
+                const auto& [count, entry] = data;
+                if (!obj || count <= 0) {
+                    continue;
+                }
+                loose.push_back({ obj, MakeColonId(obj), count });
+            }
+            for (const auto& s : loose) {
+                if (out.count >= a_cap) {
+                    out.leftover = static_cast<int>(loose.size()) - out.stacks;
+                    SKSE::log::warn("{}: cap reached - {} more item(s) wait for the next load",
+                        a_tag, out.leftover);
+                    break;
+                }
+                a_store->RemoveItem(s.obj, s.count, RE::ITEM_REMOVE_REASON::kStoreInContainer,
+                    nullptr, a_player);
+                SKSE::log::info("{}: returned {}x '{}' ({}) - held by nothing",
+                    a_tag, s.count, ItemDisplayName(s.id), s.id);
+                RecordCustody(s.id, a_custodyEvent);
+                if (out.stacks == 0) {
+                    out.firstId = s.id;
+                }
+                out.count += s.count;
+                ++out.stacks;
+            }
+            return out;
+        }
+    }
+
     int SweepOrphanedStoredItems()
     {
         StoreLock lk;
@@ -5063,66 +7161,208 @@ namespace CostumeFW
             return 0;
         }
         const auto held = BuildHeldFormIds();
-
-        struct Orphan
-        {
-            RE::TESBoundObject* obj{ nullptr };
-            std::string id;
-            std::int32_t count{ 0 };
-        };
-        std::vector<Orphan> orphans;
-        auto inv = store->GetInventory([&held](RE::TESBoundObject& a_obj) {
-            // CEF's own tokens are never contents; they can legitimately sit here.
-            return !held.contains(a_obj.GetFormID()) && !IsCefToken(a_obj.GetFormID());
-        });
-        for (auto& [obj, data] : inv) {
-            const auto& [count, entry] = data;
-            if (!obj || count <= 0) {
-                continue;
-            }
-            orphans.push_back({ obj, MakeColonId(obj), count });
-        }
-        if (orphans.empty()) {
+        const StoreDrain drain =
+            MoveStoreToPlayer(store, player, held, kSweepCap, "returned-orphan", "sweep");
+        if (drain.stacks == 0) {
             SKSE::log::info("sweep: nothing orphaned ({} held id(s))", held.size());
             return 0;
         }
-        int returned = 0;
-        int items = 0;
-        for (const auto& o : orphans) {
-            if (returned >= kSweepCap) {
-                SKSE::log::warn("sweep: cap reached - {} more item(s) wait for the next load",
-                    static_cast<int>(orphans.size()) - items);
-                break;
-            }
-            // Container move, not fabricate: the original travels back WITH its
-            // instance data (tempering, a player enchantment).
-            store->RemoveItem(o.obj, o.count, RE::ITEM_REMOVE_REASON::kStoreInContainer,
-                nullptr, player);
-            SKSE::log::info("sweep: returned {}x '{}' ({}) - held by nothing",
-                o.count, ItemDisplayName(o.id), o.id);
-            RecordCustody(o.id, "returned-orphan");
-            returned += o.count;
-            ++items;
-        }
         WriteJson(false);  // persist the custody log; no box changed, so no manifest
-        if (items == 1) {
+        if (drain.stacks == 1) {
             RE::DebugNotification(
-                ("CostumeFW: returned " + ItemDisplayName(orphans.front().id) +
+                ("CostumeFW: returned " + ItemDisplayName(drain.firstId) +
                     " - it was left in storage")
                     .c_str());
-        } else if (items > 1) {
+        } else {
             RE::DebugNotification(
-                ("CostumeFW: returned " + std::to_string(items) +
+                ("CostumeFW: returned " + std::to_string(drain.stacks) +
                     " items left in storage")
                     .c_str());
         }
-        return returned;
+        return drain.count;
+    }
+
+    UninstallReturnReport UninstallReturnAll()
+    {
+        StoreLock lk;
+        // Uninstall's return pass, in three parts, and the ORDER is the design.
+        //
+        // (a) Everything a definition names, store-first with the fabricate
+        //     fallback the two cleanup twins have always used. This has to come
+        //     first: run the store-emptying pass (b) ahead of it and every box
+        //     content would be gone from the store by the time (a) looked, so
+        //     (a) would fabricate a second copy of each one.
+        // (b) Whatever is still in there. No fabricate, so nothing can be
+        //     duplicated - this pass only ever hands back items that physically
+        //     exist. It is the net under (a): the persist entries this save has
+        //     switched off, the orphans of a save rollback (the load-time sweep
+        //     would get those, but somebody uninstalling has no next load), and
+        //     the second and later copies in a stack, since ReturnStoredItem
+        //     hands back one at a time.
+        // (c) What could not be returned at all: a content id whose plugin is
+        //     turned off is not in the container to be moved and does not
+        //     resolve to a form, so the honest thing is to count it and say so
+        //     rather than finish with "safe to uninstall".
+        UninstallReturnReport rep{};
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) {
+            SKSE::log::warn("uninstall: no player - nothing returned");
+            return rep;
+        }
+        // Snapshot the ids before handing anything back: the moves below fire the
+        // container-changed hook, and nothing should be iterating a live box list
+        // while that runs.
+        std::vector<std::string> boxContents;
+        for (const auto& b : g_boxes) {
+            boxContents.insert(boxContents.end(), b.contents.begin(), b.contents.end());
+        }
+        const auto catalog = PersistContents();
+        const auto actives = ActivePersistIds();
+        const std::unordered_set<std::string> activeSet(actives.begin(), actives.end());
+
+        // kUninstall: the first run on a save mints what is missing, as it always
+        // has; a later one is store-only (C3). The flag is set at the very end,
+        // so every pass of THIS run - the NPC arm included - still counts as the
+        // first.
+        const auto give = [&rep](const std::string& a_id, bool a_fabricate) {
+            bool recreated = false;
+            if (ReturnStoredItem(a_id, a_fabricate, &recreated, RecreateContext::kUninstall)) {
+                recreated ? ++rep.recreated : ++rep.returned;
+            }
+        };
+        for (const auto& c : boxContents) {
+            give(c, true);
+        }
+        // The whole catalog, not just this save's active set - that difference is
+        // what left the originals of switched-off persist entries in the store
+        // (Codex #4). Fabricate only for the active ones: an entry this save is
+        // not using has nothing to replace, and minting a copy of it on the way
+        // out would hand the user an item they never had on this character.
+        for (const auto& c : catalog) {
+            give(c, activeSet.contains(c));
+        }
+        UninstallNpcCleanup();  // published costumes' contents, recall, npc-persist
+
+        auto* sform = g_storeFormId ? RE::TESForm::LookupByID(g_storeFormId) : nullptr;
+        if (auto* store = sform ? sform->As<RE::TESObjectREFR>() : nullptr) {
+            // Held set EMPTY and no cap: everything left goes back. The sweep's
+            // 64-item cap exists because it can finish the job on the next load;
+            // here there is no next load.
+            const StoreDrain drain = MoveStoreToPlayer(store, player, {},
+                std::numeric_limits<int>::max(), "returned-uninstall", "uninstall");
+            rep.drained = drain.count;
+        }
+        for (const auto& id : StoreContentIdsForSave()) {
+            if (ResolveFormId(id) == 0) {
+                ++rep.unreadable;
+            }
+        }
+        WriteJson(false);  // the custody rows above
+        const bool again = UninstallRanOnThisSave();
+        // Marked even when some ids could not be read: what WAS returned went
+        // back, and a second run must not mint it again. The way to retry the
+        // unreadable ones is to NOT save, fix the plugin and reload - the reload
+        // brings back an unmarked save (the notice says exactly that).
+        RestoreUninstallRan(true);
+        SKSE::log::info(
+            "uninstall: returned {} original(s), recreated {}, emptied {} more item(s) out of "
+            "the store, {} could not be read{}",
+            rep.returned, rep.recreated, rep.drained, rep.unreadable,
+            again ? " (run again on this save - store only)" : "");
+        return rep;
+    }
+
+    void UninstallCleanup()
+    {
+        // ONE uninstall, called from both UIs. There used to be two: the MCM's
+        // was Papyrus and the SMF one was C++, and they drifted - the Papyrus one
+        // went a whole version without the NPC arm, so it recalled nothing,
+        // stripped no assignments, and still said "safe to uninstall". Whatever
+        // the next change here is, it now lands in one place.
+        //
+        // No StoreLock around the whole thing: every call below takes it for the
+        // stretch it needs, which is what the SMF version did, and holding it
+        // across the detach and the re-apply would be a new lock order nothing
+        // else uses.
+        //
+        // Only with a save loaded (review 2026-09-23 C9). At the main menu the
+        // player is a throwaway with no store: every box's contents were minted
+        // onto it, CEF was switched off in the global settings, and the notice
+        // said "safe to uninstall" while every save's originals were still in
+        // storage. SMF greys the button out; this covers any other caller.
+        {
+            auto* pc = RE::PlayerCharacter::GetSingleton();
+            auto* ui = RE::UI::GetSingleton();
+            if (!pc || !pc->GetParentCell() || !ui || ui->IsMenuOpen(RE::MainMenu::MENU_NAME)) {
+                SKSE::log::warn("uninstall: refused - no save is loaded");
+                RE::DebugNotification("CostumeFW: load a save first - nothing was returned");
+                return;
+            }
+        }
+        const UninstallReturnReport rep = UninstallReturnAll();
+        // Tokens AFTER the returns - the recall inside them hands publish tokens
+        // back to the player, so a loop that ran first would leave those behind.
+        std::vector<std::string> tokens;
+        const int n = BoxCount();
+        tokens.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            tokens.push_back(BoxAt(i).token);
+        }
+        for (const auto& t : tokens) {
+            GiveOrRemoveToken(t, false);  // unequip + remove every copy
+        }
+        DetachAll();
+        SetCefEnabled(false);  // persist the OFF state (no re-apply on reload)
+        Reconcile();
+        ApplyBoxAbilities();
+        RestampAllTokens();
+        ApplyCarrierOverrides(false);
+        if (rep.unreadable > 0) {
+            // "Safe to uninstall" is a claim, so it is only made when it is true.
+            // An unreadable id is a costume plugin that is switched off. The
+            // engine already took those items out of storage when this save
+            // loaded without the plugin, so SAVING now is what loses them for
+            // good - that is the step the notice has to stop. It used to say
+            // "turn it back on and run this again", which did neither: nothing
+            // said not to save, and a re-run in the same session found the
+            // store empty and minted everything a second time (review
+            // 2026-09-23 C3). Reloading the unsaved save brings back one this
+            // run never marked, so the re-run it describes is a first run.
+            RE::DebugNotification(
+                ("CostumeFW: " + std::to_string(rep.unreadable) +
+                    " item(s) could not be returned because their plugin is off. Don't save. "
+                    "Quit, turn the plugin back on, load this save and run this again.")
+                    .c_str());
+        } else {
+            RE::DebugNotification(
+                "CostumeFW: items returned, tokens removed, CEF disabled - safe to uninstall");
+        }
     }
 
     int BoxCount()
     {
         StoreLock lk;
         return static_cast<int>(g_boxes.size());
+    }
+
+    int FindBoxById(const std::string& a_boxId)
+    {
+        StoreLock lk;
+        if (a_boxId.empty()) {
+            return -1;
+        }
+        for (std::size_t i = 0; i < g_boxes.size(); ++i) {
+            if (g_boxes[i].boxId == a_boxId) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    int FindBoxByToken(const std::string& a_token)
+    {
+        StoreLock lk;
+        return FindBox(a_token);
     }
 
     BoxDefInfo BoxAt(int a_index)
@@ -5151,7 +7391,24 @@ namespace CostumeFW
         if (a_index < 0 || a_index >= static_cast<int>(g_boxes.size())) {
             return 0;
         }
-        return ResolveFormId(g_boxes[a_index].token);
+        return TokenFormOf(g_boxes[a_index]);  // cached (W13)
+    }
+
+    std::unordered_set<std::uint32_t> WornArmorForms()
+    {
+        StoreLock lk;
+        std::unordered_set<std::uint32_t> out;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* changes = player ? player->GetInventoryChanges() : nullptr;
+        if (!changes || !changes->entryList) {
+            return out;
+        }
+        for (auto* entry : *changes->entryList) {
+            if (entry && entry->object && entry->IsWorn()) {
+                out.insert(entry->object->GetFormID());
+            }
+        }
+        return out;
     }
 
     std::vector<std::string> BoxContents(const std::string& a_token)
@@ -5206,13 +7463,30 @@ namespace CostumeFW
         if (a_content.empty()) {
             return {};
         }
+        // SameColonId, not ==: a plugin name in another case is the same file
+        // to Windows and the same record to the engine, and a string compare
+        // let a preset spelling "mymod.esp" put an item "MyMod.esp" already
+        // held into a second box (review 2026-09-23 W26).
+        const auto same = [&a_content](const std::string& a_id) {
+            return policy::SameColonId(a_id, a_content);
+        };
         for (const auto& b : g_boxes) {
-            if (std::find(b.contents.begin(), b.contents.end(), a_content) !=
-                b.contents.end()) {
+            if (std::any_of(b.contents.begin(), b.contents.end(), same)) {
                 return b.token;
             }
         }
-        if (std::find(g_persist.begin(), g_persist.end(), a_content) != g_persist.end()) {
+        if (std::any_of(g_persist.begin(), g_persist.end(), same)) {
+            return "persist";
+        }
+        // Active on this save without being in the catalog (M2) - still persist,
+        // and its original is in this save's store. Answering "nobody" let the
+        // Recovery page offer to recover it and a box capture take a second
+        // copy of a costume on display (review 2026-09-23 C4). Same sources as
+        // BuildHeldFormIds.
+        const auto actives = ActivePersistIds();
+        const auto carried = UnresolvedActiveIds();
+        if (std::any_of(actives.begin(), actives.end(), same) ||
+            std::any_of(carried.begin(), carried.end(), same)) {
             return "persist";
         }
         // Published costumes and NPC-persist assignments are OWNERS too (review
@@ -5223,8 +7497,8 @@ namespace CostumeFW
         // silently dropped contents), and every ROOT E side-map guard below
         // refused to store its hide/gender/morph settings.
         //
-        // Same four sources as BuildHeldFormIds / BuildHolderLabels - the sweep,
-        // the Recovery list and this admission gate must agree on "held".
+        // Same sources as BuildHeldFormIds / BuildHolderLabels - the sweep, the
+        // Recovery list and this admission gate must agree on "held".
         // Sentinels, like "persist": not a token colon-id, so the existing
         // `holder != "persist"` / `holder != token` rejections all fire correctly.
         if (const int slot = PublishedSlotHolding(a_content); slot >= 0) {
@@ -5266,8 +7540,16 @@ namespace CostumeFW
         // but the native / preset / hand-edited-JSON routes reach here unchecked.
         std::string token = a_token;
         CanonicalizeColonId(token);
-        if (!IsTokenColonId(token)) {  // ROOT C: token must be a CEF plugin record
-            SKSE::log::warn("boxes: AddBox rejects non-CEF token '{}'", token);
+        tokenid::CanonicalizeCefColonId(token);  // v1.6.4: fold the plugin's casing
+        // The token must be a record of a plugin that DEFINES box tokens, and it
+        // must resolve to an ARMO there. The old test was "any CostumeFW* plugin",
+        // which accepted 000800:CostumeFW_NPC.esp - a publish token - and built a
+        // box on it, with both machineries then stamping the same record. It also
+        // accepted the quest and the container in CostumeFW.esp, and ids naming
+        // records that do not exist.
+        if (const TokenState state = ClassifyBoxToken(token); state != TokenState::Resolved) {
+            SKSE::log::warn("boxes: AddBox rejects token '{}' ({})", token,
+                TokenStateReason(state));
             return false;
         }
         std::string content = a_content;
@@ -5291,30 +7573,109 @@ namespace CostumeFW
             }
         }
         int idx = FindBox(token);
+        bool madeBox = false;   // this call created the definition
+        bool tookContent = false;  // this call put the content in it
+        const std::string label = SanitizeLabel(a_label);  // C1: UTF-8, capped
+        std::string priorLabel;
         if (idx < 0) {
-            g_boxes.push_back({ a_label, token, {} });
+            BoxDefInfo fresh;
+            fresh.boxId = NewBoxId();  // issued once; survives rename and publish
+            fresh.label = label;
+            fresh.token = token;
+            g_boxes.push_back(std::move(fresh));
             idx = static_cast<int>(g_boxes.size()) - 1;
-        } else if (!a_label.empty()) {
-            g_boxes[idx].label = a_label;
+            madeBox = true;
+        } else if (!label.empty()) {
+            priorLabel = g_boxes[idx].label;
+            g_boxes[idx].label = label;
         }
 
         auto& box = g_boxes[idx];
         if (!content.empty()) {
-            if (std::find(box.contents.begin(), box.contents.end(), content) !=
-                box.contents.end()) {
-                // Duplicate: report failure so the MCM capture flow does NOT move
-                // the physical item into the store (a swallowed extra copy could
-                // never be returned - review A-2 / CEF_STATE_SCOPE.md §4).
-                SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", content, token);
-                return false;
+            if (std::any_of(box.contents.begin(), box.contents.end(),
+                    [&content](const std::string& a_id) {
+                        return policy::SameColonId(a_id, content);  // W26: case-blind
+                    })) {
+                if (!RefOnlyHas(content)) {
+                    // Duplicate: report failure so the MCM capture flow does NOT
+                    // move the physical item into the store (a swallowed extra
+                    // copy could never be returned - review A-2 /
+                    // CEF_STATE_SCOPE.md §4).
+                    SKSE::log::info("boxes: AddBox duplicate content '{}' in '{}'", content, token);
+                    return false;
+                }
+                // Listed by a preset, never captured: the entry has no item
+                // behind it, so this one becomes its original. Succeed without
+                // a second entry - refusing left the real item with the player
+                // and no way to put it behind the entry (C2). The capture that
+                // follows takes the mark off.
+                SKSE::log::info("boxes: AddBox '{}' backs the preset-listed entry in '{}' "
+                                "with a real item",
+                    content, token);
+            } else {
+                box.contents.push_back(content);  // caller registers + reconciles
+                tookContent = true;
             }
-            box.contents.push_back(content);  // caller registers + reconciles
         }
 
-        WriteJson();
+        // The settings are the record of what just happened. If they did not
+        // reach disk, say so: the capture flow reads this result to decide
+        // whether to move the physical item into the hidden store, and taking
+        // the item while failing to record where it went is the one outcome
+        // worth refusing (F05).
+        const bool saved = WriteJson(true, true);  // the answer is needed now (W14)
+        if (!saved) {
+            // Put memory back where the disk still is. Reporting failure kept
+            // the physical item with the player, but the definition went on
+            // holding the id - and the NEXT successful save wrote that id out,
+            // so the box claimed a piece its owner was still wearing (in-game
+            // 2026-09-17: box 43 listed 0D4FF7 whose custody row says
+            // "returned"). A capture that did not happen must leave nothing
+            // behind, including a box this call invented for it.
+            if (tookContent) {
+                g_boxes[idx].contents.pop_back();
+            }
+            if (madeBox) {
+                g_boxes.erase(g_boxes.begin() + idx);
+            } else if (!label.empty()) {
+                g_boxes[idx].label = priorLabel;  // a rename that was not saved either
+            }
+            SKSE::log::error(
+                "boxes: AddBox label='{}' token='{}' content='{}' could NOT save the settings - "
+                "reporting failure and rolling the definition back, so nothing is moved into "
+                "storage on the strength of it",
+                label, token, content);
+            return false;
+        }
         SetTokenStats(g_boxes[idx]);  // write armor/weight onto the token now
-        SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", a_label, token, content);
+        SKSE::log::info("boxes: AddBox label='{}' token='{}' content='{}'", label, token, content);
         return true;
+    }
+
+    bool AdoptBoxId(const std::string& a_token, const std::string& a_boxId)
+    {
+        StoreLock lk;
+        if (a_boxId.empty()) {
+            return false;
+        }
+        const int idx = FindBox(a_token);
+        if (idx < 0) {
+            return false;
+        }
+        if (g_boxes[idx].boxId == a_boxId) {
+            return true;
+        }
+        if (const int other = FindBoxById(a_boxId); other >= 0 && other != idx) {
+            // One id, one box - the rule FindBoxById depends on. Keep the id
+            // AddBox just issued rather than making two boxes answer to one.
+            SKSE::log::warn("boxes: box '{}' cannot take id '{}' - box '{}' already carries it",
+                a_token, a_boxId, g_boxes[other].token);
+            return false;
+        }
+        SKSE::log::info("boxes: box '{}' takes back its id '{}' (was '{}')", a_token, a_boxId,
+            g_boxes[idx].boxId);
+        g_boxes[idx].boxId = a_boxId;
+        return WriteJson();
     }
 
     bool RemoveBoxContent(const std::string& a_token, const std::string& a_content)
@@ -5329,32 +7690,65 @@ namespace CostumeFW
         if (it == box.contents.end()) {
             return false;
         }
+        const auto pos = it - box.contents.begin();
         box.contents.erase(it);  // caller detaches the node
-        g_hideRules.erase(a_content);       // drop any hide rule for the removed content
-        g_genderModes.erase(a_content);     // and its gender override
-        g_bodyMorphOn.erase(a_content);     // and its body-morph opt-in
-        g_statEnchantOff.erase(a_content);  // and its item-data opt-outs
-        g_statWeightOff.erase(a_content);
-        g_statArmorOff.erase(a_content);
-        g_hideShapes.erase(a_content);      // and its per-shape hide choices
-        g_contentShapes.erase(a_content);   // and its cached shape list
-        g_showRealBody.erase(a_content);    // and its show-real-body opt-in
-        g_contentEnchants.erase(a_content);  // and its captured enchantment
-        g_contentTemper.erase(a_content);    // and its captured temper multiplier
-        WriteJson();
-        SetTokenStats(box);  // recompute token armor/weight
+        // Extracted rather than erased, so a write that fails can put every one
+        // back (inserting an empty node is a no-op).
+        auto hideRule = g_hideRules.extract(a_content);       // its hide rule
+        auto gender = g_genderModes.extract(a_content);       // its gender override
+        auto morph = g_bodyMorphOn.extract(a_content);        // its body-morph opt-in
+        auto enchOff = g_statEnchantOff.extract(a_content);   // its item-data opt-outs
+        auto weightOff = g_statWeightOff.extract(a_content);
+        auto armorOff = g_statArmorOff.extract(a_content);
+        auto hideShapes = g_hideShapes.extract(a_content);    // its per-shape hide choices
+        auto shapes = g_contentShapes.extract(a_content);     // its cached shape list
+        auto realBody = g_showRealBody.extract(a_content);    // its show-real-body opt-in
+        auto enchants = g_contentEnchants.extract(a_content); // its captured enchantment
+        auto temper = g_contentTemper.extract(a_content);     // its captured temper multiplier
+        if (!WriteJson(true, true)) {  // the answer is needed now (W14)
+            // The mirror of AddBox's rollback (F05). Every caller reads false
+            // as "hand nothing back", and handing the item back while the file
+            // still lists it is a second copy on the next take-out (review
+            // 2026-09-23 W12). So memory goes back to what the disk still says.
+            g_boxes[idx].contents.insert(g_boxes[idx].contents.begin() + pos, a_content);
+            g_hideRules.insert(std::move(hideRule));
+            g_genderModes.insert(std::move(gender));
+            g_bodyMorphOn.insert(std::move(morph));
+            g_statEnchantOff.insert(std::move(enchOff));
+            g_statWeightOff.insert(std::move(weightOff));
+            g_statArmorOff.insert(std::move(armorOff));
+            g_hideShapes.insert(std::move(hideShapes));
+            g_contentShapes.insert(std::move(shapes));
+            g_showRealBody.insert(std::move(realBody));
+            g_contentEnchants.insert(std::move(enchants));
+            g_contentTemper.insert(std::move(temper));
+            SKSE::log::error("boxes: '{}' NOT removed from '{}' - the settings could not be "
+                             "saved, so it stays and nothing is handed back",
+                a_content, a_token);
+            return false;
+        }
+        SetTokenStats(g_boxes[idx]);  // recompute token armor/weight
         return true;
     }
 
-    bool RemoveBox(const std::string& a_token)
+    bool RemoveBox(const std::string& a_token, bool a_keepOnWriteFailure)
     {
         StoreLock lk;
         const int idx = FindBox(a_token);
         if (idx < 0) {
             return false;
         }
+        BoxDefInfo removed = std::move(g_boxes[idx]);
         g_boxes.erase(g_boxes.begin() + idx);  // caller detaches each content node
-        WriteJson();
+        if (!WriteJson(true, true) && a_keepOnWriteFailure) {  // needed now (W14)
+            // Same rule as RemoveBoxContent (W12): the callers return the
+            // contents only on true, so the box has to still be there on false.
+            g_boxes.insert(g_boxes.begin() + idx, std::move(removed));
+            SKSE::log::error("boxes: box '{}' NOT deleted - the settings could not be saved, so "
+                             "it stays and nothing is handed back",
+                a_token);
+            return false;
+        }
         ResetTokenStats(a_token);  // freed token: clear its stat fields
         return true;
     }
@@ -5368,6 +7762,11 @@ namespace CostumeFW
         auto* armo = ResolveArmo(a_id);
         if (!armo) {
             return "(unresolved)";
+        }
+        // D1 (review 2026-09-23 C2): the toggles below do nothing for it, so
+        // listing what they would be worth would only mislead.
+        if (RefOnlyHas(a_id)) {
+            return "listed by a preset only - no stats until you capture the real item";
         }
         std::string enchants;
         const auto appendEffect = [&enchants](RE::EffectSetting* a_mgef, float a_mag) {
@@ -5409,19 +7808,27 @@ namespace CostumeFW
         // The ESP name each token had before a label was ever stamped over it,
         // by FormID. Process-lifetime, exactly like the fullName edit it undoes.
         //
-        // TokenPool identifies a free box by that ESP name ("Costume Box ..."),
-        // so renaming a box and then freeing it used to drop the token out of
-        // the pool until the next game start - the rename feature ate boxes
-        // (review 2026-09-09 F10). The name test cannot simply go: every CEF
-        // plugin passes IsTokenPluginFile, so dropping it would sweep in
-        // CostumeFW_NPC.esp's publish tokens and NPC-persist carriers. And a
-        // stable id is not available either - SSE keeps no EditorID on ARMO at
-        // runtime. So restore the invariant the pool already relies on: a token
-        // that is not in a box carries its ESP name.
-        std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;
+        // NO LONGER LOAD-BEARING (v1.6.4). This restore used to be the only thing
+        // keeping a renamed token in the pool: TokenPool found a free box by its
+        // ESP name, so renaming a box and then freeing it dropped the token out
+        // of the pool until the next game start, and the rename feature ate boxes
+        // (review 2026-09-09 F10). The name test could not simply go at the time,
+        // because every CEF plugin passed IsTokenPluginFile and dropping it would
+        // have swept in CostumeFW_NPC.esp's publish tokens.
+        //
+        // Membership is the CFW_BoxTokenMarker keyword now, which a rename cannot
+        // touch, so F10 cannot recur and a miss here costs nothing but a stale
+        // name in the inventory. Kept because that name SHOULD go back - not
+        // because anything depends on it.
+        std::unordered_map<std::uint32_t, std::string> g_tokenDefaultNames;  // fwd above
 
         void ApplyBoxLabelToToken(const BoxDefInfo& a_box)
         {
+            // Not a quarantined box's token either - it may be someone else's
+            // item entirely (W11, see SetTokenStats).
+            if (!BoxTokenUsable(a_box)) {
+                return;
+            }
             auto* token = ResolveArmo(a_box.token);
             if (!token) {
                 return;
@@ -5560,7 +7967,12 @@ namespace CostumeFW
         if (idx < 0) {
             return false;
         }
-        g_boxes[idx].label = a_label;
+        // C1: a label is written into the settings and stamped on the token's
+        // name, so it goes in as UTF-8 cut at a character boundary. The SMF
+        // rename used to hand over a 64-byte buffer that had cut a long
+        // Japanese label mid-character - and that half character crashed the
+        // write (review 2026-09-23 C1 d).
+        g_boxes[idx].label = SanitizeLabel(a_label);
         ApplyBoxLabelToToken(g_boxes[idx]);  // inventory name follows the label
         WriteJson();
         return true;
@@ -5663,6 +8075,12 @@ namespace CostumeFW
         if (a_file.empty()) {
             return false;
         }
+        // Both are written into the settings (C1). The file name comes from a
+        // folder scan and the display name from the file, so a name that is
+        // not UTF-8 text is refused here rather than failing every write after.
+        if (!WritableText(a_file, "preset file") || !WritableText(a_presetName, "preset name")) {
+            return false;
+        }
         // Shared exclusivity pool with boxes, keyed by FILE: reject if a box
         // already holds this preset.
         const std::string holder = PresetAssignedTo(a_file);
@@ -5681,12 +8099,15 @@ namespace CostumeFW
                 return false;
             }
         }
+        // A preset lists ids and hands over nothing (C2) - see g_refOnly.
+        const int listedOnly = MarkRefOnlyFromPreset(a_contents, g_persist);
         g_persist = a_contents;  // persist mirrors the preset's contents
         g_persistPreset = a_file;
         g_persistPresetName = a_presetName;
         WriteJson();
-        SKSE::log::info("preset: assigned '{}' to persist ({} content)",
-            a_presetName, a_contents.size());
+        SKSE::log::info("preset: assigned '{}' to persist ({} content, {} listed only - no item "
+                        "held for them)",
+            a_presetName, a_contents.size(), listedOnly);
         return true;
     }
 
@@ -5721,6 +8142,10 @@ namespace CostumeFW
         if (idx < 0 || a_file.empty()) {
             return false;
         }
+        // Written into the settings (C1) - see AssignPresetToPersist.
+        if (!WritableText(a_file, "preset file") || !WritableText(a_presetName, "preset name")) {
+            return false;
+        }
         // Exclusivity: a preset FILE may be assigned to only one box at a time.
         // Two files that happen to share a display name are separate presets and
         // do not collide (they did until v1.6.2.1, which made a same-name
@@ -5743,13 +8168,16 @@ namespace CostumeFW
                 return false;
             }
         }
+        // A preset lists ids and hands over nothing (C2) - see g_refOnly.
+        const int listedOnly = MarkRefOnlyFromPreset(a_contents, g_boxes[idx].contents);
         g_boxes[idx].preset = a_file;
         g_boxes[idx].presetName = a_presetName;
         g_boxes[idx].contents = a_contents;  // box mirrors the preset's contents
         WriteJson();
         SetTokenStats(g_boxes[idx]);  // recompute token armor/weight/keywords for new contents
-        SKSE::log::info("preset: assigned '{}' to box {} ({} content)",
-            a_presetName, a_token, a_contents.size());
+        SKSE::log::info("preset: assigned '{}' to box {} ({} content, {} listed only - no item "
+                        "held for them)",
+            a_presetName, a_token, a_contents.size(), listedOnly);
         return true;
     }
 
@@ -5769,5 +8197,22 @@ namespace CostumeFW
     void SaveGlobalSettings()
     {
         WriteJson();
+    }
+
+    SettingsWriteBatch::SettingsWriteBatch()
+    {
+        StoreLock lk;
+        ++g_writeBatchDepth;
+    }
+
+    SettingsWriteBatch::~SettingsWriteBatch()
+    {
+        StoreLock lk;
+        if (--g_writeBatchDepth == 0 && g_writeBatchDirty) {
+            const bool manifest = g_writeBatchManifest;
+            g_writeBatchDirty = false;
+            g_writeBatchManifest = false;
+            WriteJson(manifest);
+        }
     }
 }

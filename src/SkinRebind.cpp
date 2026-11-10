@@ -6,6 +6,7 @@
 #include "ConsoleOut.h"  // ConsolePrint - the one console chokepoint (F01)
 #include "Config.h"  // PersistHeadRebuildEnabled (F2 diagnostic lever)
 #include "Diag.h"    // two-tier logging + thread-contract guard
+#include "RttiProbe.h"  // what an object's vtable belongs to (BUGREPORT 2026-10-18)
 #include "nifcarrier/NifCarrierCore.h"  // ContentNamePrefix (engine-free header)
 
 #include "RE/B/BGSBipedObjectForm.h"
@@ -15,6 +16,7 @@
 #include "RE/B/BSLightingShaderMaterialBase.h"
 #include "RE/B/BSLightingShaderProperty.h"
 #include "RE/B/BSModelDB.h"
+#include "RE/B/BSResourceNiBinaryStream.h"  // NIF header through the resource system (BSA included)
 #include "RE/B/BSShaderMaterial.h"
 #include "RE/B/BSShaderProperty.h"
 #include "RE/B/BSTextureSet.h"
@@ -44,11 +46,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <format>
 #include <condition_variable>  // the one delayed-call timer thread
 #include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <string_view>
@@ -298,14 +302,28 @@ namespace CostumeFW
         // owning ActorState::bonePins[id] (per-actor storage, NPC-generalized).
         std::vector<RE::NiPointer<RE::NiAVObject>>* g_boneRefSink = nullptr;
 
-        // Baseline: the children-buffer address each recorded holder is SUPPOSED
-        // to have, captured when CEF itself finished attaching (InjectOnRoot).
-        // Catches the stomp variants a value-plausibility check cannot: an
-        // 8-aligned uint16 run with a zero low word (e.g. 0x0002000000010000)
-        // passes PlausibleObjectPtr, but nothing legitimate moves the buffer
-        // while the record holds the node - CEF pre-sizes the array and never
-        // grows it afterwards. Keyed by node address; erased in DetachRecorded.
-        std::unordered_map<const void*, std::uint64_t> g_holderArrayBaseline;
+        // Baseline: the children array header (buffer address, capacity, size)
+        // each recorded holder is SUPPOSED to have, captured when CEF itself
+        // finished attaching (InjectOnRoot). Catches the stomp variants a
+        // value-plausibility check cannot: an 8-aligned uint16 run with a zero
+        // low word (e.g. 0x0002000000010000) passes PlausibleObjectPtr. CEF
+        // pre-sizes the array and never grows it afterwards - but the ENGINE can:
+        // a hit decal is attached under the shape that was hit, which may be
+        // under our holder, and that reallocates the buffer. Growth (capacity
+        // and size both up, size within capacity) is therefore re-baselined, and
+        // only a buffer that moved WITHOUT growing is corruption (review
+        // 2026-09-23 W16). The stomps observed so far leave the size fields
+        // intact, so they are still caught. Keyed by node address; erased in
+        // DetachRecorded.
+        //
+        // HolderArrayState: a NiTArray header read as raw fields (see
+        // ReadHolderArray below).
+        struct HolderArrayState
+        {
+            std::uint64_t data{ 0 };
+            std::uint16_t cap{ 0 }, freeIdx{ 0 }, size{ 0 }, growth{ 0 };
+        };
+        std::unordered_map<const void*, HolderArrayState> g_holderArrayBaseline;
 
         // Repeat-offender parking: a holder the environment stomps once tends to
         // be stomped again right after the re-inject (same allocator, same
@@ -346,9 +364,19 @@ namespace CostumeFW
         // detach path in the plugin goes through this function, and a stale
         // NiPointer to geometry CEF no longer owns is exactly the extra reference
         // the containment work forbids (§10).
+        bool HolderHeaderIntact(const RE::NiNode* a_holder);
+        void ReleaseBrokenHolder(const char* a_what, RE::NiPointer<RE::NiNode>& a_parent,
+            RE::NiPointer<RE::NiNode>& a_holder, std::vector<VisualSyncRef>* a_visual);
+
         void DetachRecorded(RE::NiPointer<RE::NiNode>& a_parent, RE::NiPointer<RE::NiNode>& a_holder,
             std::vector<VisualSyncRef>* a_visual = nullptr)
         {
+            // DetachChild would release the holder through its own vtable (the
+            // array slot's DecRef) - a call through whatever overwrote it.
+            if (a_holder && !HolderHeaderIntact(a_holder.get())) {
+                ReleaseBrokenHolder("detach", a_parent, a_holder, a_visual);
+                return;
+            }
             if (a_parent && a_holder) {
                 a_parent->DetachChild(a_holder.get());
             }
@@ -399,10 +427,13 @@ namespace CostumeFW
             }
         }
 
-        // Still used by the diagnostics walks (nodediag / headdiag / the dead-bind
-        // sweep), which enumerate FSMP's merged bones and have no record to go on.
-        // Those are user-initiated or already scoped to our own holder; the hot
-        // paths no longer walk anything.
+        // Used by every walk CEF still makes: the diagnostics (nodediag /
+        // headdiag), and the renamed-bone census behind the dead-bind sweep and
+        // the FSMP bone lookup, which enumerate FSMP's merged bones and have no
+        // record to go on. That census DOES walk the actor's whole 3P tree - on
+        // the Reconcile and watchdog paths, so this used to say "the hot paths
+        // no longer walk anything", which was not true - but once per root per
+        // pass since review 2026-09-23 W28, not once per item or per bone.
         bool ChildrenWalkable(RE::NiNode* a_node)
         {
             const auto& kids = a_node->GetChildren();
@@ -426,13 +457,8 @@ namespace CostumeFW
         // The observed corruption (children._data == 0x1 with the size fields
         // intact, INVESTIGATION 2026-07-29/30) is detected from the attachment
         // RECORDS: metadata reads only - no dereference, no walking - so the
-        // check is safe at any moment, on any state.
-        struct HolderArrayState
-        {
-            std::uint64_t data{ 0 };
-            std::uint16_t cap{ 0 }, freeIdx{ 0 }, size{ 0 }, growth{ 0 };
-        };
-
+        // check is safe at any moment, on any state. (HolderArrayState is
+        // defined with g_holderArrayBaseline, above.)
         HolderArrayState ReadHolderArray(RE::NiNode* a_node)
         {
             HolderArrayState s{};
@@ -448,7 +474,7 @@ namespace CostumeFW
         void RecordHolderBaseline(RE::NiNode* a_holder)
         {
             if (a_holder) {
-                g_holderArrayBaseline[a_holder] = ReadHolderArray(a_holder).data;
+                g_holderArrayBaseline[a_holder] = ReadHolderArray(a_holder);
             }
         }
 
@@ -485,6 +511,144 @@ namespace CostumeFW
             }
         }
 
+        // --- holder header + object type (BUGREPORT 2026-10-18, Baki) ----------
+        // Everything above reads the children array at +0x110 and nothing else.
+        // The 2026-10-18 crash (v1.6.2) was a holder whose FIRST 0x18 bytes had
+        // become a NiTObjectArray - vtable, data, {6,6,6,1} - while its array
+        // was fine: the dead-bind census read its "name" (the array's size
+        // fields) and strlen faulted. Who writes it is still unknown; what CEF
+        // can do is notice before it reads or calls anything through the node.
+        //
+        // Every holder CEF makes is a plain RE::NiNode::Create, so its vtable is
+        // exactly NiNode's: one compare, safe on any state (the record keeps
+        // the memory alive).
+        std::uintptr_t NiNodeVtable()
+        {
+            static const std::uintptr_t s_vt = RE::VTABLE_NiNode[0].address();
+            return s_vt;
+        }
+
+        bool HolderHeaderIntact(const RE::NiNode* a_holder)
+        {
+            std::uintptr_t vt = 0;
+            std::memcpy(&vt, a_holder, sizeof(vt));
+            return vt == NiNodeVtable();
+        }
+
+        // a_child out of a_parent's children array by VALUE: nothing is called
+        // on a_child and nothing is read through it. This is NiTObjectArray's
+        // RemoveAt minus the release of the slot's reference - that release is
+        // the call through the broken vtable: null the slot, one element fewer,
+        // and pull the end in if it was the last. The parent is a live skeleton
+        // node; only its own array fields and slot values are read.
+        bool RawUnlinkChild(RE::NiNode* a_parent, const void* a_child)
+        {
+            if (!a_parent || !ChildrenWalkable(a_parent)) {
+                return false;
+            }
+            auto* raw = reinterpret_cast<unsigned char*>(&a_parent->GetChildren());
+            void** data = nullptr;
+            std::uint16_t cap = 0, freeIdx = 0, size = 0;
+            std::memcpy(&data, raw + 0x08, sizeof(data));
+            std::memcpy(&cap, raw + 0x10, sizeof(cap));
+            std::memcpy(&freeIdx, raw + 0x12, sizeof(freeIdx));
+            std::memcpy(&size, raw + 0x14, sizeof(size));
+            for (std::uint16_t i = 0; i < cap; ++i) {
+                if (data[i] != a_child) {
+                    continue;
+                }
+                data[i] = nullptr;
+                if (size > 0) {
+                    --size;
+                    std::memcpy(raw + 0x14, &size, sizeof(size));
+                }
+                if (freeIdx == i + 1) {
+                    --freeIdx;
+                    std::memcpy(raw + 0x12, &freeIdx, sizeof(freeIdx));
+                }
+                return true;
+            }
+            return false;
+        }
+
+        // A holder whose header is no longer NiNode's: out of the scene and out
+        // of the records, without calling or releasing anything through it. The
+        // reference the record held is leaked on purpose - releasing it IS the
+        // virtual call. The dump and the type the vtable names are the writer's
+        // fingerprint, which no crash log has been able to give.
+        void ReleaseBrokenHolder(const char* a_what, RE::NiPointer<RE::NiNode>& a_parent,
+            RE::NiPointer<RE::NiNode>& a_holder, std::vector<VisualSyncRef>* a_visual)
+        {
+            auto* holder = a_holder.get();
+            std::uintptr_t vt = 0;
+            std::memcpy(&vt, holder, sizeof(vt));
+            const std::string type = rtti::VtableTypeName(vt);
+            SKSE::log::error(
+                "SCENE CORRUPTION on holder at {:#x} ({}): it no longer starts with NiNode's "
+                "vtable - found {:#x} ({}). Something overwrote its header. Dumping it, then "
+                "cutting it out of the scene without calling anything through it",
+                reinterpret_cast<std::uintptr_t>(holder), a_what, vt,
+                type.empty() ? "not a class vtable" : type);
+            HexDumpNode(holder);
+            const bool unlinked = RawUnlinkChild(a_parent.get(), holder);
+            g_holderArrayBaseline.erase(holder);
+            if (a_visual) {
+                a_visual->clear();
+            }
+            a_parent.reset();
+            // Raw null, not reset(): reset() is the DecRef through the broken vtable.
+            static_assert(sizeof(RE::NiPointer<RE::NiNode>) == sizeof(void*));
+            std::memset(static_cast<void*>(&a_holder), 0, sizeof(a_holder));
+            SKSE::log::error("  holder {}; its reference is leaked on purpose",
+                unlinked ? "removed from its parent's children" :
+                           "NOT found in its parent's children - left where it is");
+        }
+
+        // For the walks (census, diagnostics): is what a child slot points at a
+        // scene object at all? Asked before its name is read or anything is
+        // called on it. NiNode's own vtable is the fast path; any other vtable
+        // is looked up once through RTTI and remembered.
+        bool IsSceneObject(const RE::NiAVObject* a_obj, std::uintptr_t& a_vtable)
+        {
+            if (!rtti::ReadPointer(a_obj, a_vtable)) {
+                return false;
+            }
+            if (a_vtable == NiNodeVtable()) {
+                return true;
+            }
+            static std::mutex s_m;
+            static std::unordered_map<std::uintptr_t, bool> s_known;
+            {
+                std::scoped_lock lk(s_m);
+                if (const auto it = s_known.find(a_vtable); it != s_known.end()) {
+                    return it->second;
+                }
+            }
+            const bool ok = rtti::VtableIsA(a_vtable, "NiAVObject");
+            std::scoped_lock lk(s_m);
+            s_known.emplace(a_vtable, ok);
+            return ok;
+        }
+
+        // Same family and same log budget as NoteBadSlot, plus the type the
+        // vtable names.
+        void NoteBadObject(const char* a_where, const void* a_obj, std::uintptr_t a_vtable)
+        {
+            static std::atomic<std::uint32_t> s_seen{ 0 };
+            const auto n = ++s_seen;
+            const std::string type = rtti::VtableTypeName(a_vtable);
+            if (n <= 8) {
+                SKSE::log::error(
+                    "SCENE CORRUPTION: the {} walk met an object at {:#x} whose vtable {:#x} is "
+                    "{} - not a scene object, skipped (hit #{})",
+                    a_where, reinterpret_cast<std::uintptr_t>(a_obj), a_vtable,
+                    type.empty() ? "not a class vtable" : "'" + type + "'", n);
+            } else {
+                SKSE::log::debug("non-scene object {:#x} (vtable {:#x}) in the {} walk, hit #{}",
+                    reinterpret_cast<std::uintptr_t>(a_obj), a_vtable, a_where, n);
+            }
+        }
+
         // A broken holder cannot be released as-is: ~NiNode's array destructor
         // walks _data (slot release + deallocate) and dies on 0x1 - "Active OFF
         // on the broken item still crashes" was a residual path of the record
@@ -510,16 +674,43 @@ namespace CostumeFW
             if (!a_holder) {
                 return false;
             }
+            // The header first: a holder that is no longer a NiNode cannot be
+            // repaired, detached or re-used like one, and an item that has had
+            // its node overwritten once sits out (no strike count - re-injecting
+            // just hands the writer a fresh target).
+            if (!HolderHeaderIntact(a_holder.get())) {
+                ReleaseBrokenHolder(a_what, a_parent, a_holder, a_visual);
+                g_poisonParked.insert(a_what);
+                SKSE::log::error("'{}' PARKED (no more re-injects until the next save load): "
+                                 "its node's header was overwritten by something outside CEF",
+                    a_what);
+                RE::DebugNotification(
+                    "CostumeFW: a costume's node was damaged by another mod - parked it "
+                    "(see the CEF log)");
+                return true;
+            }
             const auto st = ReadHolderArray(a_holder.get());
             const char* how = nullptr;
             if (HolderArrayBroken(st)) {
                 how = "implausible children array";
             } else if (const auto itB = g_holderArrayBaseline.find(a_holder.get());
-                       itB != g_holderArrayBaseline.end() && itB->second != st.data) {
-                // Plausible-looking value, wrong buffer: either an aligned
-                // stomp (uint16 run with a zero low word) or something foreign
-                // grew OUR array. Neither is a state to keep rendering from.
-                how = "children buffer moved from its attach-time baseline";
+                       itB != g_holderArrayBaseline.end() && itB->second.data != st.data) {
+                const auto& b = itB->second;
+                if (st.cap > b.cap && st.size > b.size && st.size <= st.cap) {
+                    // The array GREW: a real reallocation for a child the engine
+                    // attached (a hit decal under the shape that was hit). Not a
+                    // stomp - those leave the size fields as they were - so take
+                    // the new buffer as the baseline and carry on (W16).
+                    SKSE::log::info("containment: holder '{}' grew {}->{} children (engine "
+                                    "attach) - rebaselined",
+                        a_holder->name.c_str(), b.size, st.size);
+                    itB->second = st;
+                } else {
+                    // Plausible-looking value, wrong buffer and no growth to
+                    // explain it: an aligned stomp (uint16 run with a zero low
+                    // word). Not a state to keep rendering from.
+                    how = "children buffer moved from its attach-time baseline";
+                }
             }
             if (!how) {
                 return false;
@@ -913,6 +1104,107 @@ namespace CostumeFW
             return true;
         }
 
+        // --- renamed-bone census (review 2026-09-23 W28) ----------------------
+        // Everything the dead-bind sweep and the FSMP bone lookup need to know
+        // about an actor's live tree: which FSMP-renamed nodes hang in it right
+        // now, and the newest generation of each (class, bone). Both used to walk
+        // the WHOLE tree for every question - the sweep once per shown item per
+        // Reconcile and per 2.5s watchdog tick, the lookup once per unresolved
+        // bone - and every walk reads child arrays a stomp can have hit since the
+        // frame containment last looked. One walk per root per pass now: a
+        // CensusScope marks the pass, and the first question builds it. Within a
+        // pass the renamed nodes do not change - FSMP re-merges from the engine's
+        // equip processing, never from inside CEF's own call - and CEF's own
+        // detach / re-inject does not touch them.
+        struct RenamedCensus
+        {
+            std::unordered_set<const RE::NiAVObject*> attached;
+            std::unordered_map<std::string, std::uint32_t> maxHead, maxArmor;
+            std::unordered_map<std::string, RE::NiAVObject*> newestHead, newestArmor;
+        };
+
+        RenamedCensus BuildRenamedCensus(RE::NiAVObject* a_root)
+        {
+            RenamedCensus c;
+            std::vector<RE::NiAVObject*> stack{ a_root };
+            while (!stack.empty()) {
+                auto* obj = stack.back();
+                stack.pop_back();
+                if (!obj) {
+                    continue;
+                }
+                // The 2026-10-18 crash site: a holder overwritten with a
+                // NiTObjectArray reached this point and its "name" was read.
+                std::uintptr_t vt = 0;
+                if (!IsSceneObject(obj, vt)) {
+                    NoteBadObject("renamed-bone census", obj, vt);
+                    continue;
+                }
+                bool head = false;
+                std::uint32_t id = 0;
+                std::string_view suffix;
+                if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix)) {
+                    c.attached.insert(obj);
+                    const std::string key(suffix);
+                    auto& maxes = head ? c.maxHead : c.maxArmor;
+                    // First found wins a tie, as the per-call walk did.
+                    if (auto [it, inserted] = maxes.try_emplace(key, id); inserted || id > it->second) {
+                        it->second = id;
+                        (head ? c.newestHead : c.newestArmor)[key] = obj;
+                    }
+                }
+                // Walkability guard (2026-07-30): the per-bone walk this replaced
+                // had none while the guarded sweeps did - it was the widest-open
+                // residual path of the §7 B-2 audit.
+                if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
+                    for (auto& child : node->GetChildren()) {
+                        auto* ch = child.get();
+                        if (ch && !PlausibleObjectPtr(ch)) {
+                            NoteBadSlot("renamed-bone census", node, ch);
+                            continue;
+                        }
+                        stack.push_back(ch);
+                    }
+                }
+            }
+            return c;
+        }
+
+        // One pass: a Reconcile of one actor, or one watchdog tick. Nests (a tick
+        // that finds a dead bind runs a Reconcile, which starts afresh). Main
+        // thread only, like everything that walks the scene.
+        struct CensusScope
+        {
+            CensusScope() :
+                prev(s_current)
+            {
+                s_current = this;
+            }
+            ~CensusScope() { s_current = prev; }
+            CensusScope(const CensusScope&) = delete;
+            CensusScope& operator=(const CensusScope&) = delete;
+
+            std::unordered_map<const RE::NiAVObject*, RenamedCensus> byRoot;
+            CensusScope* prev;
+            static inline CensusScope* s_current = nullptr;
+        };
+
+        // a_root's census for the current pass, built on first use. Outside a
+        // pass, a fresh one in a_local - the old cost, for the rare caller that
+        // is not part of one.
+        const RenamedCensus& CensusFor(RE::NiAVObject* a_root, RenamedCensus& a_local)
+        {
+            if (auto* scope = CensusScope::s_current) {
+                auto it = scope->byRoot.find(a_root);
+                if (it == scope->byRoot.end()) {
+                    it = scope->byRoot.emplace(a_root, BuildRenamedCensus(a_root)).first;
+                }
+                return it->second;
+            }
+            a_local = BuildRenamedCensus(a_root);
+            return a_local;
+        }
+
         // Selection policy (learned the hard way, 2026-07-04):
         // - PREFER Head over Armor: an Armor merge comes from a WORN item and
         //   dies on unequip (a mesh bound there stretches to garbage); box
@@ -929,45 +1221,16 @@ namespace CostumeFW
             if (!a_root || !a_bone || !*a_bone) {
                 return nullptr;
             }
-            const std::string_view bone{ a_bone };
-            RE::NiAVObject* bestHead = nullptr;
-            RE::NiAVObject* bestArmor = nullptr;
-            std::uint32_t bestHeadId = 0, bestArmorId = 0;
-            std::vector<RE::NiAVObject*> stack{ a_root };
-            while (!stack.empty()) {
-                auto* obj = stack.back();
-                stack.pop_back();
-                if (!obj) {
-                    continue;
-                }
-                bool head = false;
-                std::uint32_t id = 0;
-                std::string_view suffix;
-                if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix) &&
-                    suffix == bone) {
-                    if (head && (!bestHead || id > bestHeadId)) {
-                        bestHead = obj;
-                        bestHeadId = id;
-                    } else if (!head && (!bestArmor || id > bestArmorId)) {
-                        bestArmor = obj;
-                        bestArmorId = id;
-                    }
-                }
-                // Walkability guard (2026-07-30): this walk had NONE while the
-                // guarded sweeps did - it was the widest-open residual path of
-                // the §7 B-2 audit (every unresolved bone, up to twice).
-                if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
-                    for (auto& child : node->GetChildren()) {
-                        auto* c = child.get();
-                        if (c && !PlausibleObjectPtr(c)) {
-                            NoteBadSlot("FindFsmpRenamedBone", node, c);
-                            continue;
-                        }
-                        stack.push_back(c);
-                    }
-                }
+            RenamedCensus local;
+            const auto& census = CensusFor(a_root, local);
+            const std::string bone{ a_bone };
+            if (const auto it = census.newestHead.find(bone); it != census.newestHead.end()) {
+                return it->second;
             }
-            return bestHead ? bestHead : bestArmor;
+            if (const auto it = census.newestArmor.find(bone); it != census.newestArmor.end()) {
+                return it->second;
+            }
+            return nullptr;
         }
 
         // --- rebind retry (FSMP carrier attach race) ---------------------------
@@ -1084,9 +1347,10 @@ namespace CostumeFW
         // target is re-decided on every insert - which is what notifying the
         // condition variable makes wait_until do.
         //
-        // Lock order: a caller may hold StoreLock while pushing here (RunAfterDelayMs
-        // takes it), and the timer thread takes ONLY g_delayMutex and dispatches
-        // outside it, so the two can never wait on each other.
+        // Lock order: a caller may hold StoreLock while pushing here (most do -
+        // they are main-thread code that already holds it), and the timer thread
+        // takes ONLY g_delayMutex and dispatches outside it, so the two can never
+        // wait on each other. RunAfterDelayMs itself takes nothing but this.
         void RunAfterDelay(std::chrono::steady_clock::time_point a_due, std::function<void()> a_fn)
         {
             // Started by the first caller, then runs for the life of the process -
@@ -1215,7 +1479,12 @@ namespace CostumeFW
                 }
                 state->inRebindRetry = true;
                 Reconcile();
-                state->inRebindRetry = false;
+                // Looked up again: Reconcile can drop an NPC's state (the actor
+                // unloaded or lost its last binding), and `state` would then
+                // point at freed memory (review 2026-09-23 M4).
+                if (ActorState* after = isPlayer ? &PlayerState() : FindState(handle)) {
+                    after->inRebindRetry = false;
+                }
             });
         }
 
@@ -1244,47 +1513,26 @@ namespace CostumeFW
             if (!a_holder || !a_root3p) {
                 return false;  // not injected on the 3p skeleton - nothing to sweep
             }
-
-            // One BFS over the LIVE tree: the set of attached renamed nodes (by
-            // POINTER - liveness is membership, never a parent-chain walk: a
-            // retired node's ->parent can dangle even while the node itself is
-            // pinned alive) and the newest attached generation per (class, bone).
-            // "Attached" alone is NOT enough: FSMP keeps the retiring generation
-            // on the skeleton for a few seconds, and a bind taken in that overlap
-            // window sways wrong without ever being detached.
-            std::unordered_set<const RE::NiAVObject*> attachedRenamed;
-            std::unordered_map<std::string, std::uint32_t> maxHead, maxArmor;
-            {
-                std::vector<RE::NiAVObject*> stack{ a_root3p };
-                while (!stack.empty()) {
-                    auto* obj = stack.back();
-                    stack.pop_back();
-                    if (!obj) {
-                        continue;
-                    }
-                    bool head = false;
-                    std::uint32_t id = 0;
-                    std::string_view suffix;
-                    if (ParseRenamedBone(std::string_view(obj->name.c_str()), head, id, suffix)) {
-                        attachedRenamed.insert(obj);
-                        auto& m = head ? maxHead : maxArmor;
-                        auto [it, inserted] = m.try_emplace(std::string(suffix), id);
-                        if (!inserted && id > it->second) {
-                            it->second = id;
-                        }
-                    }
-                    if (auto* node = obj->AsNode(); node && ChildrenWalkable(node)) {
-                        for (auto& child : node->GetChildren()) {
-                            auto* c = child.get();
-                            if (c && !PlausibleObjectPtr(c)) {
-                                NoteBadSlot("dead-bind sweep", node, c);
-                                continue;
-                            }
-                            stack.push_back(c);
-                        }
-                    }
-                }
+            // Overwritten since the containment last looked (mid-pass): the
+            // traversal below is a virtual call per node. The next containment
+            // pass releases it; this one must not walk it.
+            if (!HolderHeaderIntact(a_holder)) {
+                return false;
             }
+
+            // The census of the LIVE tree (one walk per root per pass - W28): the
+            // set of attached renamed nodes (by POINTER - liveness is membership,
+            // never a parent-chain walk: a retired node's ->parent can dangle even
+            // while the node itself is pinned alive) and the newest attached
+            // generation per (class, bone). "Attached" alone is NOT enough: FSMP
+            // keeps the retiring generation on the skeleton for a few seconds, and
+            // a bind taken in that overlap window sways wrong without ever being
+            // detached.
+            RenamedCensus local;
+            const auto& census = CensusFor(a_root3p, local);
+            const auto& attachedRenamed = census.attached;
+            const auto& maxHead = census.maxHead;
+            const auto& maxArmor = census.maxArmor;
 
             bool dead = false;
             RE::BSVisit::TraverseScenegraphGeometries(a_holder,
@@ -1467,14 +1715,22 @@ namespace CostumeFW
             return true;
         }
 
-        // Apply one BGSTextureSet to a geometry's lighting-shader material IN
-        // PLACE (safe: our cloned NIF owns this material). Uses only type-correct
-        // virtuals - NOT the community-REL InitializeShader (ids 99866/106432) or
-        // InvalidateTextures (99865/106431): those RESOLVE on 1.6.1170 but crash
-        // with an access violation in BSLightingShader when called on a cloned
-        // envmap material (and neither id exists in the VR address library).
-        // (skee/po3 pattern, minus the material clone we don't need because the
-        // material is private.)
+        // Apply one BGSTextureSet to a geometry's lighting-shader material. Uses
+        // only type-correct virtuals - NOT the community-REL InitializeShader
+        // (ids 99866/106432) or InvalidateTextures (99865/106431): those RESOLVE
+        // on 1.6.1170 but crash with an access violation in BSLightingShader when
+        // called on a cloned envmap material (and neither id exists in the VR
+        // address library).
+        //
+        // On a COPY of the material, the skee/po3 way: Create -> CopyMembers ->
+        // new textures -> SetMaterial, which hands the property its own. This
+        // used to write the material in place on the belief that the cloned NIF
+        // owned it - but cloning a NIF does not clone its materials, which the
+        // engine shares, so a colour variant or a real-body skin set repainted
+        // every other user of that material: an NPC in the same armour, the
+        // item on the ground, for the rest of the session (review 2026-09-23
+        // W17). VR keeps the in-place write: SetMaterial's VR address could not
+        // be checked against a VR address library, and a wrong one is a crash.
         bool ApplyTextureSet(RE::BSGeometry* a_geom, RE::BGSTextureSet* a_txst)
         {
             if (!a_geom || !a_txst) {
@@ -1487,10 +1743,27 @@ namespace CostumeFW
                 return false;
             }
             auto* material = static_cast<RE::BSLightingShaderMaterialBase*>(ls->material);
-            material->ClearTextures();                                       // vfunc 0x09
-            material->OnLoadTextureSet(0, static_cast<RE::BSTextureSet*>(a_txst));  // vfunc 0x08
-            ls->SetupGeometry(a_geom);        // vfunc 0x27
-            ls->FinishSetupGeometry(a_geom);  // vfunc 0x28
+            if (REL::Module::IsVR()) {
+                material->ClearTextures();                                       // vfunc 0x09
+                material->OnLoadTextureSet(0, static_cast<RE::BSTextureSet*>(a_txst));  // vfunc 0x08
+                ls->SetupGeometry(a_geom);        // vfunc 0x27
+                ls->FinishSetupGeometry(a_geom);  // vfunc 0x28
+                return true;
+            }
+            auto* fresh = static_cast<RE::BSLightingShaderMaterialBase*>(material->Create());
+            if (!fresh) {
+                return false;
+            }
+            fresh->CopyMembers(material);
+            fresh->ClearTextures();
+            fresh->OnLoadTextureSet(0, static_cast<RE::BSTextureSet*>(a_txst));
+            // true: the property takes its own copy of `fresh`, so the scratch
+            // one is ours to destroy right after.
+            ls->SetMaterial(fresh, true);
+            ls->SetupGeometry(a_geom);
+            ls->FinishSetupGeometry(a_geom);
+            fresh->~BSLightingShaderMaterialBase();
+            RE::free(fresh);
             return true;
         }
 
@@ -1547,6 +1820,21 @@ namespace CostumeFW
             auto* dsi = static_cast<RE::BSDismemberSkinInstance*>(a_skin);
             auto& rd = dsi->GetRuntimeData();
             return rd.numPartitions > 0 ? static_cast<int>(rd.partitions[0].slot) : -1;
+        }
+
+        // The name a shape is known by in CEF: what the hide list stores, what the
+        // UIs list and what injection compares against - one function so the
+        // three can never disagree. A NIF's shape name is raw bytes, often in the
+        // author's codepage, and the hide list lives in a JSON file whose writer
+        // throws on anything that is not UTF-8 (review 2026-09-23 C1: ticking
+        // such a shape crashed the game). Valid UTF-8 - every ASCII name, and
+        // every name already saved - passes through unchanged. Anything else goes
+        // through the ANSI codepage the way item names do, and a byte even that
+        // cannot place becomes \xNN, so the key is the same on every load on
+        // this PC and a hide rule keeps matching.
+        std::string ShapeKey(const char* a_raw)
+        {
+            return EnsureUtf8(a_raw ? std::string(a_raw) : std::string{});
         }
 
         // Find a non-empty "BODYTRI" NiStringExtraData anywhere in a subtree.
@@ -1654,7 +1942,7 @@ namespace CostumeFW
                 [&](RE::BSGeometry* a_geom) {
                     auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
                     if (skin) {
-                        const std::string sname = a_geom->name.c_str();
+                        const std::string sname = ShapeKey(a_geom->name.c_str());
                         // Record the shape (name + dismember slot, BEFORE
                         // RebindGeometry neutralizes it) so the MCM can list it.
                         shapeList.emplace_back(sname, ShapeSlot(skin.get()));
@@ -1941,6 +2229,9 @@ namespace CostumeFW
                 &a_state.visualRealBody3p);
             DetachRecorded(a_state.realBodyParent1p, a_state.realBodyHolder1p,
                 &a_state.visualRealBody1p);
+            // After both detaches, like an item's: nothing skinned to them is
+            // left to be drawn (C14).
+            a_state.bonePins.erase(kRealBodyNode);
         }
 
         // Pick the BODY (slot-32) addon from a skin ARMO's armature for the player's
@@ -2080,10 +2371,14 @@ namespace CostumeFW
         // this the injected copy keeps the NIF's baked-in texture paths. Also runs
         // on the idempotent already-attached path, so a TXST-only skin change
         // converges without waiting for a 3D rebuild.
-        void ApplySkinTextures(RE::NiAVObject* a_root3D, const char* a_nodeName,
-            RE::BGSTextureSet* a_txst)
+        //
+        // The holder is the RECORDED one (realBodyHolder3p / 1p). It used to be
+        // found by GetObjectByName on the actor root - a skeleton search, which
+        // this file forbids for good reason (see DetachRecorded): the NPC root is
+        // a BSFlattenedBoneTree, and a miss descends into every holder (W17).
+        void ApplySkinTextures(RE::NiAVObject* a_holder, RE::BGSTextureSet* a_txst)
         {
-            auto* holder = a_root3D ? a_root3D->GetObjectByName(a_nodeName) : nullptr;
+            auto* holder = a_holder;
             if (!holder || !a_txst) {
                 return;
             }
@@ -2186,12 +2481,25 @@ namespace CostumeFW
             RE::BGSTextureSet* skinTx = bodyAA->skinTextures[sex];
             static const std::unordered_set<std::string> kNoHide;
             bool any = false;
+            // The real body binds to bones like any item, and it ran outside
+            // InjectFor's bookkeeping (review 2026-09-23 C14): no pin sink, so an
+            // FSMP-renamed node it bound to was never pinned, and the rebind
+            // prefix of whatever content was injected last, so it went looking
+            // for THAT carrier's physics bones first. With the real body hidden
+            // under a slot-32 token its own FSMP generation is retiring but still
+            // attached for a few seconds - bind there, and once FSMP frees it the
+            // skin points at freed nodes (the 2026-07-04 shape). So: no prefix -
+            // the body belongs to no carrier - and its bones pinned under its own
+            // key, both put back as they were afterwards.
+            const std::string savedPrefix = std::exchange(g_rebindPrefix, std::string{});
+            std::vector<RE::NiPointer<RE::NiAVObject>> pins;
+            auto* const savedSink = std::exchange(g_boneRefSink, &pins);
             if (auto* root3p = actor->Get3D(false); root3p && !m3p.nifPath.empty()) {
                 any |= InjectOnRoot(root3p, StripMeshesPrefix(m3p.nifPath), kRealBodyNode,
                     m3p.swap, true, kNoHide, "realbody", false, actor,
                     a_state.realBodyHolder3p, a_state.realBodyParent3p,
                     &a_state.visualRealBody3p, ReferenceEffectActive(a_state, actor, false));
-                ApplySkinTextures(root3p, kRealBodyNode, skinTx);
+                ApplySkinTextures(a_state.realBodyHolder3p.get(), skinTx);
             }
             if (a_state.isPlayer) {
                 if (auto* root1p = actor->Get3D(true); root1p && !m1p.nifPath.empty()) {
@@ -2199,8 +2507,15 @@ namespace CostumeFW
                         m1p.swap, true, kNoHide, "realbody", false, actor,
                         a_state.realBodyHolder1p, a_state.realBodyParent1p,
                         &a_state.visualRealBody1p, ReferenceEffectActive(a_state, actor, true));
-                    ApplySkinTextures(root1p, kRealBodyNode, skinTx);
+                    ApplySkinTextures(a_state.realBodyHolder1p.get(), skinTx);
                 }
+            }
+            g_boneRefSink = savedSink;
+            g_rebindPrefix = savedPrefix;
+            if (!pins.empty()) {
+                auto& refs = a_state.bonePins[kRealBodyNode];
+                refs.insert(refs.end(), pins.begin(), pins.end());
+                SKSE::log::info("realbody: pinned {} bone(s)", pins.size());
             }
             if (any) {
                 SKSE::log::info("realbody: injected player body addon {:08X}", bodyAA->GetFormID());
@@ -2305,6 +2620,51 @@ namespace CostumeFW
         // Exact race, additional race, then data-order fallback - identical to
         // the old picker, but only among candidates that passed hard admission.
         // The race is a PARAMETER (NPC generalization): pass the wearer's race.
+        // ---- Partial armature notes (F13) --------------------------------
+        //
+        // One ARMO, several ARMA in its armature, and between them they cover
+        // different biped slots: a dress whose skirt and top are separate
+        // addons, a helmet plus the piece that hides the hair. Injection shows
+        // ONE addon - the one the picker above chose - so the rest of the item
+        // is simply not there, and nothing said so. Showing them all is a
+        // feature that reaches the renderer, the hide rules and the carrier
+        // build; saying so is a sentence.
+        //
+        // Only a real partial take is worth a word. The chosen addon must leave
+        // one of the ARMO's own slots uncovered AND another admitted addon must
+        // cover it - an armature full of race variants of the same piece covers
+        // nothing extra and stays quiet.
+        std::mutex g_partialMutex;
+        std::unordered_map<std::string, std::string> g_partialByContent;
+
+        std::string SlotList(std::uint32_t a_mask)
+        {
+            std::string out;
+            for (int bit = 0; bit < 32; ++bit) {
+                if (a_mask & (1u << bit)) {
+                    if (!out.empty()) {
+                        out += ", ";
+                    }
+                    out += std::to_string(30 + bit);
+                }
+            }
+            return out;
+        }
+
+        // True the first time, so the log says it once per item per session.
+        bool NotePartialArmature(std::uint32_t a_localID, const std::string& a_plugin,
+            std::uint32_t a_shown, std::uint32_t a_left)
+        {
+            const std::string note =
+                "this item is built from more than one piece - CEF shows the part on slot(s) " +
+                SlotList(a_shown) + " and leaves the part(s) on slot(s) " + SlotList(a_left) +
+                " out";
+            std::scoped_lock lk(g_partialMutex);
+            return g_partialByContent
+                .insert_or_assign(std::format("{:06X}:{}", a_localID, a_plugin), note)
+                .second;
+        }
+
         RE::TESObjectARMA* PickAdmittedAddonForRace(RE::TESObjectARMO* a_armo,
             const policy::CapturePolicy& a_policy, std::uint32_t a_localID,
             const std::string& a_plugin, bool a_log, RE::TESRace* a_race,
@@ -2350,6 +2710,34 @@ namespace CostumeFW
                 return want == 0 ||
                        (static_cast<std::uint32_t>(a_addon->GetSlotMask()) & want) != 0;
             };
+            // F13: is this a partial take? Only if the chosen addon leaves one of
+            // the ARMO's own slots uncovered and a sibling covers it.
+            const auto notePartial = [&](RE::TESObjectARMA* a_chosen) {
+                if (!a_chosen || want == 0 || admitted.size() < 2) {
+                    return;
+                }
+                const std::uint32_t shown =
+                    static_cast<std::uint32_t>(a_chosen->GetSlotMask()) & want;
+                const std::uint32_t missing = want & ~shown;
+                if (missing == 0) {
+                    return;
+                }
+                std::uint32_t left = 0;
+                for (auto* other : admitted) {
+                    if (other != a_chosen) {
+                        left |= static_cast<std::uint32_t>(other->GetSlotMask()) & missing;
+                    }
+                }
+                if (left == 0) {
+                    return;  // nothing else draws the rest either
+                }
+                if (NotePartialArmature(a_localID, a_plugin, shown, left) && a_log) {
+                    SKSE::log::warn(
+                        "  addon pick {:X}:{}: partial - shows slot(s) {} and leaves slot(s) {} "
+                        "to another addon of the same item",
+                        a_localID, a_plugin, SlotList(shown), SlotList(left));
+                }
+            };
             const auto raceExact = [race](RE::TESObjectARMA* a_addon) {
                 return race && a_addon->race == race;
             };
@@ -2386,6 +2774,7 @@ namespace CostumeFW
                                 want, static_cast<std::uint32_t>(addon->GetSlotMask()),
                                 admitted.size());
                         }
+                        notePartial(addon);
                         return addon;
                     }
                 }
@@ -2397,24 +2786,216 @@ namespace CostumeFW
                     "mesh may be the wrong body part",
                     a_localID, a_plugin, want, admitted.size());
             }
+            notePartial(admitted.front());
             return admitted.front();
+        }
+
+        // ---- Legacy (LE / Oldrim) meshes ---------------------------------
+        //
+        // The carrier builder has refused NiTriShape / NiTriStrips geometry since
+        // the Box44 CTD (2026-07-03): the SSE skin-partition loader divides by
+        // zero on an LE shape that carries an SSE NiSkinPartition. Nothing refused
+        // it anywhere else, so an LE costume could be captured, listed, injected
+        // and worn, and only the carrier build ever said a word - which is the
+        // half of the pipeline the user is least likely to be looking at.
+        //
+        // What counts as evidence is deliberately narrow. SSE uses NiTriShape
+        // legitimately for facegen head parts (the optimizer's "head parts only"
+        // mode keeps them), so the block type ON ITS OWN proves nothing. An LE
+        // FILE is the conjunction: a BS version below 100 AND one of those
+        // geometry blocks. Both, or this would refuse meshes that work today.
+        //
+        // Read through the resource system, not the filesystem, so a mesh inside
+        // a BSA is read like any other. Header only: the block-type table is in
+        // the first few hundred bytes and nothing past it is needed. A file that
+        // cannot be read, or whose header does not parse, says nothing - the
+        // model loader is still there to fail in its own way.
+        constexpr const char* kNonSseGeo[] = {
+            "NiTriShape", "NiTriShapeData", "NiTriStrips", "NiTriStripsData"
+        };
+
+        struct NifHeaderReader
+        {
+            explicit NifHeaderReader(const char* a_full) :
+                stream(a_full)
+            {}
+
+            std::uint8_t u8()
+            {
+                char c = 0;
+                if (!good || taken >= kMaxHeader || !stream.read(&c, 1)) {
+                    good = false;
+                    return 0;
+                }
+                ++taken;
+                return static_cast<std::uint8_t>(c);
+            }
+            std::uint16_t u16()
+            {
+                const std::uint16_t lo = u8();
+                const std::uint16_t hi = u8();
+                return static_cast<std::uint16_t>(lo | (hi << 8));
+            }
+            std::uint32_t u32()
+            {
+                const std::uint32_t b0 = u8();
+                const std::uint32_t b1 = u8();
+                const std::uint32_t b2 = u8();
+                const std::uint32_t b3 = u8();
+                return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+            }
+            std::string chars(std::uint32_t a_len)
+            {
+                std::string out;
+                out.reserve(a_len);
+                for (std::uint32_t i = 0; i < a_len && good; ++i) {
+                    const char c = static_cast<char>(u8());
+                    if (c) {
+                        out += c;  // the length includes a trailing NUL in some fields
+                    }
+                }
+                return out;
+            }
+            void shortString() { chars(u8()); }
+
+            RE::BSResourceNiBinaryStream stream;
+            bool good{ true };
+            std::uint32_t taken{ 0 };
+            // A header this size is already absurd; the cap is what stops a
+            // corrupt length field from walking the whole file one byte at a time.
+            static constexpr std::uint32_t kMaxHeader = 1u << 16;
+        };
+
+        // "" = nothing to say. Non-empty = the sentence to show the user.
+        std::string LegacyNifReasonUncached(const std::string& a_rel)
+        {
+            // Reading an archived file is not scene work and the resource system
+            // is what the game's own streamers use, so this is not main-thread
+            // only - but the capture check reaches it from the Papyrus VM, so
+            // record where it runs. If that census ever grows a surprising line,
+            // this is the call that put it there.
+            Diag::NoteExecutionThread("LegacyNifReasonUncached");
+            const std::string full = "meshes\\" + a_rel;
+            NifHeaderReader r(full.c_str());
+            if (!r.stream.good()) {
+                return {};
+            }
+            std::string magic;
+            for (;;) {
+                const char c = static_cast<char>(r.u8());
+                if (!r.good || magic.size() > 128) {
+                    return {};
+                }
+                if (c == '\n') {
+                    break;
+                }
+                magic += c;
+            }
+            if (magic.rfind("Gamebryo File Format", 0) != 0) {
+                return {};
+            }
+            const std::uint32_t version = r.u32();
+            if (version < 0x14000003u) {
+                return {};  // older than 20.0.0.3: no endian byte, and nothing SSE loads
+            }
+            if (r.u8() != 1) {
+                return {};  // big-endian (console build) - not ours to judge
+            }
+            const std::uint32_t userVersion = r.u32();
+            r.u32();  // block count
+            std::uint32_t bsVersion = 0;
+            if (version == 0x14020007u && (userVersion == 11 || userVersion == 12)) {
+                bsVersion = r.u32();
+                r.shortString();  // author
+                if (bsVersion >= 130) {
+                    r.u32();
+                }
+                r.shortString();  // process script
+                r.shortString();  // export script
+                if (bsVersion == 130) {
+                    r.shortString();  // max filepath
+                }
+            }
+            if (bsVersion >= 100) {
+                return {};  // SSE format. NiTriShape in here is legitimate - see above.
+            }
+            const std::uint16_t types = r.u16();
+            if (!r.good || types == 0 || types > 4096) {
+                return {};
+            }
+            for (std::uint16_t i = 0; i < types; ++i) {
+                const std::uint32_t len = r.u32();
+                if (!r.good || len > 256) {
+                    return {};
+                }
+                const std::string name = r.chars(len);
+                for (const char* bad : kNonSseGeo) {
+                    if (name == bad) {
+                        return std::format(
+                            "legacy (LE) mesh - '{}' holds a {} block and is in Skyrim LE "
+                            "format (BS version {}). Run SSE NIF Optimizer over that mod and "
+                            "try again.",
+                            a_rel, bad, bsVersion);
+                    }
+                }
+            }
+            return {};
+        }
+
+        std::mutex g_legacyMutex;
+        // Path -> verdict, so a costume worn twenty times is parsed once.
+        std::unordered_map<std::string, std::string> g_legacyByPath;
+        // Content -> verdict, for the ones already in someone's settings: the UI
+        // needs a reason to show, and the log needs to say it once rather than on
+        // every re-equip.
+        std::unordered_map<std::string, std::string> g_legacyByContent;
+
+        std::string LegacyKey(std::uint32_t a_localID, const std::string& a_plugin)
+        {
+            return std::format("{:06X}:{}", a_localID, a_plugin);
+        }
+
+        std::string LegacyNifReasonFor(const std::string& a_modelPath)
+        {
+            const std::string rel = StripMeshesPrefix(a_modelPath);
+            {
+                std::scoped_lock lk(g_legacyMutex);
+                if (const auto it = g_legacyByPath.find(rel); it != g_legacyByPath.end()) {
+                    return it->second;
+                }
+            }
+            std::string reason = LegacyNifReasonUncached(rel);
+            std::scoped_lock lk(g_legacyMutex);
+            g_legacyByPath.insert_or_assign(rel, reason);
+            return reason;
+        }
+
+        // True the first time this content is refused, so the log carries one
+        // line per item per session instead of one per resolve.
+        bool NoteLegacyRefusal(std::uint32_t a_localID, const std::string& a_plugin,
+            const std::string& a_reason)
+        {
+            std::scoped_lock lk(g_legacyMutex);
+            return g_legacyByContent.insert_or_assign(LegacyKey(a_localID, a_plugin), a_reason)
+                .second;
         }
 
         // Resolve an ARMA (or ARMO -> its race-matched admitted ARMA) to the
         // 3P + 1P models for the given wearer race. Every caller supplies one
         // immutable policy generation. If the requested sex has no model, falls
         // back to the other sex so a single-sex-authored accessory still shows.
+        RE::TESForm* LookupLocalForm(std::uint32_t a_local, const std::string& a_plugin);  // fwd (below)
+
         bool ResolveArmaModelsFor(std::uint32_t a_localID, const std::string& a_plugin,
             RE::SEX a_sex, RE::TESRace* a_race,
             const policy::CapturePolicy& a_policy, ModelRef& a_out3p, ModelRef& a_out1p,
             bool a_log)
 
         {
-            auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
-                return false;
-            }
-            RE::TESObjectARMA* arma = dh->LookupForm<RE::TESObjectARMA>(a_localID, a_plugin);
+            // Through the range-checked resolver (C11): LookupForm would hand
+            // back another plugin's record for a local id past this plugin's end.
+            auto* form = LookupLocalForm(a_localID, a_plugin);
+            RE::TESObjectARMA* arma = form ? form->As<RE::TESObjectARMA>() : nullptr;
             const RE::TESFile* armaFile = nullptr;
             bool policyRefused = false;  // X-LOG1: refused by the deny-list, not unresolvable
             if (arma) {
@@ -2422,7 +3003,7 @@ namespace CostumeFW
                 if (!armaFile) {
                     return false;
                 }
-            } else if (auto* armo = dh->LookupForm<RE::TESObjectARMO>(a_localID, a_plugin)) {
+            } else if (auto* armo = form ? form->As<RE::TESObjectARMO>() : nullptr) {
                 arma = PickAdmittedAddonForRace(
                     armo, a_policy, a_localID, a_plugin, a_log, a_race, &policyRefused);
                 if (arma) {
@@ -2496,9 +3077,35 @@ namespace CostumeFW
                     return false;
                 }
             }
+            // The LE gate, at the one seam every path goes through: player and
+            // NPC injection, the carrier manifest, shape enumeration and the
+            // capture check all resolve their model right here.
+            if (const std::string legacy = LegacyNifReasonFor(nif3p); !legacy.empty()) {
+                if (NoteLegacyRefusal(a_localID, a_plugin, legacy)) {
+                    SKSE::log::warn("ResolveArma: {:X}:{} is not being injected - {}",
+                        a_localID, a_plugin, legacy);
+                }
+                return false;
+            }
             a_out3p = ModelRef{ nif3p, m3 };
             const char* nif1p = m1->model.c_str();
             a_out1p = (nif1p && *nif1p) ? ModelRef{ nif1p, m1 } : a_out3p;
+            // The gate above only looked at the 3P model, and the 1P one is a
+            // separate file - an SE-converted costume can still ship an LE
+            // first-person mesh, which went straight into the first-person
+            // skeleton (review 2026-09-23 W18). Not a refusal: the 3P model
+            // passed, so first person shows that one instead.
+            if (a_out1p.nifPath != a_out3p.nifPath) {
+                if (const std::string legacy1p = LegacyNifReasonFor(a_out1p.nifPath);
+                    !legacy1p.empty()) {
+                    if (a_log) {
+                        SKSE::log::warn("ResolveArma: {:X}:{} first-person model is not usable - "
+                                        "{}; first person shows the third-person model",
+                            a_localID, a_plugin, legacy1p);
+                    }
+                    a_out1p = a_out3p;
+                }
+            }
             return true;
         }
 
@@ -2515,23 +3122,97 @@ namespace CostumeFW
 
         // Resolve a colon-form id "XXXXXX:Plugin.esp" to its full runtime FormID
         // (0 on failure). Used for the box token's worn-state check.
-        RE::FormID ResolveFormID(const std::string& a_colonId)
+        //
+        // The ONE place a (local id, plugin) pair becomes a FormID (review
+        // 2026-09-23 C11). CommonLib's LookupFormID adds the local id to the
+        // plugin's base WITHOUT masking it, so a local id past the end of its
+        // plugin did not fail - it named a record in ANOTHER plugin: an id
+        // saved against an ESP that was later ESL-flagged points 0x12 light
+        // slots on, and '1000D62:Skyrim.esm' is Update.esm's 0x000D62. That
+        // was a different mod's armour drawn, its enchantment paid, a fresh
+        // copy of it minted on return - where the answer should have been
+        // "unresolved". Out-of-range ids are refused now, and the parse is the
+        // strict one ("801junk:" is not 0x801, TH8).
+        //
+        // Loaded plugins are cached: this runs for every token and content on
+        // every equip event, and both the plugin lookup and the load order it
+        // reads are fixed once the game has loaded its data. Only a HIT is
+        // cached - a miss latched before kDataLoaded would read exactly like a
+        // plugin that is not installed (trap 3).
+        struct LoadedPlugin
         {
-            const auto colon = a_colonId.find(':');
-            if (colon == std::string::npos) {
-                return 0;
-            }
-            std::uint32_t localID = 0;
-            try {
-                localID = static_cast<std::uint32_t>(std::stoul(a_colonId.substr(0, colon), nullptr, 16));
-            } catch (...) {
-                return 0;
+            RE::FormID base{ 0 };        // the plugin's FormID for local id 0
+            bool light{ false };
+        };
+        std::mutex g_pluginCacheMutex;
+        std::unordered_map<std::string, LoadedPlugin> g_pluginCache;
+        std::unordered_set<std::string> g_rangeWarned;  // under g_pluginCacheMutex
+
+        std::optional<LoadedPlugin> FindLoadedPlugin(const std::string& a_plugin)
+        {
+            {
+                std::scoped_lock lk(g_pluginCacheMutex);
+                if (const auto it = g_pluginCache.find(a_plugin); it != g_pluginCache.end()) {
+                    return it->second;
+                }
             }
             auto* dh = RE::TESDataHandler::GetSingleton();
-            if (!dh) {
+            const auto* file = dh ? dh->LookupModByName(a_plugin) : nullptr;
+            if (!file || file->compileIndex == 0xFF) {
+                return std::nullopt;  // not loaded - nothing of it resolves
+            }
+            // Local id 0 through CommonLib's own arithmetic, so the VR branch
+            // and the light-slot math stay CommonLib's; only the range check is
+            // ours. VR has no light plugins of its own (SkyrimVRESL aside), so
+            // it keeps the full range, as it always has.
+            LoadedPlugin info;
+            info.base = dh->LookupFormID(0, a_plugin);
+            info.light = !REL::Module::IsVR() && file->IsLight();
+            std::scoped_lock lk(g_pluginCacheMutex);
+            g_pluginCache.emplace(a_plugin, info);
+            return info;
+        }
+
+        RE::FormID ResolveLocalFormID(std::uint32_t a_local, const std::string& a_plugin)
+        {
+            const auto info = FindLoadedPlugin(a_plugin);
+            if (!info) {
                 return 0;
             }
-            return dh->LookupFormID(localID, a_colonId.substr(colon + 1));
+            if (!policy::LocalIdInRange(a_local, info->light)) {
+                const std::string id = policy::FormatColonId(a_local, a_plugin);
+                std::scoped_lock lk(g_pluginCacheMutex);
+                if (g_rangeWarned.insert(id).second) {
+                    SKSE::log::warn(
+                        "colon-id '{}' is out of range for {} ({} plugin, local ids up to {:X}) - "
+                        "treated as unresolved. The plugin was most likely ESL-flagged or "
+                        "compacted after this id was saved; left alone, it would have named "
+                        "another plugin's record",
+                        id, a_plugin, info->light ? "a light" : "a full",
+                        info->light ? 0xFFFu : 0xFFFFFFu);
+                }
+                return 0;
+            }
+            return info->base + a_local;
+        }
+
+        RE::FormID ResolveFormID(const std::string& a_colonId)
+        {
+            std::uint32_t local = 0;
+            std::string plugin;
+            if (!policy::ParseColonId(a_colonId, local, plugin)) {
+                return 0;
+            }
+            return ResolveLocalFormID(local, plugin);
+        }
+
+        // (local id, plugin) -> form, through the range-checked resolver above.
+        // Same answer as TESDataHandler::LookupForm for an id in range, and
+        // nullptr instead of another plugin's record for one that is not.
+        RE::TESForm* LookupLocalForm(std::uint32_t a_local, const std::string& a_plugin)
+        {
+            const RE::FormID id = ResolveLocalFormID(a_local, a_plugin);
+            return id ? RE::TESForm::LookupByID(id) : nullptr;
         }
     }
 
@@ -2547,7 +3228,11 @@ namespace CostumeFW
 
     void RunAfterDelayMs(int a_ms, std::function<void()> a_fn)
     {
-        StoreLock lk;
+        // No StoreLock: this only pushes onto the delay heap, which has its own
+        // mutex. Taking the store lock here was the one place CEF took it off
+        // the main thread, and it made an NPC's Load3D on a background loader
+        // thread wait for whatever Reconcile the main thread was running
+        // (review 2026-09-23 W8).
         RunAfterDelay(std::chrono::steady_clock::now() + std::chrono::milliseconds(a_ms),
             std::move(a_fn));
     }
@@ -2557,10 +3242,13 @@ namespace CostumeFW
     // (observed up to ~13s after load) and lost - the merge generation died
     // AFTER the pass and the stretched mesh stayed until a manual CEF
     // off->on. Timing guesses are the approach this project keeps re-learning
-    // to avoid; instead a permanent lightweight tick (a few parent-chain
-    // walks every 2.5s) detects dead-generation binds WHENEVER they happen
-    // (load sequence, RaceMenu, any mod rebuilding the head) and runs the
-    // Reconcile sweep to re-inject into the current generation.
+    // to avoid; instead a permanent tick every 2.5s detects dead-generation
+    // binds WHENEVER they happen (load sequence, RaceMenu, any mod rebuilding
+    // the head) and runs the Reconcile sweep to re-inject into the current
+    // generation. What it costs is not "a few parent-chain walks", as this
+    // used to say: liveness is judged against a census of the actor's whole 3P
+    // tree - one walk per actor per tick since W28, and none at all for an
+    // actor whose items bound no FSMP bone.
     constexpr int kBindWatchdogMs = 2500;
     std::atomic<bool> g_watchdogTickPending{ false };
 
@@ -2601,6 +3289,8 @@ namespace CostumeFW
                 return;
             }
         }
+        // One renamed-bone census per actor root for the whole tick (W28).
+        CensusScope census;
         for (auto& state : g_actors) {
             auto* actor = ResolveActor(state);
             auto* root = actor ? actor->Get3D(false) : nullptr;
@@ -2617,6 +3307,9 @@ namespace CostumeFW
                 if (!it.holder3p) {
                     continue;  // not injected: record-based skip (no name search)
                 }
+                if (it.fsmpBones == 0) {
+                    continue;  // bound to no FSMP bone: no generation to die (W28)
+                }
                 if (HasDeadPhysicsBind(it.id, root, it.holder3p.get())) {
                     ++g_persistDiag.watchdogReconciles;
                     SKSE::log::info(
@@ -2624,6 +3317,15 @@ namespace CostumeFW
                     Reconcile();  // the sweep inside detaches + re-injects
                     return;
                 }
+            }
+            // The real body too (C14) - Reconcile's sweep now covers it.
+            if (state.realBodyHolder3p &&
+                HasDeadPhysicsBind(kRealBodyNode, root, state.realBodyHolder3p.get())) {
+                ++g_persistDiag.watchdogReconciles;
+                SKSE::log::info("bind watchdog: the real body holds a dead merge generation - "
+                                "reconciling");
+                Reconcile();
+                return;
             }
         }
     }
@@ -2724,14 +3426,33 @@ namespace CostumeFW
                 a_state.bonePins.clear();
                 return;
             }
+            // One renamed-bone census per root for this actor's pass (W28).
+            CensusScope census;
             bool anyRealBody = false;  // set if a shown content wants the real body under it
             for (auto& it : a_state.items) {
-                // master off -> hide; else persist (tokenForm 0) always shows, a
-                // box/publish item shows only while its token is worn by THIS actor.
+                // master off -> hide; else persist always shows, a box/publish
+                // item shows only while its token is worn by THIS actor.
+                //
+                // The persist class is "registered without a token at all" -
+                // tokenId EMPTY - and NOT "tokenForm is 0". Those were the same
+                // thing until a box token could fail to resolve. From v1.6.4 a
+                // box can sit on a pool plugin the user has uninstalled, and
+                // such a box's contents carry a real tokenId with tokenForm 0 -
+                // so reading the 0 as "persist" showed a QUARANTINED box's
+                // costume unconditionally. In-game 2026-09-15 with BoxPool1
+                // removed: the costume went on at every load, Wear could not
+                // take it off (WearBoxToken needs the token this gate had
+                // stopped consulting, and returns false without it), and only
+                // the master switch cleared it. The log said it plainly -
+                // "tokenForm=00000000 show=true".
+                //
+                // Same code in 1.6.2.2, but the only way there was to hand-edit
+                // an invalid token into the settings; v1.6.4 made "uninstall a
+                // plugin" reach it.
                 bool show = false;
                 if (a_cefOn) {
-                    show = (it.tokenForm == 0);
-                    if (!show) {
+                    show = it.tokenId.empty();  // persist
+                    if (!show && it.tokenForm != 0) {
                         show = (actor->GetWornArmor(it.tokenForm) != nullptr);
                         if (show) {
                             WarnIfTokenRaceGap(it.tokenForm, actor);
@@ -2792,8 +3513,10 @@ namespace CostumeFW
                     // Dead-bind sweep: if this item's injected mesh holds FSMP bones of
                     // a dead merge generation (armor unequipped / head rebuilt), detach
                     // it first so the injection below rebinds to the CURRENT generation.
-                    if (auto* r3 = actor->Get3D(false);
-                        r3 && it.holder3p && HasDeadPhysicsBind(it.id, r3, it.holder3p.get())) {
+                    // Only an item that bound FSMP bones can hold a dead
+                    // generation; the rest skip the census entirely (W28).
+                    if (auto* r3 = actor->Get3D(false); r3 && it.holder3p && it.fsmpBones > 0 &&
+                        HasDeadPhysicsBind(it.id, r3, it.holder3p.get())) {
                         ++g_persistDiag.deadBindReinjects;
                         SKSE::log::info("  '{}': bound FSMP bones are DETACHED (dead merge "
                                         "generation) - re-injecting", it.id);
@@ -2810,6 +3533,15 @@ namespace CostumeFW
             // with hideShapes dropping the costume's own body); else remove it.
             if (anyRealBody && !g_poisonParked.contains("realbody-3p") &&
                 !g_poisonParked.contains("realbody-1p")) {
+                // The same dead-bind sweep the items get (C14): the real body can
+                // be bound to an FSMP generation that has since gone.
+                if (auto* r3 = actor->Get3D(false); r3 && a_state.realBodyHolder3p &&
+                    HasDeadPhysicsBind(kRealBodyNode, r3, a_state.realBodyHolder3p.get())) {
+                    ++g_persistDiag.deadBindReinjects;
+                    SKSE::log::info("  real body: bound FSMP bones are DETACHED (dead merge "
+                                    "generation) - re-injecting");
+                    DetachRealBody(a_state);
+                }
                 a_state.realBodyShown = InjectRealBody(a_state);
             } else {
                 DetachRealBody(a_state);
@@ -2915,7 +3647,9 @@ namespace CostumeFW
         }
         const auto pol = CapturePolicySnapshot();  // one generation for the whole sweep
         const bool cefOn = CefEnabled();  // master off (Main page) -> hide everything
-        SKSE::log::info("Reconcile: {} actor state(s) (cef enabled={})", g_actors.size(), cefOn);
+        // debug, not info: this runs on every equip event, and the log flushes
+        // per line (W13).
+        SKSE::log::debug("Reconcile: {} actor state(s) (cef enabled={})", g_actors.size(), cefOn);
         for (auto& state : g_actors) {
             ReconcileActorImpl(state, *pol, cefOn);
         }
@@ -3083,6 +3817,42 @@ namespace CostumeFW
         return true;
     }
 
+    std::string PartialArmatureNote(const std::string& a_contentId)
+    {
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_contentId, localID, plugin)) {
+            return {};
+        }
+        std::scoped_lock lk(g_partialMutex);
+        const auto it = g_partialByContent.find(std::format("{:06X}:{}", localID, plugin));
+        return it == g_partialByContent.end() ? std::string{} : it->second;
+    }
+
+    std::string LegacyNifRefusal(const std::string& a_contentId)
+    {
+        std::uint32_t localID = 0;
+        std::string plugin;
+        if (!ParseColonId(a_contentId, localID, plugin)) {
+            return {};
+        }
+        std::scoped_lock lk(g_legacyMutex);
+        const auto it = g_legacyByContent.find(LegacyKey(localID, plugin));
+        return it == g_legacyByContent.end() ? std::string{} : it->second;
+    }
+
+    std::vector<std::string> LegacyNifRefusals()
+    {
+        std::scoped_lock lk(g_legacyMutex);
+        std::vector<std::string> out;
+        out.reserve(g_legacyByContent.size());
+        for (const auto& [id, why] : g_legacyByContent) {
+            out.push_back(id + " - " + why);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
     bool CanResolveContent(const std::string& a_contentId)
     {
         StoreLock lk;
@@ -3113,7 +3883,8 @@ namespace CostumeFW
             [&](RE::BSGeometry* a_geom) {
                 auto skin = a_geom->GetGeometryRuntimeData().skinInstance;
                 if (skin) {
-                    out.emplace_back(std::string(a_geom->name.c_str()), ShapeSlot(skin.get()));
+                    // The same key injection matches on (see ShapeKey).
+                    out.emplace_back(ShapeKey(a_geom->name.c_str()), ShapeSlot(skin.get()));
                 }
                 return RE::BSVisit::BSVisitControl::kContinue;
             });
@@ -3965,6 +4736,95 @@ namespace CostumeFW
         return out;
     }
 
+    // `cef headertest` - synthetic probe for the holder-HEADER family
+    // (BUGREPORT 2026-10-18, Baki): a holder whose first 0x18 bytes had become
+    // a NiTObjectArray. Touches nothing on the player. Against the game's own
+    // RTTI it checks (a) the player's 3D root is a scene object and a fresh
+    // holder has NiNode's exact vtable, (b) the vtable every NiNode's embedded
+    // children array starts with - the image the reported holder had been
+    // overwritten with - is NOT a scene object, and (c) on a fresh test parent
+    // and child, with the child's header overwritten by that image: the census
+    // walk skips it, the header check catches it, and ReleaseBrokenHolder takes
+    // it out of the parent by value without a call through it. The overwritten
+    // child is never released - its references are leaked on purpose, as in
+    // the real path - so no destructor ever runs on it.
+    std::vector<std::string> HeaderGuardProbe()
+    {
+        StoreLock lk;
+        std::vector<std::string> out;
+        bool allOk = true;
+        const auto row = [&](bool a_ok, const std::string& a_text) {
+            allOk = allOk && a_ok;
+            out.push_back(std::format("{} {}", a_ok ? "ok  " : "FAIL", a_text));
+        };
+
+        if (auto* player = RE::PlayerCharacter::GetSingleton(); player && player->Get3D(false)) {
+            std::uintptr_t vt = 0;
+            const bool scene = IsSceneObject(player->Get3D(false), vt);
+            row(scene, std::format("the player's 3P root is a scene object ({})",
+                rtti::VtableTypeName(vt)));
+        } else {
+            out.push_back("     (no player 3D yet - load a save for the root row)");
+        }
+
+        RE::NiPointer<RE::NiNode> parent{ RE::NiNode::Create(2) };
+        RE::NiPointer<RE::NiNode> child{ RE::NiNode::Create(0) };
+        if (!parent || !child) {
+            out.push_back("Create returned null");
+            return out;
+        }
+        parent->name = "CEF_HeaderProbe";
+        child->name = "CEF_HeaderProbe_child";
+        row(HolderHeaderIntact(child.get()), "a fresh holder starts with NiNode's vtable");
+
+        parent->AttachChild(child.get(), true);
+        unsigned char image[0x18]{};
+        std::memcpy(image, &parent->GetChildren(), sizeof(image));  // vtable, data, sizes
+        std::uintptr_t arrVt = 0;
+        std::memcpy(&arrVt, image, sizeof(arrVt));
+        const std::string arrType = rtti::VtableTypeName(arrVt);
+        row(!arrType.empty(), std::format("a children array's own vtable names a class: {}",
+                                  arrType.empty() ? "(none)" : arrType));
+        {
+            alignas(16) unsigned char fake[0x128]{};
+            std::memcpy(fake, image, sizeof(image));
+            std::uintptr_t vt = 0;
+            row(!IsSceneObject(reinterpret_cast<const RE::NiAVObject*>(fake), vt),
+                "an object that starts with that image is not a scene object");
+        }
+
+        // The real arrays, end to end. The record pair is taken first, as an
+        // item holds it before anything goes wrong; then the child's header
+        // becomes the array image, exactly as reported.
+        RE::NiNode* const childRaw = child.get();
+        RE::NiPointer<RE::NiNode> recParent = parent;
+        RE::NiPointer<RE::NiNode> recHolder = child;
+        const auto sizeBefore = parent->GetChildren().size();
+        std::memcpy(child.get(), image, sizeof(image));
+        row(!HolderHeaderIntact(child.get()), "the overwritten child fails the holder header check");
+        const auto census = BuildRenamedCensus(parent.get());
+        row(census.attached.empty(),
+            "the renamed-bone census walked past it without reading it (the SCENE CORRUPTION "
+            "line in the log just above is this probe's own)");
+
+        ReleaseBrokenHolder("headertest", recParent, recHolder, nullptr);
+        const auto& kids = parent->GetChildren();
+        bool slotGone = true;
+        for (const auto& k : kids) {
+            if (k.get() == childRaw) {
+                slotGone = false;
+            }
+        }
+        row(slotGone && kids.size() + 1 == sizeBefore,
+            std::format("removed from the parent by value: {} -> {} children", sizeBefore, kids.size()));
+        row(!recHolder && !recParent, "the record pair is empty");
+
+        // The probe's own reference to the overwritten child goes the same way.
+        std::memset(static_cast<void*>(&child), 0, sizeof(child));
+        out.push_back(std::format("header guard probe: {}", allOk ? "ok" : "FAILED"));
+        return out;
+    }
+
     // `cef nodediag` - live side. Reports the child array of every CEF node on
     // the player, plus ANY node that fails the walkability guard. Run it right
     // after the operation that crashes: if a holder is already bad here, we have
@@ -4012,6 +4872,11 @@ namespace CostumeFW
                     if (auto* c = child.get(); c) {
                         if (!PlausibleObjectPtr(c)) {
                             NoteBadSlot("nodediag", node, c);
+                            ++bad;
+                            continue;
+                        }
+                        if (std::uintptr_t vt = 0; !IsSceneObject(c, vt)) {
+                            NoteBadObject("nodediag", c, vt);
                             ++bad;
                             continue;
                         }
@@ -4096,6 +4961,10 @@ namespace CostumeFW
                 if (auto* c = child.get(); c) {
                     if (!PlausibleObjectPtr(c)) {
                         NoteBadSlot("bone census", node, c);
+                        continue;
+                    }
+                    if (std::uintptr_t vt = 0; !IsSceneObject(c, vt)) {
+                        NoteBadObject("bone census", c, vt);
                         continue;
                     }
                     if (auto* cn = c->AsNode()) {
@@ -4202,7 +5071,8 @@ namespace CostumeFW
             SKSE::log::error("hair PoC: bad id '{}' (want XXXXXX:Plugin.esp)", a_id);
             return false;
         }
-        auto* hdpt = dh->LookupForm<RE::BGSHeadPart>(localID, plugin);
+        auto* hdptForm = LookupLocalForm(localID, plugin);  // range-checked (C11)
+        auto* hdpt = hdptForm ? hdptForm->As<RE::BGSHeadPart>() : nullptr;
         if (!hdpt) {
             SKSE::log::error("hair PoC: {:X}:{} is not a HeadPart (HDPT)", localID, plugin);
             return false;
@@ -4276,6 +5146,10 @@ namespace CostumeFW
                 auto [obj, parentName] = std::move(stack.back());
                 stack.pop_back();
                 if (!obj) {
+                    continue;
+                }
+                if (std::uintptr_t vt = 0; !IsSceneObject(obj, vt)) {
+                    NoteBadObject("headdiag", obj, vt);
                     continue;
                 }
                 const std::string_view nm{ obj->name.c_str() };

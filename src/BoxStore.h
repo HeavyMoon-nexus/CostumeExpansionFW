@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "CapturePolicy.h"
@@ -21,12 +22,44 @@ namespace RE
 
 namespace CostumeFW
 {
+    // Why a box's token is not usable, when it is not. The entry is KEPT in the
+    // settings file either way - a definition is the only copy of what a costume
+    // was made of, and dropping it to "heal" the file destroys that. An unusable
+    // token is quarantined instead: excluded from the allocator, the normal UI
+    // list, stat stamping, token handout and carrier repointing, and surfaced on
+    // the Recovery page with the reason, where re-pointing it at another token is
+    // an explicit choice the user makes.
+    enum class TokenState
+    {
+        Resolved,      // in a box-token plugin, resolves to an ARMO
+        PoolMissing,   // a valid pool name whose generation is not loaded right now
+                       // (dormant: put the plugin back and the same box returns)
+        ParseError,    // "801junk:" / "XYZ:" / no colon
+        ForeignPlugin, // resolves, but its plugin does not define box tokens
+                       // (a publish token, an ability, someone else's armor)
+        NotArmo,       // right plugin, but the form is a QUST/CONT/SPEL/HDPT
+        NoMarker,      // right plugin and an ARMO, but not tagged as a box token
+        UnresolvedForm // right plugin, but no such record in it
+    };
+
     // A box definition: a token ARMO (colon-form id) that, while worn, shows its
     // packed contents (colon-form ARMA ids). label is a user-facing name. Box
     // defs are GLOBAL config (all saves), persisted in CEF_settings.json - NOT
-    // in the co-save (which holds only per-save persist items). One box per token.
+    // in the co-save (which holds only per-save persist items).
+    //
+    // THREE identities, and keeping them apart is what lets 1.6.4 put several
+    // boxes on one biped slot:
+    //   boxId     - the logical box. Issued once, never changes: not on rename,
+    //               not on a contents change, not across a publish round trip.
+    //               Everything that means "this box" keys on it.
+    //   token     - the physical ARMO it currently holds. ONE box per token,
+    //               still (ROOT B): the token is what the player equips, and two
+    //               boxes on one token is a dead item printer.
+    //   biped slot - NOT unique from 1.6.4 on. It is a Skyrim equip-conflict
+    //               property of the token, not a name for the box.
     struct BoxDefInfo
     {
+        std::string boxId;  // stable logical identity (see above); never reused
         std::string label;
         std::string token;
         std::vector<std::string> contents;
@@ -42,12 +75,61 @@ namespace CostumeFW
         std::string presetName;  // display name for the UI
         bool uiVisible{ true };  // show this box in the MCM box list
         bool wear{ false };      // desired default Wear (show contents) state
+        // Runtime only - re-derived on every settings load, never serialized.
+        // The file records what the user meant; this records what the current
+        // load order can actually deliver.
+        TokenState tokenState{ TokenState::Resolved };
+        // Runtime only, never serialized: the token's resolved FormID, filled on
+        // first use. Resolving a colon-id walks every loaded plugin's name, and
+        // IsBoxToken / the worn check ran that for every box on every equip and
+        // every item leaving the inventory (review 2026-09-23 W13). The load
+        // order cannot change within a session, and every path that makes a box
+        // (LoadBoxes, AddBox) starts it at 0 - which here means only "not looked
+        // up yet", nothing else (not the persist sentinel of trap 12).
+        mutable std::uint32_t tokenFormCache{ 0 };
     };
+
+    // True while the box's token is usable: the allocator, the stat stamp, the
+    // token handout and the carrier repoint all gate on this.
+    [[nodiscard]] bool BoxTokenUsable(const BoxDefInfo& a_box);
+
+    // Human-readable reason code for the Recovery page and the log, e.g.
+    // "foreign-plugin". Empty for a resolved token.
+    [[nodiscard]] const char* TokenStateReason(TokenState a_state);
+
+    // What the CURRENT load order can deliver for a box token. The same probe
+    // the settings load runs over every box, exported because the publish store
+    // has to ask it too: a published costume reserves the token it came from,
+    // and whether that token can be handed back is the whole of whether the
+    // costume can stop being published (PLAN §5.4).
+    [[nodiscard]] TokenState ClassifyBoxToken(const std::string& a_colonId);
+
+    // Is a plugin in this load order? Checks BOTH the normal and the light-mod
+    // lists. CommonLibSSE's LookupLoadedModByName walks GetLoadedMods(), which
+    // is normal plugins ONLY - and CEF's own plugins are nearly all ESL, so
+    // asking it alone answers "no" for every one of them and every guard built
+    // on it fires forever.
+    [[nodiscard]] bool PluginIsLoaded(std::string_view a_name);
+
+    // A logical box id derived from a seed string, stable across runs and
+    // builds: the same seed always gives the same id, so a migration that is
+    // interrupted before its save cannot hand one box two identities. Boxes
+    // seed it with their canonical token; a pre-1.6.4 published snapshot seeds
+    // it with its own (PublishStore).
+    [[nodiscard]] std::string DeriveBoxId(std::string_view a_seed);
 
     // --- Global CEF settings (CEF_settings.json) ----------------------------
     // Master on/off for the whole framework (Main page). Off = nothing injected.
     bool CefEnabled();
     bool SetCefEnabled(bool a_on);  // persists + returns the new state
+
+    // Write every box's armor / weight / passed-through keywords onto its token
+    // again, which with the master switch off means writing zeroes. Call it
+    // wherever CefEnabled() changes, alongside Reconcile / ApplyBoxAbilities /
+    // ApplyCarrierOverrides - turning CEF off has to take the numbers with the
+    // mesh, or a worn token keeps defending an invisible costume. Main thread:
+    // it edits ARMO forms.
+    void RestampAllTokens();
 
     // Token-less always-injected persist content (colon-form ids).
     std::vector<std::string> PersistContents();
@@ -135,11 +217,17 @@ namespace CostumeFW
         const std::vector<std::pair<std::string, int>>& a_shapes);
 
     // --- LoreBox tooltip integration (soft dependency) -----------------------
-    // The comma-joined in-game names of the contents of the box on biped slot
-    // a_slot ("" if there is no box on that slot, or it is empty). Fed to the
+    // The comma-joined in-game names of the contents of the box whose token has
+    // this carrier key ("" when no box has it, or it is empty). Fed to the
     // BSScaleformTranslator hook so the LoreBox mod (if installed) can show a
     // token's packed contents when the token is hovered in the inventory.
-    std::string LoreBoxContentsForSlot(int a_slot);
+    //
+    // Keyed by CARRIER KEY rather than biped slot since v1.6.4: a slot can hold
+    // several boxes, and the old lookup returned whichever it found first, so
+    // two tokens in an inventory showed one box's contents between them.
+    // Generation 0's carrier key is "Box<slot>" (PLAN §3.4), which is what lets
+    // the keyword that shipped in CostumeFW_KID.ini keep working unchanged.
+    std::string LoreBoxContentsForCarrierKey(const std::string& a_carrierKey);
 
     // --- Presets (assignment; def + json only, exclusivity-checked) ----------
     // The token of the box currently using preset FILE a_file, "" if none
@@ -185,10 +273,15 @@ namespace CostumeFW
     // for ability-only boxes, and hide-when-worn treats it as "our own".
     bool IsBoxToken(std::uint32_t a_form);
 
-    // Resilience: if a defined box's token has left the player's inventory (sold /
-    // dropped) and the player now has none, give one back. So the box system can
-    // never be permanently broken by losing the token. Main thread.
-    void ReplenishToken(std::uint32_t a_tokenForm);
+    // Resilience: if a defined box's token has left the player's inventory and
+    // the player now has none, get it back. So the box system can never be
+    // permanently broken by losing the token. a_movedTo is where it went (the
+    // container-changed event's newContainer): a follower, a merchant or a chest
+    // hands it back, and only a token with nowhere to take it from - dropped,
+    // destroyed - is replaced by a new one. Replacing it everywhere left the
+    // given-away copy, with its armour rating, in the world each time (review
+    // 2026-09-23 M7). A quarantined box's token is left alone (W11). Main thread.
+    void ReplenishToken(std::uint32_t a_tokenForm, std::uint32_t a_movedTo = 0);
 
     // If the token is currently worn, re-equip it (unequip+equip) so consumer
     // mods that detect worn keywords on the equip event re-scan. Needed only when
@@ -199,7 +292,7 @@ namespace CostumeFW
 
     // Repoint each box token's ARMA at its current carrier revision from
     // carriers.json (restart-free FSMP carrier swaps; the revision slots are
-    // pre-created files that tools/nifcarrier `sync` rewrites in place).
+    // pre-created files that the carrier `sync` rewrites in place).
     // Volatile in-memory form edit, reapplied on every settings load. With
     // a_refreshChanged, re-equips worn tokens whose revision changed so the
     // engine loads the new (uncached) path and FSMP rebuilds. Main thread.
@@ -311,8 +404,24 @@ namespace CostumeFW
     //   - a published costume's stats skipped admission entirely, so a
     //     blacklisted item still counted (F04)
     // Stats follow the fact that the item is held; the model follows whether it
-    // can be drawn. Caller holds StoreLock.
+    // can be drawn. So an id a preset only LISTED is left out too (decision D1,
+    // review 2026-09-23 C2): assigning a preset would otherwise hand out the
+    // armour and enchantments of equipment nobody owns. It shows; capturing the
+    // real item makes it pay. Caller holds StoreLock.
     std::vector<std::string> StatAdmittedContents(const std::vector<std::string>& a_ids);
+
+    // Whether a_id is only listed - a preset put it into a box or persist and
+    // CEF never took an item for it (review 2026-09-23 C2). Main thread / any
+    // thread holding StoreLock.
+    bool IsRefOnly(const std::string& a_id);
+
+    // Load-time upkeep of the reference-only set. Heals: an id whose original
+    // sits in this save's store was captured, whatever the set says. Marks, once
+    // per install: box and persist entries that predate the set and show no sign
+    // of an original ever being held. Returns how much changed (0 = nothing, so
+    // no stat can have moved). Post-load main thread, after the orphan sweep and
+    // BEFORE BackfillCustodyRows (it reads which ids have no custody row yet).
+    int ReconcileRefOnly();
     // The semantic capture gate: IsContentAdmissible + mesh resolvability
     // (CanResolveContent). Every capture entrance funnels here - MCM (via the
     // CanResolveContent native), SMF QueueCapture*, preset Validate, and the
@@ -336,10 +445,11 @@ namespace CostumeFW
 
     // L2 deny-list (v1.3.2 Phase 2). Shipped defaults live in code (MARA's
     // "CORE Carrier" by NAME - a runtime form has no plugin to name, so the
-    // name entry is the effective one; the "MARA" plugin prefix is future-
-    // proofing). The json persists only the USER extension. Matching is
-    // case-insensitive; a name entry may end in '*' for a prefix match;
-    // plugin entries are filename prefixes; id entries are colon-ids.
+    // name entry is the effective one; the MARA.esp/esm/esl plugin names are
+    // future-proofing, matched whole - W7). The json persists only the USER
+    // extension. Matching is case-insensitive; a name entry may end in '*' for
+    // a prefix match; the user's plugin entries are filename prefixes; id
+    // entries are colon-ids.
     struct CaptureBlacklistView  // UI snapshot (defaults + user + switches)
     {
         std::vector<std::string> defaultNames;
@@ -375,23 +485,98 @@ namespace CostumeFW
     // degrades past ~128).
     std::vector<WornItem> InventoryArmors(const std::string& a_filter);
 
-    // The shipped slot-token pool (CostumeFW.esp ARMOs named "Costume Box*"),
-    // as colon-form ids, sorted by their biped slot number. FreeTokens = those not
-    // yet bound to a box def (for the MCM "new box" slot picker).
+    // Every box token the loaded pool plugins define, as colon-form ids, sorted
+    // by biped slot then colon-id. FreeTokens = those not bound to a box def and
+    // not held in reserve by a published costume (the "new box" picker).
+    //
+    // Membership is the CFW_BoxTokenMarker KEYWORD and nothing else - never the
+    // display name. A token's FULL is overwritten with its box's label while it
+    // is in use, and an xTranslator'd copy of the plugin renames it outright, so
+    // the "name starts with Costume Box" test this used to run dropped every
+    // renamed token out of the pool (F10) and emptied it for anyone running a
+    // translation. See TokenIdentity.h for the plugin-name side of the same rule.
     std::vector<std::string> TokenPool();
     std::vector<std::string> FreeTokens();
+
+    // What the box token pool is doing, measured in one walk of it. Derived
+    // counts (BoxCount() + FreeTokens().size()) do not answer this: BoxCount is
+    // DEFINITIONS, which includes boxes whose token has dropped out of the pool,
+    // and it cannot see a token a published costume is holding in reserve.
+    struct TokenPoolStats
+    {
+        int total{ 0 };        // tokens the loaded pool plugins define
+        int inBoxes{ 0 };      // ... held by a box definition
+        int reserved{ 0 };     // ... held in reserve by a published costume
+        int free{ 0 };         // ... available to a new box
+        int definitions{ 0 };  // box definitions, pool members or not
+    };
+    TokenPoolStats BoxTokenPoolStats();
+
+    // Read the pools and the box definitions and say, in the log, whether they
+    // hold together (PLAN §9.3). Call once at kDataLoaded, after LoadBoxes.
+    //
+    // It OBSERVES. It writes no settings, repoints no form and disables
+    // nothing: an audit that acted on a wrong reading would be two faults
+    // instead of one, and the package-time verifiers are where a bad plugin is
+    // supposed to be stopped. What it adds is the case they cannot see - the
+    // load order the user actually has.
+    void AuditTokenPools();
+
+    // `cef tokens`: every box token, what it is doing, and what it is called -
+    // per generation, per biped slot, then one row each (PLAN §9.1). Returns the
+    // lines; the console command prints them and the log keeps a copy.
+    std::vector<std::string> TokenDiagLines();
     std::string NextFreeToken();  // first free slot-token ("" if none) - legacy auto-assign
 
     // The biped slot number (30-61) a token ARMO occupies, 0 if none/unresolved.
     int TokenSlot(const std::string& a_token);
 
+    // The token ARMO's WHOLE BOD2 mask, 0 when it does not resolve. A token is
+    // not always one bit: the shipped slot-31 token is 31|41 (Hair + LongHair),
+    // which is what makes a wig hide the real hair. Anything that copies a
+    // token's occupancy has to copy the mask, not rebuild it from TokenSlot.
+    std::uint32_t TokenSlotMask(const std::string& a_token);
+
+    // The carrier namespace a token's artifacts are built under, "" when the
+    // token does not resolve to one (tokenid::CarrierKeyFor). "Box55" for the
+    // shipped tokens, "BP01_000800" for a pool one - short, stable, and the
+    // name that appears in carriers.json and CEF_sync.log, so it is what the UI
+    // shows to tell apart two boxes sharing a biped slot.
+    std::string CarrierKeyForToken(const std::string& a_token);
+
+    // The GENERATION 0 box token on a biped slot, or "" when there is none.
+    //
+    // 1.6.3 had exactly one token per slot and every one of them came from
+    // CostumeFW.esp, which is what lets a published snapshot written back then
+    // name the token it was published from out of a slot number alone (PLAN
+    // §5.5). Asking for "a free token on that slot" instead would never fire
+    // once BoxPool1 is installed: three pool tokens share the slot and one of
+    // them would always look like a candidate.
+    std::string Gen0TokenForSlot(int a_slot);
+
+    // The free box token a biped slot would lend out next, in the order PLAN
+    // §5.2 lends them: generation ascending (the shipped core token, then
+    // BoxPool1, then BoxPool2...), then local FormID. "" when the slot has
+    // none free. "Free" is FreeTokens()' answer, so a token a published
+    // costume reserves is not one.
+    std::string FreeTokenOnSlot(int a_slot);
+
     // The box index whose token occupies biped slot a_slot, or -1 if none. Lets
     // the MCM's per-box pages (named by slot) resolve to their box even after a
     // deletion shifts box indices.
+    // How many boxes currently sit on a biped slot. From 1.6.4 this can be
+    // more than one; the MCM uses it to leave those slots alone (I1/I5).
+    int BoxesOnSlot(int a_slot);
+    // The box on a slot, or -1 when there is none OR when the slot holds more
+    // than one (it then names no single box - see the note on the definition).
     int BoxIndexForSlot(int a_slot);
 
     // Per-box "distribute" flag: whether the token is given to / kept on the
     // player. Off removes it (escape hatch for a slot that conflicts in the LO).
+    // SetBoxEnabled writes the flag, the json and the token's stats at once, and
+    // QUEUES the token move (give one / unequip and remove all) followed by the
+    // ability convergence - in that order, so a worn box can be switched off
+    // (review 2026-09-23 W1). Callers do not move the token themselves.
     bool BoxEnabled(const std::string& a_token);
     bool SetBoxEnabled(const std::string& a_token, bool a_enabled);
 
@@ -407,9 +592,12 @@ namespace CostumeFW
     // Resolve a colon-form id to its in-game item name (falls back to the id).
     std::string ItemDisplayName(const std::string& a_colonId);
 
-    // UI-boundary encoding guard: returns the text as valid UTF-8 for ImGui.
-    // Valid UTF-8 passes through untouched; raw ANSI-codepage bytes (legacy
-    // cp932/cp936/cp1252 plugins) are converted via the system codepage.
+    // Encoding guard: returns the text as STRICTLY valid UTF-8 - for ImGui, and
+    // for anything that goes into a JSON file (nlohmann throws on anything else,
+    // review 2026-09-23 C1). Valid UTF-8 passes through untouched; raw
+    // ANSI-codepage bytes (legacy cp932/cp936/cp1252 plugins) are converted via
+    // the system codepage; a byte even that cannot place becomes \xNN. Never
+    // returns invalid UTF-8.
     std::string EnsureUtf8(const std::string& a_text);
 
     // `cef recover <id>`: deliberately grant ONE copy of a content item to the
@@ -427,17 +615,49 @@ namespace CostumeFW
     // return it too. Cleared on game load (the ref is per-save). Main thread.
     void SetStoreRef(RE::TESObjectREFR* a_store);
 
+    // Who is asking for a return. kUninstall marks the "prepare for uninstall"
+    // passes: once one has run on the loaded save, the next only hands back what
+    // is still in storage (review 2026-09-23 C3).
+    enum class RecreateContext
+    {
+        kNormal,
+        kUninstall,
+    };
+
+    // May CEF mint a plain copy of a_id when this save's store does not hold it?
+    // No once an uninstall pass ran on this save and another is asking, and no
+    // for an id a preset only listed (IsRefOnly) - both would hand out an item
+    // that already went back, or never existed at all. The rule itself is
+    // policy::DecideReturn; this feeds it the live state. Main thread.
+    bool MayRecreate(const std::string& a_id, RecreateContext a_ctx);
+
+    // Whether "prepare for uninstall" has run on the loaded save. Per save, in
+    // the co-save ('UNIN'), because the thing it guards is per save: which
+    // originals THIS character already got back. Lock-free (SMF reads it).
+    bool UninstallRanOnThisSave();
+    void RestoreUninstallRan(bool a_ran);  // co-save load / revert
+
     // Return one captured copy of a_id to the player: the hidden store's original
-    // if it holds one (keeps instance data), else - only if a_fabricate - a fresh
-    // base copy (the accepted cross-save duplication, CEF_STATE_SCOPE.md §4).
-    // Returns true if a copy reached the player. Main thread (touches inventory).
+    // if it holds one (keeps instance data), else - only if a_fabricate and
+    // MayRecreate agrees - a fresh base copy (the accepted cross-save duplication,
+    // CEF_STATE_SCOPE.md §4). Returns true if a copy reached the player. Main
+    // thread (touches inventory).
     // a_wasRecreated (optional) reports HOW the request was met: false = the
     // captured original came back with its tempering and enchantment, true = the
     // store did not have it and a plain copy was minted instead. Only the
     // single-item user paths tell the player about it; the bulk return loops
     // (uninstall, catalog removal) would turn that into a wall of pop-ups.
+    // a_wasRefOnly (optional) is set when a copy was asked for and refused
+    // because a preset only listed the id - there was never an item to give
+    // back, and the single-item paths say so (review 2026-09-23 C2).
     bool ReturnStoredItem(const std::string& a_id, bool a_fabricate,
-        bool* a_wasRecreated = nullptr);
+        bool* a_wasRecreated = nullptr, RecreateContext a_ctx = RecreateContext::kNormal,
+        bool* a_wasRefOnly = nullptr);
+
+    // The notice for a take-out that had nothing to hand back because a preset
+    // only listed the id (review 2026-09-23 C2, N4). One wording for every UI;
+    // the single-item paths show it, the bulk loops only log. Main thread.
+    void NotifyRefOnlyReturn(const std::string& a_id);
 
     // --- SMF-era custody (P2): the native layer OWNS the hidden store ---------
     // The store FormID is co-save persisted ('STOR'), so an SMF-only session can
@@ -448,6 +668,13 @@ namespace CostumeFW
     // Resolve the recorded store, else CREATE it (PlaceAtMe CFW_Storage 0x80D at
     // the player, disabled, force-persist) and record it. Main thread only.
     RE::TESObjectREFR* EnsureStoreRef();
+    // If this save's store is a ref the engine does not keep on its own (the
+    // MCM made it without force-persist, and only a script property holds it),
+    // move everything into a new force-persistent store - one move per
+    // extra-data list, so instance data travels - and record that one instead
+    // (review 2026-09-23 C12). Returns the number of moves; 0 = nothing to do.
+    // Post-load main thread, before anything else takes items out of the store.
+    int MakeStorePersistent();
     // Move ONE physical copy of a_id from the player into the hidden store,
     // preferring the worn / instance-data ExtraDataList so tempering + player
     // enchants travel with it (what the MCM's Papyrus move preserved). Main
@@ -485,7 +712,12 @@ namespace CostumeFW
         float magnitude{ 0.0f };
     };
     std::vector<EnchantEffectInfo> ContentEnchantSnapshot(const std::string& a_content);
-    bool CaptureEnchant(const std::string& a_content);
+    // a_rebuildNow: rebuild the holder's stats at once. A caller that moves the
+    // item with CaptureItemToStore right after passes false - that function
+    // rebuilds once the original is in storage, and a rebuild before the move
+    // would pay from a different source and burn an ability-pool slot (review
+    // 2026-09-23 W22).
+    bool CaptureEnchant(const std::string& a_content, bool a_rebuildNow = true);
 
     // The content's captured tempering multiplier (ExtraHealth at capture; healed
     // from the hidden store's original for older captures). 1.0 = untempered.
@@ -653,6 +885,43 @@ namespace CostumeFW
     // and NPC-persist state its held set reads).
     int SweepOrphanedStoredItems();
 
+    // What one uninstall return pass did. `unreadable` is the one that changes
+    // what the user should do next: it counts content ids that no longer resolve
+    // to a form, which on the way out of the game means a costume plugin is
+    // switched off and its captured originals cannot be handed back at all.
+    struct UninstallReturnReport
+    {
+        int returned{ 0 };    // captured originals handed back out of the store
+        int recreated{ 0 };   // plain copies, because nothing was stored to return
+        int drained{ 0 };     // items the store-emptying pass found on top of those
+        int unreadable{ 0 };  // ids whose plugin is not loaded - returned nothing
+    };
+
+    // Hand back EVERYTHING the hidden store holds, for "prepare for uninstall".
+    // Three passes in a fixed order - definitions first (store-first, fabricate
+    // fallback), then the store emptied of whatever is left (no fabricate, so it
+    // cannot duplicate what the first pass just handed over), then a count of
+    // what could not be read. Also runs the NPC arm (UninstallNpcCleanup): the
+    // published costumes' contents, the recall, and the npc-persist assignments.
+    //
+    // Idempotent per save: the first run marks the save (UninstallRanOnThisSave),
+    // and every later run is store-only. The definitions outlive the first run on
+    // purpose (§7.11), so a second run used to find them all naming items the
+    // store no longer had and mint every one again (review 2026-09-23 C3).
+    //
+    // Does NOT remove tokens, detach or disable - the caller owns that half, and
+    // the token loop has to run after this one so the recall has somewhere to put
+    // the publish tokens it takes back.
+    UninstallReturnReport UninstallReturnAll();
+
+    // The whole "prepare for uninstall" flow: UninstallReturnAll, then every box
+    // token off and out of the inventory, detach, master off, re-apply the trio,
+    // and one notification that only says "safe to uninstall" when it is. Both
+    // UIs call THIS - the MCM through CFW_Native.UninstallCleanup(), SMF
+    // directly - because two implementations of it drifted apart once already.
+    // Main thread.
+    void UninstallCleanup();
+
     // Take every synthesized ability back off the player and mark them stale (call
     // on game load, before the boxes of the loaded save are applied). The forms are
     // KEPT: a save restores an ability by form id, so a form we forget is one that
@@ -697,8 +966,19 @@ namespace CostumeFW
     // --- Queries (read-only; index-based for MCM listing) ---
     int BoxCount();
     BoxDefInfo BoxAt(int a_index);            // empty fields if out of range
+    // Find a box by its LOGICAL identity. This is what anything that means "this
+    // box" should use from 1.6.4 on: an index shifts when another box is removed,
+    // and a biped slot stops being unique once a slot can hold several boxes.
+    // -1 when there is no such box.
+    int FindBoxById(const std::string& a_boxId);
+    // ...and by the physical token it holds (still one box per token).
+    int FindBoxByToken(const std::string& a_token);
     bool BoxWornAt(int a_index);              // token currently equipped on player
     std::uint32_t BoxTokenFormAt(int a_index);  // resolved token FormID (0 if none)
+    // Every form the player has equipped, in ONE walk of the inventory - for a
+    // list that asks "is this worn?" once per row per frame, which used to walk
+    // the inventory once per row (review 2026-09-23 M14). Main thread.
+    std::unordered_set<std::uint32_t> WornArmorForms();
     std::vector<std::string> BoxContents(const std::string& a_token);  // by token (for detach)
 
     // --- Definition mutators (token-keyed; edit the store + rewrite json ONLY) ---
@@ -754,7 +1034,37 @@ namespace CostumeFW
     // AddBox: create the box for a_token if absent (with a_label), then append
     // a_content if non-empty and not already present. Returns false on bad input.
     bool AddBox(const std::string& a_label, const std::string& a_token, const std::string& a_content);
+
+    // Groups settings writes (review 2026-09-23 W14): while one is alive, a
+    // settings write only marks the file dirty, and the outermost batch's end
+    // writes it once. For flows that set many values in a row - a preset's
+    // per-content settings, an unpublish's restore - which otherwise rewrote
+    // the whole file for each one. AddBox and the removals still write at
+    // once (taking the batch's changes with them): they act on the answer.
+    // Main thread.
+    class SettingsWriteBatch
+    {
+    public:
+        SettingsWriteBatch();
+        ~SettingsWriteBatch();
+        SettingsWriteBatch(const SettingsWriteBatch&) = delete;
+        SettingsWriteBatch& operator=(const SettingsWriteBatch&) = delete;
+    };
+
+    // Both return false - and change nothing - when the settings could not be
+    // saved: every caller hands the items back only on true, and handing them
+    // back while the file still lists them is a second copy on the next
+    // take-out (review 2026-09-23 W12). a_keepOnWriteFailure = false is for the
+    // one caller that must drop the box from memory whatever the disk says
+    // (unpublish rolling back a half-built box).
     bool RemoveBoxContent(const std::string& a_token, const std::string& a_content);
-    bool RemoveBox(const std::string& a_token);
+    bool RemoveBox(const std::string& a_token, bool a_keepOnWriteFailure = true);
     bool SetBoxLabel(const std::string& a_token, const std::string& a_label);
+
+    // Give a freshly re-created box the logical identity it had before, so a
+    // box keeps its boxId across a publish round trip (PLAN §2.4). Only
+    // unpublish uses this: every other box is created once and keeps the id
+    // AddBox issued. False when the box does not exist or another box already
+    // carries the id.
+    bool AdoptBoxId(const std::string& a_token, const std::string& a_boxId);
 }

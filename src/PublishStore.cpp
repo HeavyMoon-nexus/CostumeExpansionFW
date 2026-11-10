@@ -4,6 +4,7 @@
 #include "BoxStore.h"
 #include "Config.h"
 #include "SkinRebind.h"
+#include "TokenIdentity.h"  // canonical CEF plugin casing for the reserved token
 
 #include "RE/E/Effect.h"
 #include "RE/E/EffectSetting.h"
@@ -35,7 +36,16 @@ namespace CostumeFW
 
         std::vector<std::shared_ptr<PubSnapshot>> g_published;
         std::vector<PubBinding> g_bindings;
+        // Raw values that did not resolve at this load. Session-only: they block
+        // UnpublishToBox for their slot, and are never written back (C5).
         std::vector<PubBindSave> g_unresolved;
+        // Resolved at this load, but no costume is loaded for their slot this
+        // session - the settings did not load, or the publish list lacks it.
+        // Written back as they are, since they are values of THIS load order;
+        // dropping them wiped every NPC's published costume off the save after
+        // one autosave in such a session (review 2026-09-23 C8). They become
+        // live bindings again if the costume turns up (ParsePublishJson).
+        std::vector<PubBindSave> g_carriedBindings;
         std::unordered_map<int, bool> g_hidden;
         std::vector<NprAssignmentInfo> g_nprAssignments;
         std::vector<NprSaveAssignment> g_unresolvedNpr;
@@ -79,15 +89,15 @@ namespace CostumeFW
             return id;
         }
 
+        // Through the one range-checked resolver (review 2026-09-23 C11). This
+        // used strtoul, which read "801junk:" as 0x801, and LookupForm, which
+        // turns a local id past its plugin's end into another plugin's record.
         template <class T>
         T* ResolveColonForm(const std::string& a_id)
         {
-            const auto colon = a_id.find(':');
-            auto* data = RE::TESDataHandler::GetSingleton();
-            if (!data || colon == std::string::npos) return nullptr;
-            const auto local = static_cast<std::uint32_t>(
-                std::strtoul(a_id.substr(0, colon).c_str(), nullptr, 16));
-            return data->LookupForm<T>(local, a_id.substr(colon + 1));
+            const std::uint32_t id = ResolveFormId(a_id);
+            auto* form = id ? RE::TESForm::LookupByID(id) : nullptr;
+            return form ? form->As<T>() : nullptr;
         }
 
         bool PublishKeywordAllowed(std::string_view a_editorId)
@@ -144,7 +154,11 @@ namespace CostumeFW
                 (a_snap.armorType == 2 ? AT::kHeavyArmor : AT::kClothing);
         }
 
-        void ResetPublishedTokenState(int a_slot)
+        // a_forgetHidden=false keeps the slot's per-save "hidden" flag. That flag
+        // came from the co-save, not from the settings, so a settings load that
+        // failed has no business erasing it - the save has to write it back
+        // exactly as it read it (C8).
+        void ResetPublishedTokenState(int a_slot, bool a_forgetHidden = true)
         {
             auto* token = PubTokenArmo(a_slot);
             if (token) {
@@ -169,7 +183,9 @@ namespace CostumeFW
             // otherwise have been forgotten while still applied (v1.6.1.1) -
             // a pool ability is never forgotten, so there is nothing to lose
             // track of.
-            g_hidden.erase(a_slot);
+            if (a_forgetHidden) {
+                g_hidden.erase(a_slot);
+            }
         }
 
 
@@ -314,7 +330,18 @@ namespace CostumeFW
                 std::this_thread::sleep_for(std::chrono::seconds(30));
                 SKSE::GetTaskInterface()->AddTask([a_actor, a_slot, a_attempt] {
                     auto* item = FindNpr(a_actor, a_slot);
-                    if (!item || item->restoreSuspended || !CefEnabled()) return;
+                    if (!item || item->restoreSuspended) return;
+                    // Master switch off: wait rather than give up. This used to
+                    // return, which ended the chain - flick CEF off and back on
+                    // inside the 30-second window and the NPC it was coming for
+                    // stayed undressed until the next equip event or load, with
+                    // nothing suspended and nothing shown to say so. The attempt
+                    // count does NOT advance: the three tries are for an equip
+                    // that will not take, and this is not one of them.
+                    if (!CefEnabled()) {
+                        ScheduleNprRestore(a_actor, a_slot, a_attempt);
+                        return;
+                    }
                     auto* actor = ResolveNprActor(*item);
                     auto* token = NprTokenArmo(a_slot);
                     auto* equip = RE::ActorEquipManager::GetSingleton();
@@ -446,11 +473,16 @@ namespace CostumeFW
         }
     }
 
+    // Both case-blind on the plugin name, like ContentHolder that asks them
+    // (review 2026-09-23 W26): the four owner sources must agree on what "the
+    // same item" is, or one of them lets a second owner in.
     int PublishedSlotHolding(const std::string& a_content)
     {
+        const auto same = [&a_content](const std::string& a_id) {
+            return policy::SameColonId(a_id, a_content);
+        };
         for (const auto& snap : g_published) {
-            if (snap && std::find(snap->contents.begin(), snap->contents.end(), a_content) !=
-                            snap->contents.end())
+            if (snap && std::any_of(snap->contents.begin(), snap->contents.end(), same))
                 return snap->pubSlot;
         }
         return -1;
@@ -458,20 +490,75 @@ namespace CostumeFW
 
     int NpcPersistSlotHolding(const std::string& a_content)
     {
+        const auto same = [&a_content](const std::string& a_id) {
+            return policy::SameColonId(a_id, a_content);
+        };
         // Unresolved assignments count too: an NPC that has not loaded yet still
         // owns its costume, and its items are still in the hidden store.
         for (const auto& item : g_unresolvedNpr) {
-            if (std::find(item.contents.begin(), item.contents.end(), a_content) !=
-                item.contents.end())
+            if (std::any_of(item.contents.begin(), item.contents.end(), same))
                 return item.poolSlot;
         }
         for (const auto& item : g_nprAssignments) {
-            if (std::find(item.contents.begin(), item.contents.end(), a_content) !=
-                item.contents.end())
+            if (std::any_of(item.contents.begin(), item.contents.end(), same))
                 return item.poolSlot;
         }
         return -1;
     }
+
+    bool TokenReservedByPublish(const std::string& a_token)
+    {
+        if (a_token.empty()) {
+            return false;
+        }
+        for (const auto& snap : g_published) {
+            if (snap->sourceToken == a_token) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    PubRestore PublishRestoreState(int a_pubSlot)
+    {
+        const auto* snap = PubBySlot(a_pubSlot);
+        if (!snap) {
+            return PubRestore::NoSnapshot;
+        }
+        if (snap->sourceToken.empty()) {
+            return PubRestore::SourceUnknown;
+        }
+        if (ClassifyBoxToken(snap->sourceToken) != TokenState::Resolved) {
+            return PubRestore::SourceMissing;
+        }
+        // The reservation is not a flag, it is the absence of a box on the
+        // token - so this is also the answer to "did something take it anyway".
+        // A hand-edited settings file can do that, and so can a file written by
+        // 1.6.3, where publishing really did release the token (PLAN §5.1).
+        if (FindBoxByToken(snap->sourceToken) >= 0) {
+            return PubRestore::SourceTaken;
+        }
+        return PubRestore::Ready;
+    }
+
+    const char* PubRestoreReason(PubRestore a_state)
+    {
+        switch (a_state) {
+        case PubRestore::Ready:
+            return "ready";
+        case PubRestore::NoSnapshot:
+            return "nothing is published in that slot";
+        case PubRestore::SourceUnknown:
+            return "this costume does not record which box token it came from";
+        case PubRestore::SourceMissing:
+            return "the box token it came from is not loaded - put its plugin back";
+        case PubRestore::SourceTaken:
+            return "another box now holds the box token it came from";
+        }
+        return "unknown";
+    }
+
+    void MigrateLegacyPublishIdentity();  // fwd (defined below, next to PublishBox)
 
     void EmitPublishJson(nlohmann::json& a_doc)
     {
@@ -479,6 +566,7 @@ namespace CostumeFW
         for (const auto& snap : g_published) {
             nlohmann::json item{
                 { "pubSlot", snap->pubSlot }, { "label", snap->label },
+                { "boxId", snap->boxId }, { "sourceToken", snap->sourceToken },
                 { "sourceSlot", snap->sourceSlot }, { "armorType", snap->armorType },
                 { "manualAbility", snap->manualAbility }, { "rev", snap->rev },
                 { "contents", snap->contents }
@@ -506,14 +594,21 @@ namespace CostumeFW
 
     void ParsePublishJson(const nlohmann::json& a_doc)
     {
-        g_published.clear();
         // Snapshots are being replaced. Their contents may now be worth
         // something different, or belong to nobody - both are settled by the
         // convergence and by InvalidatePublishAbilities, which re-derives every
         // published content's value. Nothing needs taking off here: a pool
         // ability belongs to a content, not to a slot, so replacing the slots
         // cannot orphan one.
-        g_maxNpcInjected = std::clamp(a_doc.value("npcConfig", nlohmann::json::object())
+        //
+        // Built aside and swapped in only once the WHOLE list has parsed. A
+        // field of the wrong type throws out of here into LoadBoxes' catch,
+        // and this used to clear first and fill as it went - so the session
+        // kept the costumes that came before the bad one and went on treating
+        // that partial set as the truth (review 2026-09-23 M11/C8). The catch
+        // drops the lot instead (DropPublishedSnapshots).
+        std::vector<std::shared_ptr<PubSnapshot>> next;
+        const int maxNpcInjected = std::clamp(a_doc.value("npcConfig", nlohmann::json::object())
             .value("maxNpcInjected", 8), 1, 64);
         std::unordered_set<int> slots;
         for (const auto& item : a_doc.value("published", nlohmann::json::array())) {
@@ -522,6 +617,10 @@ namespace CostumeFW
             if (snap->pubSlot < 0 || snap->pubSlot >= kPoolSize || !slots.insert(snap->pubSlot).second)
                 continue;
             snap->label = item.value("label", std::string{});
+            snap->boxId = item.value("boxId", std::string{});
+            snap->sourceToken = item.value("sourceToken", std::string{});
+            CanonicalizeColonId(snap->sourceToken);
+            tokenid::CanonicalizeCefColonId(snap->sourceToken);
             snap->sourceSlot = item.value("sourceSlot", 0);
             snap->armorType = item.value("armorType", 0);
             snap->manualAbility = item.value("manualAbility", std::string{});
@@ -554,8 +653,10 @@ namespace CostumeFW
                     }
                 }
             }
-            g_published.push_back(std::move(snap));
+            next.push_back(std::move(snap));
         }
+        g_maxNpcInjected = maxNpcInjected;
+        g_published = std::move(next);
         // Pool slots this json does NOT publish must not keep the stamp an
         // earlier definition left on them. A reload replaces the published set
         // and only ever restamped the NEW set, so a costume removed from the
@@ -568,13 +669,172 @@ namespace CostumeFW
                 ResetPublishedTokenState(slot);
             }
         }
+        // C8: bindings this save restored while no costume was loaded for their
+        // slot (the settings did not load) are live again once it is - a
+        // settings reload after the file was fixed. Through RestorePubBinding,
+        // so the token checks it could not make then are made now.
+        auto carried = std::move(g_carriedBindings);
+        g_carriedBindings.clear();
+        for (const auto& b : carried) {
+            RestorePubBinding(b.pubSlot, b.actorFormID, b.flags);
+        }
+        MigrateLegacyPublishIdentity();
         InitializeNpcSupport();
     }
 
-    bool PublishBox(int a_boxIndex)
+    void DropPublishedSnapshots()
+    {
+        // LoadBoxes' failure path: the settings did not load, the box store is
+        // holding "loaded empty", and published costumes are part of the same
+        // file - so they go too, rather than surviving as whatever an earlier
+        // load (or half of this one) left behind (M11). Nothing on disk is
+        // touched: every settings write refuses for the rest of the session.
+        //
+        // The pool tokens go back to their unpublished state so none of them
+        // keeps a costume's armour and name with no costume behind it. The
+        // per-save hidden flags are KEPT - they belong to the co-save, and the
+        // next save must write them back unchanged (C8).
+        g_published.clear();
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            ResetPublishedTokenState(slot, false);
+        }
+    }
+
+    // PLAN §5.5. A snapshot written before 1.6.4 records only the biped slot it
+    // came from - but every release up to 1.6.3 had exactly one token per slot,
+    // generation 0's, so the token it was published from is not a guess, it is
+    // arithmetic. Deriving it from "a free token on that slot" instead would
+    // never fire once BoxPool1 is installed: three pool tokens share the slot
+    // and one of them would always look like a candidate, and the costume would
+    // come back on a token it was never published from.
+    //
+    // Runs at the end of the settings load, which is before anything can call
+    // the allocator - §5.2 hands out generation 0 first, so a new box created
+    // ahead of this would take the very token being reserved here.
+    void MigrateLegacyPublishIdentity()
+    {
+        // Is this token anybody's? A box holding it wins outright (§5.1 rule 3),
+        // and a published costume that already names it owns it (rule 4) - the
+        // latter includes snapshots this pass placed a moment ago AND snapshots
+        // later in the list that arrived holding a token, because the
+        // reservation is read off the whole published set rather than tracked
+        // as we go.
+        const auto spokenFor = [](const std::string& a_token) {
+            return FindBoxByToken(a_token) >= 0 || TokenReservedByPublish(a_token);
+        };
+        const auto boxOn = [](const std::string& a_token) -> std::string {
+            const int idx = FindBoxByToken(a_token);
+            return idx >= 0 ? BoxAt(idx).label : std::string{};
+        };
+
+        for (const auto& snap : g_published) {
+            // Only a snapshot that has never been migrated is placed here. One
+            // written by 1.6.4 already names its token and is never moved off
+            // it - that is the whole of §5.4.
+            const bool migrating = snap->sourceToken.empty();
+            if (migrating && snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
+                const std::string gen0 = Gen0TokenForSlot(snap->sourceSlot);
+                if (gen0.empty()) {
+                    SKSE::log::warn(
+                        "publish: slot {} '{}' came from biped slot {}, which no generation-0 "
+                        "token occupies - it has no token to go back to and unpublish will say so",
+                        snap->pubSlot, snap->label, snap->sourceSlot);
+                } else if (!spokenFor(gen0)) {
+                    snap->sourceToken = gen0;
+                    SKSE::log::info("publish: slot {} '{}' reserves '{}' (from biped slot {})",
+                        snap->pubSlot, snap->label, gen0, snap->sourceSlot);
+                } else {
+                    // Every release up to 1.6.2.2 RELEASED the source token on
+                    // publish and then offered it in the new-box picker again, so
+                    // "publish the outfit, then make another one on the slot that
+                    // just came free" was the normal thing to do - and it leaves
+                    // the costume with nowhere to go back to. Publishing a second
+                    // costume off the same slot lands in the same place.
+                    //
+                    // Putting it on another token of the SAME biped slot keeps
+                    // the one property that decides what a costume hides, and
+                    // BoxPool1 exists precisely so there is somewhere to put it.
+                    //
+                    // Owner decision 2026-09-15, and deliberately confined to
+                    // this one-time migration: §5.5 forbids SUBSTITUTING a token,
+                    // which is about unpublish going looking for one. A snapshot
+                    // from before reservations existed has to be finished
+                    // somehow, and every snapshot written from 1.6.4 on holds its
+                    // token from the moment it is published, so none of them can
+                    // ever reach this branch.
+                    const std::string held = boxOn(gen0);
+                    const std::string who = held.empty() ?
+                        "another published costume" : "box '" + held + "'";
+                    if (const std::string spare = FreeTokenOnSlot(snap->sourceSlot);
+                        spare.empty()) {
+                        snap->sourceToken = gen0;  // recorded honestly; unpublish refuses
+                        SKSE::log::warn(
+                            "publish: slot {} '{}' came from '{}', which {} now holds, and biped "
+                            "slot {} has no free token left - unpublish will refuse until one is "
+                            "freed",
+                            snap->pubSlot, snap->label, gen0, who, snap->sourceSlot);
+                    } else {
+                        snap->sourceToken = spare;
+                        SKSE::log::warn(
+                            "publish: slot {} '{}' came from '{}', which {} now holds - it reserves "
+                            "'{}' instead. Same biped slot ({}), so the costume hides what it "
+                            "always did and unpublish will put it there.",
+                            snap->pubSlot, snap->label, gen0, who, spare, snap->sourceSlot);
+                    }
+                }
+            }
+            if (snap->boxId.empty()) {
+                // A snapshot written before 1.6.4 has no id to preserve, so this
+                // only has to be stable and unique. The pool slot is in the seed
+                // for the uniqueness: two costumes can legitimately name the same
+                // source slot, and seeding on the token alone would hand them one
+                // id between them.
+                snap->boxId = DeriveBoxId("pub" + std::to_string(snap->pubSlot) + ":" +
+                    (snap->sourceToken.empty() ? "slot" + std::to_string(snap->sourceSlot) :
+                                                 snap->sourceToken));
+            }
+            // A token held by a box, said once at load rather than only when the
+            // user tries to unpublish. A snapshot migrated a moment ago has
+            // already reported its own version of this, so the ones that reach
+            // here arrived holding a token: a hand-edited settings file, or a
+            // 1.6.4 snapshot whose token was taken from under it the same way.
+            if (!migrating && !snap->sourceToken.empty()) {
+                if (const std::string held = boxOn(snap->sourceToken); !held.empty()) {
+                    SKSE::log::warn(
+                        "publish: slot {} '{}' cannot be unpublished as it stands - box '{}' now "
+                        "holds its token '{}'. Free that box's token to get the costume back on "
+                        "its own slot.",
+                        snap->pubSlot, snap->label, held, snap->sourceToken);
+                }
+            }
+        }
+        // One token, one owner (PLAN §5.1 rule 4). The migration above avoids
+        // creating this, and a reservation stops 1.6.4 from creating it, so what
+        // is left is a hand-edited settings file and the case where a whole
+        // biped slot ran out of free tokens. First snapshot in the file owns it;
+        // the others get their token back only once that one has taken it.
+        std::vector<std::string> owned;
+        for (const auto& snap : g_published) {
+            if (snap->sourceToken.empty()) {
+                continue;
+            }
+            if (std::find(owned.begin(), owned.end(), snap->sourceToken) != owned.end()) {
+                SKSE::log::warn(
+                    "publish: slot {} '{}' names token '{}', which an earlier published costume "
+                    "already reserves - only one of them can have it back",
+                    snap->pubSlot, snap->label, snap->sourceToken);
+            } else {
+                owned.push_back(snap->sourceToken);
+            }
+        }
+    }
+
+    bool PublishBox(const std::string& a_boxId)
     {
         if (!NpcEspLoaded()) return false;
-        const auto box = BoxAt(a_boxIndex);
+        const int boxIndex = FindBoxById(a_boxId);
+        if (boxIndex < 0) return false;  // deleted, or published, between click and confirm
+        const auto box = BoxAt(boxIndex);
         if (box.token.empty() || box.contents.empty()) return false;
         int slot = -1;
         for (int i = 0; i < kPoolSize; ++i) if (!PubBySlot(i)) { slot = i; break; }
@@ -582,6 +842,10 @@ namespace CostumeFW
         auto snap = std::make_shared<PubSnapshot>();
         snap->pubSlot = slot;
         snap->label = box.label;
+        // The box is not destroyed here, it is frozen: its id comes back out of
+        // unpublish, and its token is reserved rather than released (PLAN §5.3).
+        snap->boxId = box.boxId;
+        snap->sourceToken = box.token;
         snap->sourceSlot = TokenSlot(box.token);
         snap->armorType = box.armorType;
         snap->manualAbility = box.ability;
@@ -601,12 +865,29 @@ namespace CostumeFW
         }
         ResetPublishedTokenState(slot);
         g_published.push_back(snap);
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        const std::uint32_t tokenForm = ResolveFormId(box.token);
+        const bool wasWorn = player && tokenForm && player->GetWornArmor(tokenForm);
         WearBoxToken(box.token, false);
         for (const auto& id : box.contents) DetachSkinned(id);
-        RemoveBox(box.token);
+        if (!RemoveBox(box.token)) {
+            // RemoveBox's write is the one that makes a publish real: box gone
+            // and snapshot present, in one file. It did not happen, so RemoveBox
+            // kept the box - and the snapshot must go too, or two holders claim
+            // the same contents (W12). Put the box back the way it was.
+            g_published.erase(std::remove(g_published.begin(), g_published.end(), snap),
+                g_published.end());
+            ResetPublishedTokenState(slot);
+            for (const auto& id : box.contents) RegisterBoxById(id, box.token);
+            if (wasWorn) WearBoxToken(box.token, true);
+            Reconcile();
+            SKSE::log::error("publish: '{}' NOT published - the settings could not be saved; "
+                             "the box is unchanged", box.label);
+            return false;
+        }
         GiveOrRemoveToken(box.token, false);
         StampAllPublishTokens();
-        if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+        if (player) {
             if (auto* token = PubTokenArmo(slot))
                 player->AddObjectToContainer(token, nullptr, 1, nullptr);
         }
@@ -668,7 +949,9 @@ namespace CostumeFW
         const auto* snap = PubByTokenForm(a_base);
         if (!actor || !snap) return;
         auto& binding = EnsureBinding(snap->pubSlot, actor);
-        binding.holder = true;
+        // An unequip is also what happens when the token LEAVES the actor, so
+        // holding it has to be looked up, not assumed (review 2026-09-23 W19).
+        binding.holder = a_equipped || ActorHasItem(actor, PubTokenArmo(snap->pubSlot));
         binding.wearer = a_equipped;
         const bool allowed = g_hidden[snap->pubSlot] || HasActorBindings(actor) ||
             InjectedNpcCount() < static_cast<std::size_t>(g_maxNpcInjected);
@@ -875,9 +1158,38 @@ namespace CostumeFW
             return b.pubSlot == a_slot &&
                 std::find(settled.begin(), settled.end(), b.actorFormID) != settled.end();
         });
+        // Every copy taken off those actors went to the PLAYER - that is what
+        // the destination argument on the RemoveItem above does - and nothing
+        // took them out again. Publish hands the player one copy to give away
+        // with (PublishBox, and the gift menu is a supported way to dress an
+        // NPC), so recalling from three wearers left four in the inventory, and
+        // each publish/recall cycle added more. They all read "Costume
+        // (unpublished)" once the slot is freed, because the name is on the
+        // base form.
+        //
+        // Trim to the one that is meant to be there. Nothing is kept when the
+        // slot no longer holds a costume, or when this is the uninstall pass:
+        // there is then nothing left to hand out. UnpublishToBox strips the lot
+        // right after calling this and is unaffected either way.
+        //
+        // The removal fires the container-changed hook, which clears the
+        // player's holder binding even when a copy is kept. That is harmless:
+        // unpublish never counts the player's holder binding (see the comment
+        // there) and the next move re-creates it.
+        const std::int32_t keep = (!a_forgetUnreachable && PubBySlot(a_slot)) ? 1 : 0;
+        const auto counts = player->GetInventoryCounts();
+        const auto held = counts.find(token);
+        const std::int32_t spare = (held != counts.end() ? held->second : 0) - keep;
+        if (spare > 0) {
+            player->RemoveItem(token, spare, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+            SKSE::log::info("publish: slot {} - took {} spare token(s) back out of the player's "
+                            "inventory ({} kept)", a_slot, spare, keep);
+        }
         if (a_forgetUnreachable) {
-            // Uninstall: the user is about to delete the mod, so a record that
-            // would ride the next co-save is worse than a forgotten one.
+            // Uninstall: the user is about to delete the mod, so a live binding
+            // that would ride the next co-save is worse than a forgotten one.
+            // (Unresolved ones are session-only since C5; they go too, so
+            // nothing is left pending on a slot about to be dissolved.)
             std::erase_if(g_bindings, [a_slot](const PubBinding& b) { return b.pubSlot == a_slot; });
             std::erase_if(g_unresolved, [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
             SKSE::log::info("publish: recalled slot {} from {} actor(s); unreachable ones forgotten "
@@ -919,27 +1231,24 @@ namespace CostumeFW
         for (const auto& binding : g_bindings)
             if (binding.pubSlot == a_slot && binding.holder && binding.actorFormID != playerID)
                 return false;
-        auto token = NextFreeToken();
-        if (token.empty()) return false;
-        for (const auto& candidate : FreeTokens()) {
-            if (TokenSlot(candidate) == snap->sourceSlot) {
-                token = candidate;
-                break;
-            }
+        // PLAN §5.4: back to the token that was held in reserve for it, or not at
+        // all. This used to ask the general allocator and then prefer a free
+        // token on the same biped slot, so a costume whose slot had been handed
+        // to another box came back SOMEWHERE ELSE - a different slot, hiding
+        // different parts. The test run on 2026-09-10 landed one on slot 30 and
+        // it read as "unpublish re-stamped my box". A reservation removes the
+        // case rather than reporting it: while this costume is published nothing
+        // can take its token, so the only ways to reach a refusal here are a
+        // missing pool generation, a snapshot from 1.6.3 whose token was taken
+        // before the reservation existed, and a hand-edited settings file.
+        const auto restore = PublishRestoreState(a_slot);
+        if (restore != PubRestore::Ready) {
+            SKSE::log::warn("unpublish: slot {} '{}' kept - {} (source token '{}')",
+                a_slot, snap->label, PubRestoreReason(restore),
+                snap->sourceToken.empty() ? "none" : snap->sourceToken);
+            return false;
         }
-        // The box's ORIGINAL slot may have been handed to another box while this
-        // costume was published (publish frees the source token). There is one
-        // token per biped slot, so the costume then has to come back somewhere
-        // else - and its slot decides what it hides. Say so: silently changing
-        // it read as "unpublish re-stamped my box" (test run 2026-09-10).
-        const int landedSlot = TokenSlot(token);
-        const bool relocated = landedSlot != snap->sourceSlot;
-        if (relocated) {
-            SKSE::log::warn(
-                "unpublish: slot {} is taken by another box - '{}' comes back on slot {} ('{}'). "
-                "Its biped slot decides what it hides, so the outfit may behave differently.",
-                snap->sourceSlot, snap->label, landedSlot, token);
-        }
+        const std::string token = snap->sourceToken;
         // PHASE 1 - validate the WHOLE restore before anything is touched
         // (review 2026-09-09 F03). This used to ignore every AddBox result and
         // then delete the snapshot regardless, so a single refused content left
@@ -1002,8 +1311,16 @@ namespace CostumeFW
         // come FIRST: ContentHolder now answers "publish:<slot>" for these ids,
         // and AddBox refuses a content that any other holder owns.
         g_published.erase(std::remove(g_published.begin(), g_published.end(), snap), g_published.end());
+        // One settings write for the whole restore (W14) - each content's four
+        // or five settings used to rewrite the file on their own. AddBox still
+        // writes at once, carrying what was set before it.
+        SettingsWriteBatch batch;
         bool restored = AddBox(snap->label, token, {});
         if (restored) {
+            // Same box, not a new one that happens to look like it (PLAN §2.4).
+            // AddBox issues a fresh id to every box it creates, which is right
+            // everywhere except here.
+            AdoptBoxId(token, snap->boxId);
             for (const auto& id : restorable) {
                 if (!AddBox(snap->label, token, id)) {
                     restored = false;
@@ -1023,7 +1340,11 @@ namespace CostumeFW
             // put the costume back rather than leaving a half-filled box and no
             // definition to rebuild it from. The wearers are already recalled -
             // the tokens have to be handed out again - but the composition lives.
-            RemoveBox(token);
+            // The half-built box goes from memory even if its removal cannot be
+            // saved: the snapshot takes its contents back on the next line, and
+            // two holders of one content is the state every guard exists to
+            // prevent (W12).
+            RemoveBox(token, false);
             g_published.push_back(snap);
             SaveGlobalSettings();
             SKSE::log::error(
@@ -1048,13 +1369,8 @@ namespace CostumeFW
         ApplyBoxAbilities();
         RefreshWornToken(token);
         SaveGlobalSettings();
-        SKSE::log::info("unpublish: slot {} -> box '{}' ({}/{} content(s) restored)",
-            a_slot, token, restorable.size(), snap->contents.size());
-        if (relocated) {
-            RE::DebugNotification(std::format(
-                "CostumeFW: slot {} was taken - '{}' came back on slot {}",
-                snap->sourceSlot, snap->label, landedSlot).c_str());
-        }
+        SKSE::log::info("unpublish: slot {} -> box '{}' on biped slot {} ({}/{} content(s) restored)",
+            a_slot, token, TokenSlot(token), restorable.size(), snap->contents.size());
         return true;
     }
 
@@ -1065,12 +1381,25 @@ namespace CostumeFW
             StampSnapshotStats(*snap);
             if (!token) continue;
             token->fullName = ("Costume: " + snap->label).c_str();
-            if (snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
-                const auto mask = static_cast<RE::BGSBipedObjectForm::BipedObjectSlot>(
-                    1u << (snap->sourceSlot - 30));
-                token->bipedModelData.bipedObjectSlots = mask;
+            // The publish token has to occupy what the BOX occupied, and a box
+            // token is not always one bit: the shipped slot-31 token is 31|41
+            // (Hair + LongHair), which is the whole reason a wig box hides the
+            // real hair. Rebuilding the mask from sourceSlot dropped bit 41, so
+            // a published wig left the NPC's own hair showing through it.
+            //
+            // sourceSlot is still the fallback, because it is all a snapshot
+            // written before 1.6.4 has until the load migrates it, and because
+            // a token whose plugin is missing resolves to no mask at all - in
+            // which case the single bit is a better answer than none.
+            std::uint32_t mask = TokenSlotMask(snap->sourceToken);
+            if (mask == 0 && snap->sourceSlot >= 30 && snap->sourceSlot <= 61) {
+                mask = 1u << (snap->sourceSlot - 30);
+            }
+            if (mask != 0) {
+                const auto slots = static_cast<RE::BGSBipedObjectForm::BipedObjectSlot>(mask);
+                token->bipedModelData.bipedObjectSlots = slots;
                 for (auto* addon : token->armorAddons)
-                    if (addon) addon->bipedModelData.bipedObjectSlots = mask;
+                    if (addon) addon->bipedModelData.bipedObjectSlots = slots;
             }
         }
     }
@@ -1107,6 +1436,13 @@ namespace CostumeFW
             // catalog entry (NPC_AUDIT_2026-08-03 F2). CanResolveContent is the
             // same ARMA/ARMO gate the registration path applies (IMPL 10.3).
             if (id.empty() || !CanResolveContent(id)) return false;
+            // The id reaches the carrier manifest, which is JSON (C1). These come
+            // straight from the inventory picker - not through the capture gate -
+            // so an item from a plugin named in a legacy codepage stops here.
+            if (!policy::IsStrictUtf8(id)) {
+                SKSE::log::warn("npcpersist: '{}' is not UTF-8 text - not assigned", id);
+                return false;
+            }
             if (std::find(item.contents.begin(), item.contents.end(), id) == item.contents.end())
                 item.contents.push_back(std::move(id));
         }
@@ -1135,6 +1471,40 @@ namespace CostumeFW
         // bindings) and remove every npc-persist assignment; unresolvable
         // assignments (actor unloaded/gone) are dropped so nothing rides the
         // next co-save of a mod the user is about to delete.
+        //
+        // The published costumes' CONTENTS, before the NPC gate below. Both
+        // cleanup twins return what a BOX holds and what persist has active,
+        // and a published costume is neither: publishing moves the box into a
+        // frozen snapshot, so its items are in the hidden store with nothing
+        // left iterating over them. The dialog says "Return all captured items"
+        // and the notification says "safe to uninstall"; for anyone with a
+        // published costume both were false, and deleting the mod on the
+        // strength of them lost the items (in-game 2026-09-17: 14 still held
+        // after the run). Shipped that way since publish existed - main's
+        // UninstallCleanup has no publish arm either - so this is not a 1.6.4
+        // regression, just a hole 1.6.4 is the first version to look into.
+        //
+        // Above the NpcEspLoaded gate on purpose: a snapshot is plain data read
+        // from CEF_settings.json (SharedBySlot walks g_published and resolves no
+        // form), so it outlives the NPC add-on being uninstalled - and that user
+        // needs their items back more than most, not less. Fabricate fallback to
+        // match the box and persist loops: a plain copy beats nothing when the
+        // original is gone, and no content id is in both a box and a snapshot
+        // for it to hand back twice. In the uninstall context like those loops,
+        // so a second run on the same save is store-only (review 2026-09-23 C3).
+        int returned = 0;
+        for (int slot = 0; slot < kPoolSize; ++slot) {
+            if (const auto* snap = PubBySlot(slot)) {
+                for (const auto& id : snap->contents) {
+                    returned +=
+                        ReturnStoredItem(id, true, nullptr, RecreateContext::kUninstall) ? 1 : 0;
+                }
+            }
+        }
+        if (returned) {
+            SKSE::log::info("uninstall cleanup: returned {} item(s) from published costume(s)",
+                returned);
+        }
         if (!NpcEspLoaded()) {
             return;
         }
@@ -1188,6 +1558,10 @@ namespace CostumeFW
         for (auto id : a_contents) {
             CanonicalizeColonId(id);
             if (id.empty() || !CanResolveContent(id)) return false;
+            if (!policy::IsStrictUtf8(id)) {  // C1 - see AssignNpcPersist
+                SKSE::log::warn("npcpersist: '{}' is not UTF-8 text - not assigned", id);
+                return false;
+            }
             if (std::find(next.begin(), next.end(), id) == next.end())
                 next.push_back(std::move(id));
         }
@@ -1202,6 +1576,53 @@ namespace CostumeFW
         RegisterNpr(a_actor, *item);
         SyncPersistManifest();
         RefreshNpcPersist(a_actor);
+        return true;
+    }
+
+    int ForgetUnreachablePub(int a_slot)
+    {
+        if (a_slot < 0 || a_slot >= kPoolSize) return 0;
+        // Recall keeps what it cannot reach as pending, so the ability comes off
+        // when the actor loads (F07). An actor whose plugin is gone, or who died
+        // and was cleaned up, never loads: the pending record then blocks
+        // Unpublish for good, and there was no way to let go of it (W19).
+        const auto unresolved = std::erase_if(g_unresolved,
+            [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
+        const auto unreachable = std::erase_if(g_bindings,
+            [a_slot](PubBinding& b) { return b.pubSlot == a_slot && !ResolveActor(b); });
+        const auto carried = std::erase_if(g_carriedBindings,
+            [a_slot](const PubBindSave& b) { return b.pubSlot == a_slot; });
+        const int total = static_cast<int>(unresolved + unreachable + carried);
+        SKSE::log::info("publish: slot {} - forgot {} binding(s) that cannot be reached "
+                        "({} unresolved, {} not in the game, {} without a costume)",
+            a_slot, total, unresolved, unreachable, carried);
+        return total;
+    }
+
+    bool ForgetNprAssignment(int a_poolSlot)
+    {
+        if (a_poolSlot < 0 || a_poolSlot >= kPoolSize) return false;
+        // One the game can still reach goes the normal way - its token comes off.
+        for (const auto& item : g_nprAssignments) {
+            if (item.poolSlot != a_poolSlot) continue;
+            auto* form = RE::TESForm::LookupByID(item.actorFormID);
+            if (auto* actor = form ? form->As<RE::Actor>() : nullptr) {
+                return RemoveNpcPersist(actor);
+            }
+            break;
+        }
+        // Otherwise there is no actor to take anything off: the record goes, the
+        // pool slot is free again, and the next load's sweep hands the contents
+        // back (W19).
+        const auto live = std::erase_if(g_nprAssignments,
+            [a_poolSlot](const NprAssignmentInfo& i) { return i.poolSlot == a_poolSlot; });
+        const auto unresolved = std::erase_if(g_unresolvedNpr,
+            [a_poolSlot](const NprSaveAssignment& i) { return i.poolSlot == a_poolSlot; });
+        if (live + unresolved == 0) return false;
+        RefreshNprGate();
+        SyncPersistManifest();
+        SKSE::log::info("npc persist: slot {} forgotten - its actor cannot be reached; the "
+                        "contents come back on the next load", a_poolSlot);
         return true;
     }
 
@@ -1284,10 +1705,43 @@ namespace CostumeFW
 
     std::vector<NprSaveAssignment> NprAssignmentsForSave()
     {
+        // Resolved only (C5) - see the header. The unresolved ones go with this
+        // save; their contents are handed back by the next load's sweep.
+        std::vector<NprSaveAssignment> out;
+        out.reserve(g_nprAssignments.size());
+        for (const auto& item : g_nprAssignments)
+            out.push_back({ item.poolSlot, item.actorFormID, item.contents, item.female });
+        return out;
+    }
+
+    std::vector<NprSaveAssignment> NprAssignmentsHeld()
+    {
         auto out = g_unresolvedNpr;
         for (const auto& item : g_nprAssignments)
             out.push_back({ item.poolSlot, item.actorFormID, item.contents, item.female });
         return out;
+    }
+
+    void ReportUnresolvedNpcRecords()
+    {
+        if (!g_unresolved.empty()) {
+            // Log only: a published costume's items belong to the costume, not
+            // to the binding, so releasing the binding returns nothing.
+            SKSE::log::warn("cosave: {} published-costume binding(s) name an actor whose plugin "
+                            "is not loaded - kept for this session, not written to the next save",
+                g_unresolved.size());
+        }
+        if (g_unresolvedNpr.empty()) {
+            return;
+        }
+        SKSE::log::warn("cosave: {} NPC persist assignment(s) name an actor whose plugin is not "
+                        "loaded - saving releases them, and the next load returns their items",
+            g_unresolvedNpr.size());
+        RE::DebugNotification(std::format("CostumeFW: {} NPC costume assignment(s) belong to a "
+                                          "plugin that isn't loaded. Saving now releases them, "
+                                          "and their items come back to you on the next load.",
+            g_unresolvedNpr.size())
+                .c_str());
     }
 
     void RestoreNprAssignment(std::uint8_t a_slot, RE::FormID a_actor,
@@ -1432,6 +1886,7 @@ namespace CostumeFW
         }
         g_bindings.clear();
         g_unresolved.clear();
+        g_carriedBindings.clear();
         g_hidden.clear();
         g_nprAssignments.clear();
         RefreshNprGate();
@@ -1440,15 +1895,21 @@ namespace CostumeFW
 
     std::vector<PubSaveState> PubStatesForSave()
     {
+        // Every flag, not just the slots with a costume this session (C8).
+        // A stale flag is harmless: a new publish into the slot forgets it
+        // (ResetPublishedTokenState), and nothing reads it without a costume.
         std::vector<PubSaveState> out;
-        for (const auto& snap : g_published)
-            out.push_back({ static_cast<std::uint8_t>(snap->pubSlot), g_hidden[snap->pubSlot] });
+        out.reserve(g_hidden.size());
+        for (const auto& [slot, hidden] : g_hidden)
+            if (slot >= 0 && slot < kPoolSize)
+                out.push_back({ static_cast<std::uint8_t>(slot), hidden });
         return out;
     }
 
     std::vector<PubBindSave> PubBindingsForSave()
     {
-        std::vector<PubBindSave> out = g_unresolved;
+        // g_carriedBindings, never g_unresolved (C5 / C8 - see the header).
+        std::vector<PubBindSave> out = g_carriedBindings;
         for (const auto& b : g_bindings)
             out.push_back({ static_cast<std::uint8_t>(b.pubSlot), b.actorFormID,
                 static_cast<std::uint8_t>((b.holder ? 1 : 0) | (b.wearer ? 2 : 0)) });
@@ -1461,8 +1922,38 @@ namespace CostumeFW
     }
     void RestorePubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags)
     {
-        if (a_slot >= kPoolSize || !a_actor || !PubBySlot(a_slot)) return;
-        g_bindings.push_back({ a_slot, a_actor, {}, (a_flags & 1) != 0, (a_flags & 2) != 0 });
+        if (a_slot >= kPoolSize || !a_actor) return;
+        // R4b: a save written while a plugin was missing can hold a raw value
+        // that SKSE has now read through the WRONG plugin list (C5). What it
+        // lands on is usually not an actor at all - a sure sign, so drop it.
+        // Null is not the same sign: an actor whose cell is not loaded can be
+        // out of memory, and its binding is kept as before.
+        auto* form = RE::TESForm::LookupByID(a_actor);
+        auto* actor = form ? form->As<RE::Actor>() : nullptr;
+        if (form && !actor) {
+            SKSE::log::warn("cosave: published-costume binding for slot {} names {:08X}, which is "
+                            "not an actor - dropped (written by a save that was missing a plugin)",
+                a_slot, a_actor);
+            return;
+        }
+        if (!PubBySlot(a_slot)) {
+            g_carriedBindings.push_back({ a_slot, a_actor, a_flags });  // C8
+            return;
+        }
+        std::uint8_t flags = a_flags;
+        // R4b: the holder / wearer bits only where they are visibly true - a
+        // binding restored onto the wrong actor claims a token it never had.
+        if (auto* token = PubTokenArmo(a_slot); token && actor) {
+            if (!ActorHasItem(actor, token)) flags &= static_cast<std::uint8_t>(~1u);
+            if (!actor->GetWornArmor(token->GetFormID())) flags &= static_cast<std::uint8_t>(~2u);
+            if (flags == 0) {
+                SKSE::log::warn("cosave: published-costume binding for slot {} names {:08X}, "
+                                "which neither has nor wears the token - dropped",
+                    a_slot, a_actor);
+                return;
+            }
+        }
+        g_bindings.push_back({ a_slot, a_actor, {}, (flags & 1) != 0, (flags & 2) != 0 });
     }
     void CarryUnresolvedPubBinding(std::uint8_t a_slot, RE::FormID a_actor, std::uint8_t a_flags)
     {
@@ -1483,6 +1974,13 @@ namespace CostumeFW
         for (int i = 0; i < kPoolSize; ++i)
             if (auto* token = PubTokenArmo(i); token && IsPublishToken(token->GetFormID()))
                 ++resolvedTokens;
+        // Measured, not derived (PLAN §9.1 / old plan C5). This used to read
+        // BoxCount() + FreeTokens().size(), which counts DEFINITIONS plus free
+        // tokens - so a definition whose token had dropped out of the pool still
+        // counted as one, and the total never moved. Publishing now reserves a
+        // token rather than releasing it, which would have made the derived
+        // figure wrong in a second way.
+        const auto poolStats = BoxTokenPoolStats();
         std::vector<std::string> out{
             "# NPC",
             std::string("addon esp: ") + (NpcEspLoaded() ? "loaded" : "NOT LOADED"),
@@ -1495,15 +1993,21 @@ namespace CostumeFW
                 std::to_string(g_maxNpcInjected) + " (cap)",
             "NPC persist: " + std::to_string(g_nprAssignments.size()) + " active, " +
                 std::to_string(g_unresolvedNpr.size()) + " unresolved",
-            "publish token forms: " + std::to_string(resolvedTokens) + " / 8; box token pool: " +
-                std::to_string(BoxCount() + static_cast<int>(FreeTokens().size()))
+            "publish token forms: " + std::to_string(resolvedTokens) + " / 8",
+            std::format("box token pool: {} total ({} in boxes, {} reserved by publish, {} free); "
+                        "box definitions: {}",
+                poolStats.total, poolStats.inBoxes, poolStats.reserved, poolStats.free,
+                poolStats.definitions)
         };
         for (const auto& snap : g_published) {
             int slotWearers = 0;
             for (const auto& binding : g_bindings)
                 if (binding.pubSlot == snap->pubSlot && binding.wearer) ++slotWearers;
-            out.push_back(std::format("pub {:02} '{}': rev {}, {} wearer(s)",
-                snap->pubSlot + 1, snap->label, snap->rev, slotWearers));
+            const auto restore = PublishRestoreState(snap->pubSlot);
+            out.push_back(std::format("pub {:02} '{}': rev {}, {} wearer(s), reserves {} [{}]",
+                snap->pubSlot + 1, snap->label, snap->rev, slotWearers,
+                snap->sourceToken.empty() ? "nothing" : snap->sourceToken,
+                PubRestoreReason(restore)));
         }
         return out;
     }

@@ -67,6 +67,15 @@ namespace CostumeFW::abilities
     // is not installed" case, which is a choice and not a fault.
     void ReportStateToUser();
 
+    // After a save loads and BEFORE anything allocates: every pool ability one
+    // of a_actors carries that the registry does not list is reserved (a
+    // tombstone the registry keeps) and the pool is disabled for the session,
+    // with a DO NOT SAVE reason for ReportStateToUser. It catches the registry
+    // that was lost together with its backups, which the load cannot tell from
+    // a first run (review 2026-09-23 C7). Returns how many were reserved. Main
+    // thread.
+    int AuditSaveAbilities(const std::vector<RE::Actor*>& a_actors);
+
     // Pool accounting, for the UI and the log (design 5.2).
     struct Usage
     {
@@ -76,6 +85,13 @@ namespace CostumeFW::abilities
         int total{ 0 };
     };
     [[nodiscard]] Usage PoolUsage();
+
+    // The plugin that would ADD capacity: the generation after the highest
+    // installed one. Named rather than described because the spelling is not
+    // guessable - generation 1 is CostumeFW_Abilities.esp with NO number, so
+    // "the next one" invites CostumeFW_Abilities1.esp, which is the one
+    // spelling that is explicitly not valid (see TokenIdentity.h).
+    [[nodiscard]] std::string NextPoolPluginName();
 
     // One effect a content contributes: either a LIVE source Effect (full
     // fidelity - magnitude, area, duration and the conditions that gate it) or

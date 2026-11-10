@@ -118,9 +118,10 @@ namespace CostumeFW
         // a_line = "cef <sub> <rest...>". Drop the "cef" token.
         const std::string afterPrefix = Trim(a_line.substr(3));
         if (afterPrefix.empty()) {
-            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
+                  "repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av | abilities");
+                  "slottest | headertest | invisdiag | av | abilities");
             return;
         }
 
@@ -203,6 +204,16 @@ namespace CostumeFW
             });
         } else if (sub == "list") {
             SKSE::GetTaskInterface()->AddTask([] { ListActive(); });
+        } else if (sub == "tokens") {
+            // The one view of the token pools. Everything else reports what CEF
+            // DID; this reports what it had to work with, which is the question
+            // when a box did not appear or a name looks wrong.
+            SKSE::GetTaskInterface()->AddTask([] {
+                for (const auto& line : TokenDiagLines()) {
+                    Print(line.c_str());
+                    SKSE::log::info("tokens: {}", line);
+                }
+            });
         } else if (sub == "store") {
             // The hidden store is a disabled container - there is no in-game way
             // to open it, so this is the only view of what CEF is holding.
@@ -314,6 +325,20 @@ namespace CostumeFW
                 return;
             }
             SKSE::GetTaskInterface()->AddTask([id, on] {
+                // Typo guard, the same class as the one on hideshape below and
+                // found the same way (test run 2026-09-20). Turning a rule OFF
+                // deliberately has no holder check - a stale entry on a box that
+                // is gone has to stay clearable - so "off" on a string that names
+                // nothing erased nothing, wrote the settings file anyway, and
+                // answered "body morph off for <id> (re-injected)". A mistyped
+                // plugin name is the likely way to get here, and the one thing
+                // the reply must not do is look like it worked.
+                if (ResolveFormId(id) == 0) {
+                    SKSE::log::warn("morph: '{}' does not resolve to a form - ignoring", id);
+                    ConsolePrint("[CEF] no such item: " + id +
+                                 " - check the FormID and the plugin name");
+                    return;
+                }
                 // Report the refusal (a published costume's look is frozen, an
                 // unheld id has nowhere to store the setting) - re-injecting and
                 // printing success either way said the opposite of the truth.
@@ -421,15 +446,17 @@ namespace CostumeFW
                                 : "[CEF] hair PoC FAILED (see log)");
                 }
             });
-        } else if (sub == "arraytest" || sub == "nodediag" || sub == "slottest") {
+        } else if (sub == "arraytest" || sub == "nodediag" || sub == "slottest" ||
+                   sub == "headertest") {
             // persist-CTD harness (BUGREPORT_2026-07-27 / uint16-pattern
             // 2026-07-30). All run on the task pump and print to console AND
             // log, so a tester can paste either.
             const std::string which = sub;
             SKSE::GetTaskInterface()->AddTask([which] {
-                const auto lines = which == "arraytest" ? ChildArrayProbe()
-                                 : which == "slottest"  ? SlotCorruptionProbe()
-                                                        : ChildArrayScan();
+                const auto lines = which == "arraytest"  ? ChildArrayProbe()
+                                 : which == "slottest"   ? SlotCorruptionProbe()
+                                 : which == "headertest" ? HeaderGuardProbe()
+                                                         : ChildArrayScan();
                 SKSE::log::info("--- cef {} ---", which);
                 for (const auto& l : lines) {
                     SKSE::log::info("  {}", l);
@@ -454,6 +481,18 @@ namespace CostumeFW
                         ConsolePrint(line.c_str());
                     }
                 }
+                return;
+            }
+            // By the number `list` prints, with no NPC selected - it exists for
+            // the assignment whose NPC cannot be selected any more (W19).
+            if (op == "forget") {
+                int slot = -1;
+                try { slot = std::stoi(split == std::string::npos ? "" : rest.substr(split + 1)) - 1; }
+                catch (...) { Print("[CEF] usage: cef npcpersist forget <1-8>"); return; }
+                SKSE::GetTaskInterface()->AddTask([slot] {
+                    Print(ForgetNprAssignment(slot) ? "[CEF] NPC persist assignment removed" :
+                                                      "[CEF] no NPC persist assignment on that slot");
+                });
                 return;
             }
             // The engine hands the console-selected reference straight into
@@ -529,11 +568,16 @@ namespace CostumeFW
                 const auto op = Lower(split == std::string::npos ? rest : rest.substr(0, split));
                 int slot = -1;
                 try { slot = std::stoi(split == std::string::npos ? "" : rest.substr(split + 1)) - 1; }
-                catch (...) { Print("[CEF] usage: cef pub refresh|recall <1-8>"); return; }
+                catch (...) { Print("[CEF] usage: cef pub refresh|recall|forget <1-8>"); return; }
                 if (op == "refresh")
                     SKSE::GetTaskInterface()->AddTask([slot] { RefreshPubWearers(slot); });
                 else if (op == "recall")
                     SKSE::GetTaskInterface()->AddTask([slot] { RecallPublished(slot); });
+                else if (op == "forget")  // W19: bindings no recall can settle
+                    SKSE::GetTaskInterface()->AddTask([slot] {
+                        Print(std::format("[CEF] pub {}: forgot {} binding(s) that cannot be reached",
+                            slot + 1, ForgetUnreachablePub(slot)).c_str());
+                    });
             }
         } else if (sub == "invisdiag") {
             // Invisibility-propagation groundwork: run once per stage
@@ -571,15 +615,25 @@ namespace CostumeFW
             // Read-only. Acts on the console's selected reference when it is an
             // actor - so an NPC's stranded modifiers are reachable by clicking
             // them - and on the player otherwise.
-            auto* targetActor = a_target ? a_target->As<RE::Actor>() : nullptr;
-            SKSE::GetTaskInterface()->AddTask(
-                [targetActor, rest] { AvReport(targetActor, rest); });
+            // A handle, resolved in the task (review 2026-09-23 M5): the raw
+            // pointer this captured could name an actor that unloaded before
+            // the task ran - a frame is enough when the console closes.
+            const auto handle = a_target ? a_target->GetHandle() : RE::ObjectRefHandle{};
+            SKSE::GetTaskInterface()->AddTask([handle, rest] {
+                auto ref = handle.get();
+                AvReport(ref ? ref.get()->As<RE::Actor>() : nullptr, rest);
+            });
         } else if (sub == "abilities") {
-            SKSE::GetTaskInterface()->AddTask([a_target, rest] { abilities::AbilitiesCommand(a_target, rest); });
+            const auto handle = a_target ? a_target->GetHandle() : RE::ObjectRefHandle{};
+            SKSE::GetTaskInterface()->AddTask([handle, rest] {
+                auto ref = handle.get();  // M5: see "av" above
+                abilities::AbilitiesCommand(ref.get(), rest);
+            });
         } else {
-            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | repair | persist | "
+            Print("[CEF] inject | box | pub | npcpersist | detach | clear | list | store | tokens | "
+                  "repair | persist | "
                   "morph | shapes | hideshape | recover | headdiag | hair | nodediag | arraytest | "
-                  "slottest | invisdiag | av | abilities");
+                  "slottest | headertest | invisdiag | av | abilities");
         }
     }
 }

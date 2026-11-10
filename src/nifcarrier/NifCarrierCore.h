@@ -1,6 +1,8 @@
 #pragma once
 
-// nifcarrier_core - in-proc port of tools/nifcarrier (NIFCARRIER_INPROC.md).
+// nifcarrier_core - the carrier builder (NIFCARRIER_INPROC.md). Began as an
+// in-proc port of a C# tool that was deleted in v1.6.4; this is the only
+// implementation now.
 // Engine-free by design: std + nifly only, no CommonLibSSE/RE types. The same
 // static library links into the CEF DLL and into nifcarrier_cli.exe so the
 // T0-T3 offline checks keep running outside the game (I-7).
@@ -144,12 +146,23 @@ namespace nifcarrier {
         int skipped = 0;
         int failed = 0;
         std::string log;
+        // Nonzero when the build died on a hardware fault (access violation,
+        // zero divide, stack overflow) and was contained - the Windows
+        // exception code, for the log (review 2026-09-23 C15).
+        unsigned long crashCode = 0;
     };
 
     // Full manifest-driven rebuild: per box (0/1/2+ SMP contents), hash skip,
     // revision slots, carriers.json, then the persist pipeline. C# Sync port
     // minus the --mo2/modlist layer (in-game the VFS resolves "Data\..."; the
     // CLI host passes explicit data roots).
+    //
+    // Every box artifact is named after the box's manifest "carrierKey", not its
+    // biped slot: from v1.6.4 several boxes share a slot, and slot-keyed names
+    // had them overwrite each other. A manifest without the field is pre-1.6.4
+    // and its boxes are generation 0, whose key is "Box<slot>" - the name those
+    // manifests already produced. carriers.json entries still keyed by the bare
+    // slot are migrated to it on read.
     SyncResult Sync(const SyncOptions& opts);
 
 }  // namespace nifcarrier

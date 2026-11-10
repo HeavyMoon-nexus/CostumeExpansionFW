@@ -56,10 +56,12 @@ Form Function GetBoxTokenForm(Int index) Global Native
 ; Create the box for token (with label) if absent, then append content if given.
 Bool Function AddBox(String label, String token, String content) Global Native
 
-; Remove one content from a box, or the whole box, or relabel it. returnStored
-; (border audit ROOT A): the MCM passes false - it returns the captured item
-; itself (its store-only-vs-fabricate custody). Another mod calling this native
-; directly passes true so the item is handed back, not stranded in the store.
+; Remove one content from a box, or the whole box, or relabel it. False - and
+; nothing changed - when the settings could not be saved. returnStored (border
+; audit ROOT A): true hands the captured items back once the removal is saved.
+; The MCM deletes a box with true, and removes one content with false followed
+; by ReturnItem (for its notice); either way the item comes back only after the
+; definition is gone (1.6.4.1).
 Bool Function RemoveBoxContent(String token, String content, Bool returnStored = false) Global Native
 Bool Function RemoveBox(String token, Bool returnStored = false) Global Native
 Bool Function SetBoxLabel(String token, String label) Global Native
@@ -81,8 +83,8 @@ String[] Function GetInventoryItemIds(String filter = "") Global Native
 ; this BEFORE moving the physical item.
 Bool Function CanResolveContent(String content) Global Native
 
-; Create a new empty box auto-assigning the next free pool token. False if the
-; shipped token pool (Costume Box 1..N) is exhausted.
+; Create a new empty box auto-assigning the next free pool token. False if every
+; token in every loaded pool generation is already taken.
 Bool Function NewBox(String label) Global Native
 
 ; In-game item name for a colon-form id (falls back to the id).
@@ -108,7 +110,12 @@ Bool Function SetBoxAbility(String token, String ability) Global Native
 String Function GetBoxStats(Int index) Global Native
 
 ; --- Slot-token model (per-slot boxes + distribute toggle) -------------------
-; Each box is bound to a fixed biped slot (44-60) via its "Costume Box <N>" token.
+; Each box holds one token ARMO, and that token sits on one biped slot. The 27
+; shipped tokens cover slots 30-38, 40, 42-49 and 52-60; CostumeFW_BoxPool1.esp
+; adds three more on each of those same slots, so from 1.6.4 a slot can hold up
+; to four boxes and is NOT a name for a box. Anything that means "this box" keys
+; on the box id. A token is recognised by the CFW_BoxTokenMarker keyword, never
+; by its display name (the name is overwritten with the box's label).
 
 ; Free (unused) slot-token colon-ids, slot-sorted - the "new box" slot picker.
 String[] Function GetFreeTokenIds() Global Native
@@ -118,13 +125,64 @@ Int Function GetTokenSlot(String token) Global Native
 
 ; The box index on biped slot `slot`, or -1 if none. Lets the per-box MCM pages
 ; (named by slot) resolve to their box even after a deletion shifts box indices.
+; Ambiguous by design since 1.6.4: -1 when the slot holds more than one box.
+; Kept for compatibility - the MCM keys on boxId from 1.6.4.1 and no longer calls
+; this; it goes when the function does.
 Int Function GetBoxBySlot(Int slot) Global Native
+
+; The box's LOGICAL id, and the way back from one. This is what "this box" means:
+; an index shifts the moment another box is deleted, and a biped slot stopped
+; being unique in 1.6.4, but a boxId is issued once and never changes - not on
+; rename, not on a contents change, not across a publish round trip.
+; GetBoxById returns -1 when there is no such box (deleted this session).
+String Function GetBoxId(Int index) Global Native
+Int Function GetBoxById(String boxId) Global Native
+
+; How many boxes sit on this biped slot. From v1.6.4 a slot can hold several
+; (CostumeFW_BoxPool1.esp adds more physical tokens per slot), and this MCM
+; keys its pages by slot - so the pages skip any slot with more than one and
+; GetBoxBySlot returns -1 for it. Operating a shared slot is SMF's job until
+; the MCM's pages move to boxId in 1.6.4.1.
+Int Function GetBoxesOnSlot(Int slot) Global Native
+
+; The NPC arm of 'prepare for uninstall': recall every published costume and
+; strip NPC persist. Queued to the main thread; returns immediately.
+Function UninstallNpcCleanup() Global Native
+
+; ALL of 'prepare for uninstall', in one call: return every captured item
+; (box contents, the whole persist catalog, published costumes) and empty the
+; hidden storage, take every box token off and out of the inventory, detach,
+; turn CEF off, and notify - saying how many items could NOT be returned rather
+; than claiming "safe to uninstall" when a costume plugin is switched off.
+; Queued to the main thread; returns immediately. SMF calls the same function.
+Function UninstallCleanup() Global Native
+
+; --- Item custody (1.6.4.1): the one implementation both UIs use --------------
+; Hand back one of aId: this save's stored original, else - with aAllowNew - a
+; new copy, except for an id a preset only listed (there is nothing to give
+; back). aNotify shows the "new copy" / "only listed" notices. True if an item
+; reached the player.
+Bool Function ReturnItem(String aId, Bool aAllowNew, Bool aNotify) Global Native
+
+; Move one of aId from the player into the hidden storage (the copy the enchant
+; snapshot was read from), record it, and rebuild the stats after the move.
+; Call CaptureContentEnchant first, while the item is still on the player.
+Bool Function CaptureToStore(String aId) Global Native
+
+; False for a quarantined box (its token is not a working box token right now).
+Bool Function IsBoxUsable(Int index) Global Native
+
+; Always True while the DLL is running. With the DLL absent (CEF_DISABLE.txt, a
+; failed load) the call returns False, which is how to tell.
+Bool Function IsDllRunning() Global Native
 
 ; Box "distribute" flag: whether the token is given to / kept on the player.
 Bool Function GetBoxEnabled(Int index) Global Native
 
 ; Set the distribute flag (off = the token is removed; escape hatch for a slot
-; that conflicts in the load order). Flag only - caller equips/removes the token.
+; that conflicts in the load order). Writes the flag now and queues the token
+; move (give one / unequip and remove all) and then the stat convergence - the
+; caller does NOT move the token itself (1.6.4.1).
 Bool Function SetBoxEnabled(String token, Bool enabled) Global Native
 
 ; Token armor class: 0=Clothing, 1=Light, 2=Heavy. Clothing gives NO armor even
@@ -252,7 +310,8 @@ Bool Function ClearPersistPreset() Global Native
 ; Snapshot the currently-WORN item's effective enchantment (base OR player/
 ; instance enchantment) for a content, so the token's/persist's synthesized
 ; ability reproduces it. Call at capture time while the item is still equipped
-; (before moving it to the store). Returns True if an enchantment was found.
+; (before moving it to the store), then CaptureToStore - which moves that same
+; copy and rebuilds the stats once. Returns True if an enchantment was found.
 Bool Function CaptureContentEnchant(String content) Global Native
 
 ; True if the content's base form has any Papyrus script attached (VMAD). CEF
