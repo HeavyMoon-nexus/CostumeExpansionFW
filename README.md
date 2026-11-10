@@ -29,7 +29,7 @@ worn gear.
 - [SKSE64](https://skse.silverlock.org/)
 - [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
 - [RaceMenu](https://www.nexusmods.com/skyrimspecialedition/mods/19080) (skee — required for body-morph follow and the SkyUI MCM SDK)
-- SkyUI (MCM) — optional, and on its way out. The MCM is still here in 1.6.4 and
+- SkyUI (MCM) — optional, and on its way out. The MCM is still here in 1.6.4.1 and
   still works; see "Which UI" below for what it no longer reaches
 - [SKSE Menu Framework](https://www.nexusmods.com/skyrimspecialedition/mods/120352)
   — the main UI
@@ -135,20 +135,28 @@ entries actually *show* is per-save, stored in the co-save.
 
 ## Turning CEF off from outside the game
 
-Both switches below are read at startup, before CEF touches anything, so you can set
-either one without launching the game. They are not interchangeable. Pick by what you
-are trying to do.
+Everything below is read at startup, before CEF touches anything, so you can set any of
+it without launching the game. The two kinds of switch are not interchangeable. Pick by
+what you are trying to do.
 
-### Stop injecting, keep the save data (`CEF_settings.json`)
+### Stop injecting, keep the save data (`CEF_NOINJECT.txt` / `CEF_settings.json`)
 
-Set `"enabled": false` in `Data\SKSE\Plugins\CEF_settings.json`. This is the same switch
-as the Main page toggle. Nothing is injected and the enchantment abilities come off, but
-the hooks, the box definitions and the co-save data all keep working, so setting it back
-to `true` gives you your costumes back exactly as they were.
+Either of these, both the same switch as the Main page toggle:
 
-One thing it does not touch: a box token you are still wearing stays worn, and it is a
-real piece of equipment, so its armor rating, weight and passthrough keywords stay in
-effect while the costume is invisible. Take the token off if you want those gone too.
+- create an empty `Data\SKSE\Plugins\CEF_NOINJECT.txt`
+- or set `"enabled": false` in `Data\SKSE\Plugins\CEF_settings.json`
+
+`CEF_NOINJECT.txt` is the one to reach for. It overrides the toggle while it exists and
+leaves the stored setting alone, so deleting it puts things back exactly as they were, and
+there is no JSON to get wrong.
+
+Nothing is injected and the enchantment abilities come off, but the hooks, the box
+definitions and the co-save data all keep working, so turning it back on gives you your
+costumes back exactly as they were.
+
+A box token you are still wearing stays worn, but since 1.6.4.1 its armor rating, weight
+and passthrough keywords come off the token while CEF is off, so an invisible costume does
+not go on protecting you. They come back when you turn CEF on again.
 
 Use this when you want to play without CEF's costumes, or when the crash you are chasing
 happens while something is worn.
@@ -162,7 +170,7 @@ happens while something is worn.
 CEF then registers no hooks, no event sinks, no serialization and no Papyrus functions,
 loads no boxes, and does no mesh injection or carrier/FSMP work. The plugin is fully
 inert, which is what lets a save that a CEF crash left unloadable open again. Use it when
-the first switch is not enough — a crash during the carrier build or the persist head
+the switches above are not enough — a crash during the carrier build or the persist head
 rebuild, for instance, happens whether or not anything is being injected.
 
 **Do not save the game while CEF is hard off.** Registering no serialization means CEF
@@ -218,10 +226,15 @@ If you want the boxes working again, capture the items into them again.
   The carrier builder is **built into the plugin** (v1.2+) — no external tool or .NET
   runtime required. (Power users: a `Data\SKSE\Plugins\CEF_sync_command.txt` hands the
   build to an external command instead — legacy compat mode.)
-  Without FSMP — or for content the carrier validator excludes (legacy `NiTriShape`
-  meshes) — such parts render **statically** on their nearest real ancestor bone instead
-  of vanishing. Full wigs belong in the slot-31 box, not in Persist (the facegen path
+  Without FSMP, such parts render **statically** on their nearest real ancestor bone
+  instead of vanishing. Full wigs belong in the slot-31 box, not in Persist (the facegen path
   rebuilds their physics repeatedly at load and the retained allocations balloon memory).
+- **A costume whose meshes are in Skyrim LE format is not shown (1.6.4.1).** The SSE
+  engine can crash loading that geometry, so CEF refuses it when you add it, naming the
+  mod it came from, and one you already had stays in its box but is not injected.
+  Diagnostics lists them. Run SSE NIF Optimizer over that mod and the costume comes back.
+  Head parts are not affected: SSE uses that geometry for faces on purpose, and only a file
+  that is LE *format* counts.
 - Content must be weighted to bones present on your live skeleton (standard XPMSSE). Content
   built for a different/extended skeleton may show parts statically (logged as a remap).
 - **Published costumes and NPC-persist items use the PLAYER's race for their carrier.**
