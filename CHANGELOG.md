@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.6.4.1 (unreleased)
+## v1.6.4.1 (2026-11-10)
 
 **A costume whose meshes are in Skyrim LE format is no longer shown.** CEF's
 physics carrier has refused that geometry since July - the SSE engine divides by
@@ -277,6 +277,8 @@ line and the dump under it are what I need to track it down.
   Boxes page says the SMF menu is faster.
 
 ## v1.6.4 (2026-09-18)
+
+Never released on its own. Everything in this section shipped as part of 1.6.4.1.
 
 A biped slot used to mean one box. There were 27 of them, one per slot, and if
 you wanted two different skirts set up at once you could not have them - slot 52
